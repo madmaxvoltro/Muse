@@ -70,6 +70,19 @@ services:
     depends_on: [ingestion-api]
     networks: [muse-net]
 
+  jellyfin-adapter:
+    build:
+      context: .
+      dockerfile: adapters/jellyfin/Dockerfile
+    restart: unless-stopped
+    environment:
+      JELLYFIN_URL: ${JELLYFIN_URL}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY}
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY: ${MUSE_JELLYFIN_ADAPTER_KEY}
+    depends_on: [ingestion-api]
+    networks: [muse-net]
+
 networks:
   muse-net:
     internal: false  # adapters need outbound access to their upstream services; still no published ports

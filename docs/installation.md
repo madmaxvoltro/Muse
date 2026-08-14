@@ -65,8 +65,9 @@ by default (services talk to each other by container name, not published ports).
 
 Each adapter has its own setup tutorial, since each upstream service is wired in differently:
 
-- [SearxNG](adapters/searxng.md) — implemented, reference adapter
-- [Jellyfin](adapters/jellyfin.md) — not yet implemented
+- [SearxNG](adapters/searxng.md) — implemented, reference adapter (proxy-style)
+- [Jellyfin](adapters/jellyfin.md) — implemented (poll-style); start with this one, it backfills
+  your existing library so recommendations have something to work with from day one
 - [Open WebUI](adapters/openwebui.md) — not yet implemented
 - [Navidrome](adapters/navidrome.md) — not yet implemented
 - [Audiobookshelf](adapters/audiobookshelf.md) — not yet implemented

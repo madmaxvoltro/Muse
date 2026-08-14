@@ -41,6 +41,8 @@ class Action(str, Enum):
     SEARCHED = "searched"
     ADDED_WATCHLIST = "added_watchlist"
     REMOVED = "removed"
+    CATALOGED = "cataloged"  # item exists in a library, no user signal attached — for backfilling
+    # content embeddings from a library the adapter didn't watch the user acquire (see jellyfin adapter).
 
 
 # Default action_weight per action — adapters may override, but this keeps
@@ -55,6 +57,9 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.SEARCHED: 0.2,
     Action.ADDED_WATCHLIST: 0.4,
     Action.REMOVED: -0.3,
+    Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
+    # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
+    # still lets the item get a content embedding so it's a valid recommendation candidate.
 }
 
 
