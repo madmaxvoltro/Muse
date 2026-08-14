@@ -12,6 +12,7 @@ from qdrant_client import QdrantClient
 from .candidates import generate_candidates
 from .db import close_pool, get_pool
 from .scoring import score_candidate, rerank
+from . import soon_gone as soon_gone_repo
 
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 ITEM_TYPES = ["movie", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
@@ -70,3 +71,22 @@ async def recommendations(
             for c in final
         ],
     }
+
+
+@app.get("/soon-gone")
+async def soon_gone_list() -> dict:
+    """Backs the Jellyfin plugin's "Soon Gone" homepage row."""
+    pool = await get_pool()
+    items = await soon_gone_repo.list_pending(pool)
+    return {"items": items}
+
+
+@app.post("/soon-gone/{source_item_id}/whitelist")
+async def soon_gone_whitelist(source_item_id: str, user_id: str = Query(...)) -> dict:
+    """Called by the Jellyfin plugin's playback-start hook — opening a "Soon Gone" item
+    saves it permanently (see docs/architecture.md). Idempotent: whitelisting an item
+    that isn't pending (already saved, expired, or never marked) is a no-op.
+    """
+    pool = await get_pool()
+    whitelisted = await soon_gone_repo.whitelist(pool, source_item_id, user_id)
+    return {"source_item_id": source_item_id, "whitelisted": whitelisted}

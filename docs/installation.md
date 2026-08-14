@@ -79,9 +79,12 @@ easier to spot a misconfigured upstream URL or bad API key than debugging all of
 
 ## 5. Jellyfin plugin
 
-Not yet implemented — see `jellyfin-plugin/README.md`. Once built, install like any other
-Jellyfin plugin (drop the compiled `.dll` into Jellyfin's plugin directory, or add the Muse
-plugin repository URL in Jellyfin's admin dashboard under Plugins → Repositories).
+Written but not yet compiled/tested against a real Jellyfin instance — see
+`jellyfin-plugin/README.md` for what needs verifying first (the `IHomeScreenSection` API in
+particular). Once built (`dotnet build -c Release` from `jellyfin-plugin/`), install like any
+other Jellyfin plugin: drop the compiled `.dll` into Jellyfin's plugin directory, or host
+`build.yaml` + the artifact as a plugin repository and add that URL under Dashboard →
+Plugins → Repositories.
 
 ## 6. Verify end-to-end
 

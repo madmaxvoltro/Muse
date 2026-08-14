@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Muse</title>
+</head>
+<body>
+<div id="MusePluginConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <form id="MuseConfigForm">
+                <div class="verticalSection">
+                    <h2>Muse</h2>
+                    <p>Connects Jellyfin's homepage to your self-hosted Muse recommendation engine.
+                       See docs/architecture.md in the Muse repo for what these rows do.</p>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="RecommendationApiUrl">Recommendation API URL</label>
+                    <input id="RecommendationApiUrl" name="RecommendationApiUrl" type="text" is="emby-input" />
+                    <div class="fieldDescription">e.g. http://recommendation-api:8001 — must be reachable from this Jellyfin server.</div>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="RowItemLimit">Items per row</label>
+                    <input id="RowItemLimit" name="RowItemLimit" type="number" is="emby-input" min="5" max="50" />
+                </div>
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <script type="text/javascript">
+        var MusePluginId = "b7e3a6b0-5b8a-4b2a-9e3d-6f1b1b4a2f2a";
+
+        document.querySelector('#MusePluginConfigPage')
+            .addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(MusePluginId).then(function (config) {
+                    document.querySelector('#RecommendationApiUrl').value = config.RecommendationApiUrl;
+                    document.querySelector('#RowItemLimit').value = config.RowItemLimit;
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+        document.querySelector('#MuseConfigForm')
+            .addEventListener('submit', function (e) {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(MusePluginId).then(function (config) {
+                    config.RecommendationApiUrl = document.querySelector('#RecommendationApiUrl').value;
+                    config.RowItemLimit = parseInt(document.querySelector('#RowItemLimit').value, 10);
+                    ApiClient.updatePluginConfiguration(MusePluginId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+                e.preventDefault();
+                return false;
+            });
+    </script>
+</div>
+</body>
+</html>

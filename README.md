@@ -31,11 +31,15 @@ Full design rationale: [`docs/architecture.md`](docs/architecture.md).
 
 ## Status
 
-Early scaffolding — event schema, ingestion API, and the SearxNG adapter (reference
-implementation) are functional. Everything else (embedding worker, recommendation funnel,
-curator, Jellyfin plugin, remaining adapters) is stubbed out with the design decided but not yet
-implemented. See `docs/architecture.md` for what's designed, and the `README.md` in each
-`services/*` and `adapters/*` directory for per-component status.
+Core pipeline implemented and unit-tested: event schema, ingestion API, embedding worker,
+recommendation API (full 3-stage funnel), curator (300GB budget + Soon Gone), and the
+SearxNG/Jellyfin/arr adapters. A local `docker compose build` succeeded for the Python
+services; a full `up` wasn't completed in the dev sandbox (Docker Hub rate-limited image
+pulls there) — verify on your actual host. The Jellyfin plugin (C#/.NET) is written but not
+yet compiled/tested against a real Jellyfin instance. Still not started: Open WebUI,
+Navidrome, and Audiobookshelf adapters. See `docs/architecture.md` for the full design, and
+the `README.md` in each `services/*`/`adapters/*`/`jellyfin-plugin/` directory for
+per-component status and known gaps.
 
 ## Repo layout
 

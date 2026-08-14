@@ -1,0 +1,15 @@
+name: "Muse"
+guid: "b7e3a6b0-5b8a-4b2a-9e3d-6f1b1b4a2f2a"
+version: "0.1.0.0"
+targetAbi: "10.9.0.0"
+framework: "net8.0"
+overview: "Cross-domain recommendations from your self-hosted Muse taste-profile system."
+description: >
+  Adds Muse's Recommended for You, Continue Based on Taste, and Soon Gone rows to the
+  Jellyfin homepage, and reports playback-start events back to Muse so watching a
+  "Soon Gone" item saves it from auto-removal.
+category: "General"
+owner: "madmaxvoltro"
+artifacts:
+  - "Muse.JellyfinPlugin.dll"
+changelog: "Initial scaffold — see jellyfin-plugin/README.md for build/verification status."
