@@ -71,7 +71,8 @@ Each adapter has its own setup tutorial, since each upstream service is wired in
 - [Open WebUI](adapters/openwebui.md) — not yet implemented
 - [Navidrome](adapters/navidrome.md) — not yet implemented
 - [Audiobookshelf](adapters/audiobookshelf.md) — not yet implemented
-- [arr-stack](adapters/arr.md) — not yet implemented
+- [arr-stack](adapters/arr.md) — not yet implemented (needed by the curator's `arr_client.py`
+  to actually add/remove content — see `services/curator/README.md` for what's stubbed)
 
 Bring adapters online one at a time and check `docker compose logs -f <adapter>` after each —
 easier to spot a misconfigured upstream URL or bad API key than debugging all of them at once.
