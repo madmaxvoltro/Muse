@@ -87,7 +87,7 @@ async def is_protected(pool: asyncpg.Pool, source: str, source_item_id: str) -> 
     return row is not None
 
 
-async def record_download(pool: asyncpg.Pool, user_id: str, source_item_id: str, item_type: str, estimated_bytes: int) -> None:
+async def record_download(pool: asyncpg.Pool, user_id: str, source_item_id: str, item_type: str, estimated_bytes: int, arr_id: str) -> None:
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -97,13 +97,14 @@ async def record_download(pool: asyncpg.Pool, user_id: str, source_item_id: str,
             )
             await conn.execute(
                 """
-                INSERT INTO curator_managed_item (source, source_item_id, item_type, estimated_bytes)
-                VALUES ('arr', $1, $2, $3)
+                INSERT INTO curator_managed_item (source, source_item_id, item_type, estimated_bytes, arr_id)
+                VALUES ('arr', $1, $2, $3, $4)
                 ON CONFLICT (source, source_item_id) DO NOTHING
                 """,
                 source_item_id,
                 item_type,
                 estimated_bytes,
+                arr_id,
             )
 
 
@@ -115,10 +116,15 @@ async def mark_soon_gone(pool: asyncpg.Pool, source_item_id: str, item_type: str
         )
         if existing:
             return  # already pending, don't restart the countdown
+        arr_id = await conn.fetchval(
+            "SELECT arr_id FROM curator_managed_item WHERE source_item_id = $1 AND removed_at IS NULL",
+            source_item_id,
+        )
         await conn.execute(
-            "INSERT INTO soon_gone (source_item_id, item_type, expires_at) VALUES ($1, $2, now() + interval '48 hours')",
+            "INSERT INTO soon_gone (source_item_id, item_type, arr_id, expires_at) VALUES ($1, $2, $3, now() + interval '48 hours')",
             source_item_id,
             item_type,
+            arr_id,
         )
     logger.info("marked soon-gone: %s (%s), %dh grace", source_item_id, item_type, SOON_GONE_GRACE_HOURS)
 
@@ -126,7 +132,7 @@ async def mark_soon_gone(pool: asyncpg.Pool, source_item_id: str, item_type: str
 async def get_expired_soon_gone(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, source_item_id, item_type FROM soon_gone WHERE expires_at < now() AND whitelisted = FALSE AND removed = FALSE"
+            "SELECT id, source_item_id, item_type, arr_id FROM soon_gone WHERE expires_at < now() AND whitelisted = FALSE AND removed = FALSE"
         )
     return [dict(r) for r in rows]
 

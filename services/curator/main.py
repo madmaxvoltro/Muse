@@ -56,19 +56,17 @@ ITEM_TYPES = ["movie", "series_episode"]
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 TRAKT_CLIENT_ID = os.environ.get("TRAKT_CLIENT_ID")
 
-ARR_CONFIG = ArrConfig(
-    radarr_url=os.environ.get("RADARR_URL", ""),
-    radarr_api_key=os.environ.get("RADARR_API_KEY", ""),
-    sonarr_url=os.environ.get("SONARR_URL", ""),
-    sonarr_api_key=os.environ.get("SONARR_API_KEY", ""),
-)
+ARR_CONFIG = ArrConfig.from_env()
 
 
 async def run_soon_gone_expiry(pool: asyncpg.Pool, arr_client: httpx.AsyncClient) -> None:
     expired = await get_expired_soon_gone(pool)
     for row in expired:
-        logger.info("soon-gone grace expired, removing %s", row["source_item_id"])
-        await remove_item(arr_client, ARR_CONFIG, row["item_type"], row["source_item_id"])
+        if not row["arr_id"]:
+            logger.warning("soon-gone item %s has no arr_id on record, skipping removal", row["source_item_id"])
+            continue
+        logger.info("soon-gone grace expired, removing %s (arr_id=%s)", row["source_item_id"], row["arr_id"])
+        await remove_item(arr_client, ARR_CONFIG, row["item_type"], row["arr_id"])
         await finalize_removal(pool, str(row["id"]), row["source_item_id"])
 
 
@@ -116,8 +114,12 @@ async def run_add_cycle(
                     continue
 
                 logger.info("adding %s '%s' (score=%.3f, driven by user=%s)", item_type, c.title, score, driving_user)
-                await add_wanted(ext_client, ARR_CONFIG, item_type, c.source_item_id)
-                await record_download(pool, driving_user, c.source_item_id, item_type, estimated_bytes)
+                try:
+                    arr_id = await add_wanted(ext_client, ARR_CONFIG, item_type, c.source_item_id)
+                except httpx.HTTPError:
+                    logger.exception("failed to add %s '%s' via arr, skipping", item_type, c.title)
+                    continue
+                await record_download(pool, driving_user, c.source_item_id, item_type, estimated_bytes, arr_id)
                 headroom -= estimated_bytes
                 if headroom <= 0:
                     break

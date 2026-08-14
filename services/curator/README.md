@@ -1,8 +1,8 @@
 # Curator
 
-Status: implemented, with real Radarr/Sonarr wiring stubbed out (see `arr_client.py` — the
-add/remove payloads need a real Radarr/Sonarr instance to test the lookup-then-add flow
-against, not yet available).
+Status: implemented, including real Radarr/Sonarr add/remove payloads in `arr_client.py`
+(lookup-by-tmdb/tvdb-id -> merge quality profile + root folder -> add; delete-by-arr-id ->
+remove). Untested against a live Radarr/Sonarr instance — see Known v1 gaps.
 
 Autonomous storage-budget manager. See `docs/architecture.md` (Discovery/acquisition
 pipeline) for the full design; this directory implements it:
@@ -20,10 +20,9 @@ pipeline) for the full design; this directory implements it:
 
 ## Known v1 gaps
 
-- `arr_client.py`'s `add_wanted`/`remove_item` log what they'd do but don't yet send the real
-  Radarr/Sonarr payload — that needs a lookup call (by tmdbId/tvdbId) plus a configured
-  quality profile and root folder, which vary per install. Wire this up against a real
-  Radarr/Sonarr instance.
+- `arr_client.py` is implemented but untested against a live Radarr/Sonarr instance — the
+  exact response shape from the lookup/add endpoints should be verified against a real
+  install before relying on this in production. See `docs/adapters/arr.md`.
 - Item byte sizes are estimated (`discovery.ESTIMATED_BYTES`), not queried from the arr-stack
   post-download — good enough for budget math, not exact.
 - The Jellyfin plugin's playback-start whitelist hook (which pulls a "Soon Gone" item out of
