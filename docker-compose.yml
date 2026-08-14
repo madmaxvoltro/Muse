@@ -1,0 +1,68 @@
+version: "3.9"
+
+# All services are attached only to the internal `muse-net` network, no ports published
+# to the host except via Tailscale/reverse-proxy — see docs/installation.md for the
+# network isolation this assumes (dedicated VLAN segment).
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: muse
+      POSTGRES_USER: muse
+      POSTGRES_PASSWORD: ${MUSE_POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    networks: [muse-net]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks: [muse-net]
+
+  ingestion-api:
+    build:
+      context: .
+      dockerfile: services/ingestion-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_ADAPTER_KEYS: ${MUSE_ADAPTER_KEYS}
+    depends_on: [postgres]
+    networks: [muse-net]
+
+  recommendation-api:
+    build:
+      context: .
+      dockerfile: services/recommendation-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_QDRANT_URL: http://qdrant:6333
+    depends_on: [postgres, qdrant]
+    networks: [muse-net]
+
+  searxng-adapter:
+    build:
+      context: .
+      dockerfile: adapters/searxng/Dockerfile
+    restart: unless-stopped
+    environment:
+      SEARXNG_UPSTREAM_URL: ${SEARXNG_UPSTREAM_URL}
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY: ${MUSE_SEARXNG_ADAPTER_KEY}
+      MUSE_DEFAULT_USER_ID: ${MUSE_DEFAULT_USER_ID}
+    depends_on: [ingestion-api]
+    networks: [muse-net]
+
+networks:
+  muse-net:
+    internal: false  # adapters need outbound access to their upstream services; still no published ports
+
+volumes:
+  postgres_data:
+  qdrant_data:
