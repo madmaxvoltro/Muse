@@ -1,13 +1,35 @@
-"""Recommendation API — stub.
-
-Will implement the 3-stage funnel (candidate generation -> ranking -> re-ranking)
-described in docs/architecture.md. For now, just scaffolding + health check so the
-service wires into docker-compose and the Jellyfin plugin has something to point at.
+"""Recommendation API — implements the 3-stage funnel from docs/architecture.md:
+candidate generation (candidates.py) -> ranking (scoring.score_candidate) ->
+re-ranking (scoring.rerank). Explainability comes for free: `reasons` on every
+scored candidate is exactly which weighted factors produced its score.
 """
 
-from fastapi import FastAPI
+import os
+
+from fastapi import FastAPI, HTTPException, Query
+from qdrant_client import QdrantClient
+
+from .candidates import generate_candidates
+from .db import close_pool, get_pool
+from .scoring import score_candidate, rerank
+
+QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
+ITEM_TYPES = ["movie", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
 
 app = FastAPI(title="Muse Recommendation API", version="0.1.0")
+_qdrant: QdrantClient | None = None
+
+
+def qdrant() -> QdrantClient:
+    global _qdrant
+    if _qdrant is None:
+        _qdrant = QdrantClient(url=QDRANT_URL)
+    return _qdrant
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await close_pool()
 
 
 @app.get("/healthz")
@@ -16,8 +38,35 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/recommendations/{user_id}")
-async def recommendations(user_id: str) -> dict:
-    # TODO: stage 1 candidate generation (Qdrant similarity + co-occurrence + backlog + trending)
-    # TODO: stage 2 ranking (weighted scoring function incl. confidence)
-    # TODO: stage 3 re-ranking (diversity cap, explore-dial, user overlay, confidence placement)
-    return {"user_id": user_id, "recommendations": []}
+async def recommendations(
+    user_id: str,
+    item_type: str = Query(..., description=f"one of {ITEM_TYPES}"),
+    limit: int = Query(20, ge=1, le=100),
+    explore_ratio: float | None = Query(None, ge=0.0, le=1.0, description="overrides the default explore-slot ratio"),
+) -> dict:
+    if item_type not in ITEM_TYPES:
+        raise HTTPException(status_code=400, detail=f"item_type must be one of {ITEM_TYPES}")
+
+    pool = await get_pool()
+    candidates = await generate_candidates(pool, qdrant(), user_id, item_type)
+    if not candidates:
+        return {"user_id": user_id, "item_type": item_type, "recommendations": [], "note": "cold-start: no taste vector yet"}
+
+    scored = [score_candidate(c) for c in candidates]
+    kwargs = {"explore_ratio": explore_ratio} if explore_ratio is not None else {}
+    final = rerank(scored, limit=limit, **kwargs)
+
+    return {
+        "user_id": user_id,
+        "item_type": item_type,
+        "recommendations": [
+            {
+                "source": c.source,
+                "source_item_id": c.source_item_id,
+                "score": round(c.score, 4),
+                "confidence": round(c.confidence, 4),
+                "explanation": {k: round(v, 4) for k, v in c.reasons.items()},
+            }
+            for c in final
+        ],
+    }

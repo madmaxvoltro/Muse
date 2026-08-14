@@ -46,6 +46,17 @@ services:
     depends_on: [postgres, qdrant]
     networks: [muse-net]
 
+  embedding-worker:
+    build:
+      context: .
+      dockerfile: services/embedding-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_QDRANT_URL: http://qdrant:6333
+    depends_on: [postgres, qdrant]
+    networks: [muse-net]
+
   searxng-adapter:
     build:
       context: .
