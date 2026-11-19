@@ -24,7 +24,7 @@ PROTECT_PROGRESS_MAX = 90.0
 async def get_active_users(pool: asyncpg.Pool, window_days: int = 30) -> list[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT DISTINCT user_id FROM event WHERE "timestamp" > now() - ($1 || ' days')::interval""",
+            """SELECT DISTINCT user_id FROM event WHERE "timestamp" > now() - make_interval(days => $1::int)""",
             window_days,
         )
     return [str(r["user_id"]) for r in rows]
@@ -36,7 +36,7 @@ async def get_dynamic_daily_cap(pool: asyncpg.Pool, user_id: str) -> int:
     """
     async with pool.acquire() as conn:
         count = await conn.fetchval(
-            """SELECT count(*) FROM event WHERE user_id = $1 AND "timestamp" > now() - ($2 || ' days')::interval""",
+            """SELECT count(*) FROM event WHERE user_id = $1 AND "timestamp" > now() - make_interval(days => $2::int)""",
             uuid.UUID(user_id),
             ACTIVITY_WINDOW_DAYS,
         )

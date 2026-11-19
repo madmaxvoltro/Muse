@@ -12,6 +12,7 @@ Design (see docs/architecture.md):
 """
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -66,9 +67,12 @@ def ensure_collections(client: QdrantClient) -> None:
 
 async def embed_new_content(
     pool: asyncpg.Pool, qdrant: QdrantClient, model: SentenceTransformer
-) -> set[str]:
-    """Embeds items from events written since the last run. Returns the set of
-    user_ids touched, so their taste vectors can be recomputed afterwards.
+) -> tuple[set[str], datetime, datetime]:
+    """Embeds items from events received since the last run. Returns the user_ids touched
+    (so their taste vectors can be recomputed) and the old and new watermark; run_once saves
+    the new one only after the taste vectors are done, so a failure retries the whole batch.
+    Progress is tracked by ingested_at, not "timestamp": imported history carries old
+    timestamps and would otherwise be skipped.
     """
     async with pool.acquire() as conn:
         state = await conn.fetchrow("SELECT last_processed_at FROM embedding_worker_state")
@@ -79,19 +83,20 @@ async def embed_new_content(
             SELECT DISTINCT ON (source, source_item_id)
                 source, source_item_id, item_type, metadata, user_id, "timestamp"
             FROM event
-            WHERE "timestamp" > $1 AND source_item_id IS NOT NULL
+            WHERE ingested_at > $1 AND source_item_id IS NOT NULL
             ORDER BY source, source_item_id, "timestamp" DESC
             """,
             since,
         )
-
-        touched_users: set[str] = set()
+        # Every user with new events, not only the one whose row DISTINCT ON kept per item.
+        users = await conn.fetch(
+            "SELECT user_id, max(ingested_at) AS last FROM event WHERE ingested_at > $1 GROUP BY user_id", since
+        )
+        touched_users: set[str] = {str(u["user_id"]) for u in users}
+        max_ts = max([since, *(u["last"] for u in users)])
         points: list[PointStruct] = []
-        max_ts = since
 
         for row in rows:
-            touched_users.add(str(row["user_id"]))
-            max_ts = max(max_ts, row["timestamp"])
 
             text = item_text(dict(row["metadata"]) if row["metadata"] else {})
             if not text:
@@ -116,12 +121,7 @@ async def embed_new_content(
             qdrant.upsert(collection_name=CONTENT_COLLECTION, points=points)
             logger.info("upserted %d content embeddings", len(points))
 
-        if max_ts > since:
-            await conn.execute(
-                "UPDATE embedding_worker_state SET last_processed_at = $1", max_ts
-            )
-
-        return touched_users
+        return touched_users, since, max_ts
 
 
 def decay_weight(event_ts: datetime, now: datetime) -> float:
@@ -144,7 +144,7 @@ async def recompute_taste_vectors(
                 FROM event
                 WHERE user_id = $1
                   AND source_item_id IS NOT NULL
-                  AND "timestamp" > now() - ($2 || ' days')::interval
+                  AND "timestamp" > now() - make_interval(days => $2::int)
                 """,
                 uuid.UUID(user_id),
                 TASTE_LOOKBACK_DAYS,
@@ -194,9 +194,17 @@ async def recompute_taste_vectors(
 
 
 async def run_once(pool: asyncpg.Pool, qdrant: QdrantClient, model: SentenceTransformer) -> None:
-    touched_users = await embed_new_content(pool, qdrant, model)
+    touched_users, since, max_ts = await embed_new_content(pool, qdrant, model)
     await recompute_taste_vectors(pool, qdrant, touched_users)
+    if max_ts > since:
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE embedding_worker_state SET last_processed_at = $1", max_ts)
 
+
+async def _json_codecs(conn: asyncpg.Connection) -> None:
+    # asyncpg returns json/jsonb as text by default; event.metadata is read as a dict.
+    for typ in ("json", "jsonb"):
+        await conn.set_type_codec(typ, encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 async def main() -> None:
     logger.info("loading embedding model %s", MODEL_NAME)
@@ -205,7 +213,7 @@ async def main() -> None:
     qdrant = QdrantClient(url=QDRANT_URL)
     ensure_collections(qdrant)
 
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5)
+    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=_json_codecs)
 
     logger.info("embedding worker started, interval=%ds", RUN_INTERVAL_SECONDS)
     while True:
