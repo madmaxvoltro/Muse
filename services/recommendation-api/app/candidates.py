@@ -22,12 +22,21 @@ CANDIDATE_POOL_SIZE = 200
 
 
 async def get_owned_item_ids(pool: asyncpg.Pool, user_id: str) -> set[str]:
-    """Items the user has already interacted with — excluded from candidates,
+    """Items the user has already watched or judged — excluded from candidates,
     they belong in "continue watching", not "recommended for you".
+
+    Only consumption and explicit judgements count. `cataloged` (the item merely
+    exists in the user's library) and weak browsing signals (detail_viewed,
+    searched, trailer_played, added_watchlist, requested) must not, or a
+    library-backed client such as Vesper would see every title it owns excluded.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT DISTINCT source, source_item_id FROM event WHERE user_id = $1 AND source_item_id IS NOT NULL",
+            """
+            SELECT DISTINCT source, source_item_id FROM event
+            WHERE user_id = $1 AND source_item_id IS NOT NULL
+              AND action IN ('played', 'completed', 'skipped', 'rejected', 'removed', 'rated', 'favorited')
+            """,
             uuid.UUID(user_id),
         )
     return {f"{r['source']}:{r['source_item_id']}" for r in rows}

@@ -20,6 +20,19 @@ INSERT INTO event (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
 """
 
+# With metadata.dedupe_key the insert is idempotent per (user, source, key): pollers can
+# re-send after a restart (or import history) without double counting.
+INSERT_DEDUPED_SQL = """
+INSERT INTO event (
+    user_id, source, source_item_id, item_type, action, action_weight,
+    "timestamp", duration_ms, progress_pct, metadata, device_context
+)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb
+WHERE NOT EXISTS (
+    SELECT 1 FROM event WHERE user_id = $1 AND source = $2 AND metadata->>'dedupe_key' = $12
+)
+"""
+
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
@@ -49,8 +62,10 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        dedupe = event.metadata.get("dedupe_key")
+        args = [] if dedupe is None else [str(dedupe)]
         await conn.execute(
-            INSERT_SQL,
+            INSERT_SQL if dedupe is None else INSERT_DEDUPED_SQL,
             event.user_id,
             event.source.value,
             event.source_item_id,
@@ -62,6 +77,7 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
             event.progress_pct,
             json.dumps(event.metadata),
             json.dumps(event.device_context) if event.device_context is not None else None,
+            *args,
         )
 
     logger.info("ingested event source=%s action=%s user=%s", source, event.action.value, event.user_id)

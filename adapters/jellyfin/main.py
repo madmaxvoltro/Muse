@@ -10,8 +10,10 @@ Two jobs on independent intervals:
    start recommending against a library that already exists, before any new
    watch history has accumulated.
 2. Watch-state sync (fast, default every 5 min): diffs each item's `UserData`
-   (Played, PlaybackPositionTicks, IsFavorite) against what was seen last poll,
-   emits `played` / `completed` / `favorited` events on change.
+   (Played, PlaybackPositionTicks, IsFavorite, Rating) against what was seen last
+   poll, emits `played` / `completed` / `favorited` / `rated` events on change. The
+   first sighting of each (user, item) imports the existing history once, with
+   `metadata.dedupe_key` so restarts don't double count.
 
 State is kept in memory only (no local DB access — adapters are write-only
 into the ingestion API by design, see docs/architecture.md Security model).
@@ -124,18 +126,33 @@ async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> None:
     logger.info("catalog sync done, %d distinct items", len(seen_items))
 
 
-def _watch_state(item: dict) -> tuple[bool, float, bool]:
+# Vesper writes its thumbs as the Jellyfin user rating: 10 love, 8 up, 1 down. Anything else on
+# the 0-10 scale is read with Jellyfin's own 6.5 like/dislike split.
+def _thumbs(rating: float | None) -> int:
+    if rating is None:
+        return 0
+    if rating >= 9.5:
+        return 2
+    if rating >= 6.5:
+        return 1
+    return -1
+
+
+RATED_WEIGHTS = {-1: -1.0, 0: 0.0, 1: 1.0, 2: 2.0}  # mirrors muse_schema.RATED_WEIGHTS
+
+
+def _watch_state(item: dict) -> tuple[bool, float, bool, int]:
     user_data = item.get("UserData", {}) or {}
     played = bool(user_data.get("Played", False))
     runtime_ticks = item.get("RunTimeTicks") or 0
     position_ticks = user_data.get("PlaybackPositionTicks", 0) or 0
     progress_pct = (position_ticks / runtime_ticks * 100) if runtime_ticks else 0.0
     favorite = bool(user_data.get("IsFavorite", False))
-    return played, progress_pct, favorite
+    return played, progress_pct, favorite, _thumbs(user_data.get("Rating"))
 
 
 async def sync_watch_state(
-    client: httpx.AsyncClient, users: list[dict], last_state: dict[tuple[str, str], tuple[bool, float, bool]]
+    client: httpx.AsyncClient, users: list[dict], last_state: dict[tuple[str, str], tuple[bool, float, bool, int]]
 ) -> None:
     for user in users:
         items = await list_items(client, user["Id"])
@@ -145,17 +162,12 @@ async def sync_watch_state(
                 continue
 
             key = (user["Id"], item["Id"])
-            played, progress_pct, favorite = _watch_state(item)
+            played, progress_pct, favorite, thumbs = _watch_state(item)
             prev = last_state.get(key)
-            last_state[key] = (played, progress_pct, favorite)
+            last_state[key] = (played, progress_pct, favorite, thumbs)
 
-            if prev is None:
-                # First time seeing this (user, item) pair this run — nothing changed yet,
-                # nothing to emit (catalog sync already recorded the item existing).
-                continue
-
-            prev_played, prev_progress, prev_favorite = prev
             now = datetime.now(timezone.utc).isoformat()
+            last_played = (item.get("UserData") or {}).get("LastPlayedDate") or ""
             base = {
                 "user_id": user["Id"],
                 "source": "jellyfin",
@@ -166,18 +178,55 @@ async def sync_watch_state(
                 "metadata": item_metadata(item),
             }
 
+            def keyed(event: dict, key: str) -> dict:
+                # metadata.dedupe_key makes the ingestion API drop repeats (restarts, history import).
+                return {**event, "metadata": {**event["metadata"], "dedupe_key": key}}
+
+            if prev is None:
+                # First sighting this run: import the existing history once. Keys make this
+                # idempotent across restarts; timestamps are when it actually happened.
+                hist = {**base, "timestamp": last_played or now}
+                if played:
+                    await post_event(client, keyed({**hist, "action": "completed"}, f"completed:{item['Id']}:{last_played}"))
+                elif progress_pct > 1.0:
+                    await post_event(client, keyed({**hist, "action": "played"}, f"played:{item['Id']}:{last_played}"))
+                if favorite:
+                    await post_event(client, keyed({**base, "action": "favorited"}, f"favorited:{item['Id']}"))
+                if thumbs != 0:
+                    await post_event(
+                        client,
+                        keyed(
+                            {**base, "action": "rated", "action_weight": RATED_WEIGHTS[thumbs], "metadata": {**base["metadata"], "value": thumbs}},
+                            f"rated:{item['Id']}:{thumbs}",
+                        ),
+                    )
+                continue
+
+            prev_played, prev_progress, prev_favorite, prev_thumbs = prev
+
             if played and not prev_played:
-                await post_event(client, {**base, "action": "completed"})
+                await post_event(client, keyed({**base, "action": "completed"}, f"completed:{item['Id']}:{last_played}"))
             elif progress_pct > prev_progress + 1.0 and not played:
                 await post_event(client, {**base, "action": "played"})
 
             if favorite and not prev_favorite:
-                await post_event(client, {**base, "action": "favorited"})
+                await post_event(client, keyed({**base, "action": "favorited"}, f"favorited:{item['Id']}"))
+
+            if thumbs != prev_thumbs:
+                await post_event(
+                    client,
+                    {
+                        **base,
+                        "action": "rated",
+                        "action_weight": RATED_WEIGHTS[thumbs],
+                        "metadata": {**base["metadata"], "value": thumbs},
+                    },
+                )
 
 
 async def main() -> None:
     last_catalog_sync = float("-inf")  # force a catalog sync on first startup
-    watch_state: dict[tuple[str, str], tuple[bool, float, bool]] = {}
+    watch_state: dict[tuple[str, str], tuple[bool, float, bool, int]] = {}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         logger.info("jellyfin adapter started, watching %s", JELLYFIN_URL)

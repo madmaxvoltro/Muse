@@ -6,7 +6,7 @@ scored candidate is exactly which weighted factors produced its score.
 
 import os
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from qdrant_client import QdrantClient
 
 from .candidates import generate_candidates
@@ -17,7 +17,17 @@ from . import soon_gone as soon_gone_repo
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 ITEM_TYPES = ["movie", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
 
-app = FastAPI(title="Muse Recommendation API", version="0.1.0")
+# MUSE_READ_KEYS="vesper:xxxx,jellyfin-plugin:yyyy": callers must send X-Muse-Read-Key. Read
+# keys can only read; ingestion keys (MUSE_ADAPTER_KEYS) can only write. Unset = open (dev).
+_READ_KEYS = {k.split(":", 1)[1] for k in os.environ.get("MUSE_READ_KEYS", "").split(",") if ":" in k}
+
+
+async def require_read_key(x_muse_read_key: str | None = Header(default=None)) -> None:
+    if _READ_KEYS and x_muse_read_key not in _READ_KEYS:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Muse-Read-Key")
+
+
+app = FastAPI(title="Muse Recommendation API", version="0.1.0", dependencies=[Depends(require_read_key)])
 _qdrant: QdrantClient | None = None
 
 
@@ -33,7 +43,7 @@ async def _shutdown() -> None:
     await close_pool()
 
 
-@app.get("/healthz")
+@app.get("/healthz", dependencies=[])
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 

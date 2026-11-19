@@ -65,8 +65,9 @@ async def get_current_quota_usage_bytes(pool: asyncpg.Pool) -> int:
 
 
 async def is_protected(pool: asyncpg.Pool, source: str, source_item_id: str) -> bool:
-    """Favorited or partially-watched items are always excluded from auto-delete,
-    regardless of score — decided together as the protection set.
+    """Favorited, "loved" (latest thumbs is love, see muse_schema.RATED_WEIGHTS) or
+    partially-watched items are always excluded from auto-delete, regardless of score —
+    decided together as the protection set.
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -76,6 +77,14 @@ async def is_protected(pool: asyncpg.Pool, source: str, source_item_id: str) -> 
               AND (
                 action = 'favorited'
                 OR (action = 'played' AND progress_pct BETWEEN $3 AND $4)
+                OR (
+                  action = 'rated' AND action_weight >= 2 AND NOT EXISTS (
+                    SELECT 1 FROM event later
+                    WHERE later.source = event.source AND later.source_item_id = event.source_item_id
+                      AND later.user_id = event.user_id AND later.action = 'rated'
+                      AND later."timestamp" > event."timestamp"
+                  )
+                )
               )
             LIMIT 1
             """,

@@ -41,6 +41,10 @@ class Action(str, Enum):
     SEARCHED = "searched"
     ADDED_WATCHLIST = "added_watchlist"
     REMOVED = "removed"
+    DETAIL_VIEWED = "detail_viewed"  # opened a title's detail page (weak interest)
+    TRAILER_PLAYED = "trailer_played"
+    REQUESTED = "requested"  # asked for a title to be added to the library
+    RATED = "rated"  # explicit thumbs (Vesper, via the Jellyfin user rating); metadata.value -1/1/2
     CATALOGED = "cataloged"  # item exists in a library, no user signal attached — for backfilling
     # content embeddings from a library the adapter didn't watch the user acquire (see jellyfin adapter).
 
@@ -57,6 +61,10 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.SEARCHED: 0.2,
     Action.ADDED_WATCHLIST: 0.4,
     Action.REMOVED: -0.3,
+    Action.DETAIL_VIEWED: 0.05,
+    Action.TRAILER_PLAYED: 0.15,
+    Action.REQUESTED: 0.6,
+    Action.RATED: 1.0,  # adapters set the real weight from metadata.value, see RATED_WEIGHTS
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.
@@ -75,3 +83,8 @@ class Event(BaseModel):
     progress_pct: float | None = Field(default=None, ge=0, le=100)
     metadata: dict[str, Any] = Field(default_factory=dict)
     device_context: dict[str, Any] | None = None
+
+
+# Thumbs → action_weight for `rated` events. A thumbs down weighs like `rejected`, "love this"
+# a bit more than `favorited`; 0 (rating cleared) cancels nothing retroactively but is recorded.
+RATED_WEIGHTS: dict[int, float] = {-1: -1.0, 0: 0.0, 1: 1.0, 2: 2.0}
