@@ -50,6 +50,7 @@ WATCH_POLL_INTERVAL_SECONDS = int(os.environ.get("MUSE_WATCH_POLL_INTERVAL_SECON
 JELLYFIN_TYPE_MAP = {
     "Movie": "movie",
     "Episode": "series_episode",
+    "Series": "series",  # thumbs and favourites on a show are stored on the series
     "Audio": "track",
     "AudioBook": "audiobook",
     "Book": "ebook",

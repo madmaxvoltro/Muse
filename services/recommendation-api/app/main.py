@@ -15,7 +15,7 @@ from .scoring import score_candidate, rerank
 from . import soon_gone as soon_gone_repo
 
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
-ITEM_TYPES = ["movie", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
+ITEM_TYPES = ["movie", "series", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
 
 # MUSE_READ_KEYS="vesper:xxxx,jellyfin-plugin:yyyy": callers must send X-Muse-Read-Key. Read
 # keys can only read; ingestion keys (MUSE_ADAPTER_KEYS) can only write. Unset = open (dev).

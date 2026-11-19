@@ -23,6 +23,7 @@ class Source(str, Enum):
 class ItemType(str, Enum):
     MOVIE = "movie"
     SERIES_EPISODE = "series_episode"
+    SERIES = "series"  # a show as a whole (thumbs, favourites, detail views on the series)
     YOUTUBE_VIDEO = "youtube_video"
     TRACK = "track"
     AUDIOBOOK = "audiobook"
