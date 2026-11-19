@@ -6,7 +6,7 @@ scored candidate is exactly which weighted factors produced its score.
 
 import os
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from qdrant_client import QdrantClient
 
 from .candidates import generate_candidates
@@ -22,7 +22,9 @@ ITEM_TYPES = ["movie", "series_episode", "youtube_video", "track", "audiobook", 
 _READ_KEYS = {k.split(":", 1)[1] for k in os.environ.get("MUSE_READ_KEYS", "").split(",") if ":" in k}
 
 
-async def require_read_key(x_muse_read_key: str | None = Header(default=None)) -> None:
+async def require_read_key(request: Request, x_muse_read_key: str | None = Header(default=None)) -> None:
+    if request.url.path == "/healthz":
+        return
     if _READ_KEYS and x_muse_read_key not in _READ_KEYS:
         raise HTTPException(status_code=401, detail="invalid or missing X-Muse-Read-Key")
 
@@ -43,7 +45,7 @@ async def _shutdown() -> None:
     await close_pool()
 
 
-@app.get("/healthz", dependencies=[])
+@app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 

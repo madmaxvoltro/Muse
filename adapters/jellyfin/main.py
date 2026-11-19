@@ -81,14 +81,16 @@ async def list_items(client: httpx.AsyncClient, user_id: str) -> list[dict]:
     return data.get("Items", [])
 
 
-async def post_event(client: httpx.AsyncClient, event: dict) -> None:
+async def post_event(client: httpx.AsyncClient, event: dict) -> bool:
     try:
         resp = await client.post(
             f"{INGESTION_URL}/events", json=event, headers={"X-Muse-Api-Key": ADAPTER_KEY}
         )
         resp.raise_for_status()
-    except httpx.HTTPError:
-        logger.exception("failed to post event action=%s item=%s", event.get("action"), event.get("source_item_id"))
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning("failed to post event action=%s item=%s: %s", event.get("action"), event.get("source_item_id"), exc)
+        return False
 
 
 def item_metadata(item: dict) -> dict:
@@ -100,9 +102,11 @@ def item_metadata(item: dict) -> dict:
     }
 
 
-async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> None:
+async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> bool:
+    """Returns False if any event failed, so the caller retries the sync next cycle."""
     logger.info("starting catalog sync for %d users", len(users))
     seen_items: set[str] = set()
+    ok = True
     for user in users:
         items = await list_items(client, user["Id"])
         for item in items:
@@ -110,7 +114,7 @@ async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> None:
             if item_type is None or item["Id"] in seen_items:
                 continue
             seen_items.add(item["Id"])
-            await post_event(
+            ok &= await post_event(
                 client,
                 {
                     "user_id": user["Id"],
@@ -123,7 +127,8 @@ async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> None:
                     "metadata": item_metadata(item),
                 },
             )
-    logger.info("catalog sync done, %d distinct items", len(seen_items))
+    logger.info("catalog sync done, %d distinct items%s", len(seen_items), "" if ok else " (some failed, will retry)")
+    return ok
 
 
 # Vesper writes its thumbs as the Jellyfin user rating: 10 love, 8 up, 1 down. Anything else on
@@ -164,7 +169,7 @@ async def sync_watch_state(
             key = (user["Id"], item["Id"])
             played, progress_pct, favorite, thumbs = _watch_state(item)
             prev = last_state.get(key)
-            last_state[key] = (played, progress_pct, favorite, thumbs)
+            events: list[dict] = []
 
             now = datetime.now(timezone.utc).isoformat()
             last_played = (item.get("UserData") or {}).get("LastPlayedDate") or ""
@@ -187,41 +192,47 @@ async def sync_watch_state(
                 # idempotent across restarts; timestamps are when it actually happened.
                 hist = {**base, "timestamp": last_played or now}
                 if played:
-                    await post_event(client, keyed({**hist, "action": "completed"}, f"completed:{item['Id']}:{last_played}"))
+                    events.append(keyed({**hist, "action": "completed"}, f"completed:{item['Id']}:{last_played}"))
                 elif progress_pct > 1.0:
-                    await post_event(client, keyed({**hist, "action": "played"}, f"played:{item['Id']}:{last_played}"))
+                    events.append(keyed({**hist, "action": "played"}, f"played:{item['Id']}:{last_played}"))
                 if favorite:
-                    await post_event(client, keyed({**base, "action": "favorited"}, f"favorited:{item['Id']}"))
+                    events.append(keyed({**base, "action": "favorited"}, f"favorited:{item['Id']}"))
                 if thumbs != 0:
-                    await post_event(
-                        client,
+                    events.append(
                         keyed(
                             {**base, "action": "rated", "action_weight": RATED_WEIGHTS[thumbs], "metadata": {**base["metadata"], "value": thumbs}},
                             f"rated:{item['Id']}:{thumbs}",
                         ),
                     )
-                continue
 
-            prev_played, prev_progress, prev_favorite, prev_thumbs = prev
+            else:
+                prev_played, prev_progress, prev_favorite, prev_thumbs = prev
 
-            if played and not prev_played:
-                await post_event(client, keyed({**base, "action": "completed"}, f"completed:{item['Id']}:{last_played}"))
-            elif progress_pct > prev_progress + 1.0 and not played:
-                await post_event(client, {**base, "action": "played"})
+                if played and not prev_played:
+                    events.append(keyed({**base, "action": "completed"}, f"completed:{item['Id']}:{last_played}"))
+                elif progress_pct > prev_progress + 1.0 and not played:
+                    events.append({**base, "action": "played"})
 
-            if favorite and not prev_favorite:
-                await post_event(client, keyed({**base, "action": "favorited"}, f"favorited:{item['Id']}"))
+                if favorite and not prev_favorite:
+                    events.append(keyed({**base, "action": "favorited"}, f"favorited:{item['Id']}"))
 
-            if thumbs != prev_thumbs:
-                await post_event(
-                    client,
-                    {
-                        **base,
-                        "action": "rated",
-                        "action_weight": RATED_WEIGHTS[thumbs],
-                        "metadata": {**base["metadata"], "value": thumbs},
-                    },
-                )
+                if thumbs != prev_thumbs:
+                    events.append(
+                        {
+                            **base,
+                            "action": "rated",
+                            "action_weight": RATED_WEIGHTS[thumbs],
+                            "metadata": {**base["metadata"], "value": thumbs},
+                        },
+                    )
+
+            # Remember the state only once Muse has it; on failure the next poll tries again
+            # (history import events are deduplicated, so a retry never double counts).
+            ok = True
+            for event in events:
+                ok = await post_event(client, event) and ok
+            if ok:
+                last_state[key] = (played, progress_pct, favorite, thumbs)
 
 
 async def main() -> None:
@@ -236,8 +247,8 @@ async def main() -> None:
                 users = await list_users(client)
 
                 if start - last_catalog_sync >= CATALOG_SYNC_INTERVAL_SECONDS:
-                    await sync_catalog(client, users)
-                    last_catalog_sync = start
+                    if await sync_catalog(client, users):
+                        last_catalog_sync = start
 
                 await sync_watch_state(client, users, watch_state)
             except Exception:
