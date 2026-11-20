@@ -41,6 +41,9 @@ services:
     environment:
       MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
       MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_EMBED_URL: http://embedding-worker:8002
+      MUSE_READ_KEYS: ${MUSE_READ_KEYS:-}
+      MUSE_CONTROL_KEYS: ${MUSE_CONTROL_KEYS:-}
     depends_on: [postgres, qdrant]
     networks: [muse-net]
 

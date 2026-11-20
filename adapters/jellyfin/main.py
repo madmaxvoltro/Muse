@@ -30,6 +30,7 @@ not itself a fuzzy match.
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -58,6 +59,12 @@ JELLYFIN_TYPE_MAP = {
 
 _headers = {"X-Emby-Token": JELLYFIN_API_KEY}
 
+# Everything the embedding text and Vesper's "Why this" draw on: people and studios make
+# "same director" and "with <actor>" reasons possible, the official rating powers the kids
+# ceiling, provider ids join Jellyfin items to the curator's tmdb/tvdb ids.
+ITEM_FIELDS = "CommunityRating,Genres,Overview,ProductionYear,RunTimeTicks,People,Studios,OfficialRating,ProviderIds,Taglines,DateCreated,PremiereDate"
+MAX_CAST = 6
+
 
 async def jellyfin_get(client: httpx.AsyncClient, path: str, params: dict | None = None) -> Any:
     resp = await client.get(f"{JELLYFIN_URL}{path}", headers=_headers, params=params or {})
@@ -76,7 +83,7 @@ async def list_items(client: httpx.AsyncClient, user_id: str) -> list[dict]:
         params={
             "Recursive": "true",
             "IncludeItemTypes": ",".join(JELLYFIN_TYPE_MAP),
-            "Fields": "Genres,Overview,ProductionYear,RunTimeTicks",
+            "Fields": ITEM_FIELDS,
         },
     )
     return data.get("Items", [])
@@ -95,12 +102,44 @@ async def post_event(client: httpx.AsyncClient, event: dict) -> bool:
 
 
 def item_metadata(item: dict) -> dict:
-    return {
+    """The item description every event carries. The embedding worker merges it into the
+    item's Qdrant payload, so later events with less metadata never erase what is known.
+    """
+    people = item.get("People") or []
+    providers = {k.lower(): v for k, v in (item.get("ProviderIds") or {}).items() if v}
+    md: dict[str, Any] = {
         "title": item.get("Name", ""),
         "description": item.get("Overview", "") or "",
         "genres": item.get("Genres", []) or [],
         "year": item.get("ProductionYear"),
+        "directors": [p["Name"] for p in people if p.get("Type") == "Director" and p.get("Name")][:3],
+        "cast": [p["Name"] for p in people if p.get("Type") == "Actor" and p.get("Name")][:MAX_CAST],
+        "studios": [s["Name"] for s in (item.get("Studios") or []) if s.get("Name")][:3],
     }
+    if item.get("Taglines"):
+        md["tagline"] = item["Taglines"][0]
+    if item.get("OfficialRating"):
+        md["official_rating"] = item["OfficialRating"]
+    if item.get("CommunityRating"):
+        md["community_rating"] = round(float(item["CommunityRating"]), 1)
+    if item.get("RunTimeTicks"):
+        md["runtime_minutes"] = round(item["RunTimeTicks"] / 600_000_000)
+    if item.get("DateCreated"):
+        # Jellyfin writes 7 fractional digits; keep 6 so every RFC 3339 parser accepts it.
+        md["added_at"] = re.sub(r"(\.\d{6})\d+", r"\1", item["DateCreated"])
+    for key in ("tmdb", "tvdb", "imdb"):
+        if key in providers:
+            md[f"{key}_id"] = str(providers[key])
+    if item.get("Type") == "Episode":
+        if item.get("SeriesId"):
+            md["series_id"] = item["SeriesId"]
+        if item.get("SeriesName"):
+            md["series_name"] = item["SeriesName"]
+        if item.get("ParentIndexNumber") is not None:
+            md["season"] = item["ParentIndexNumber"]
+        if item.get("IndexNumber") is not None:
+            md["episode"] = item["IndexNumber"]
+    return {k: v for k, v in md.items() if v not in (None, [], "")} | {"title": md["title"]}
 
 
 async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> bool:

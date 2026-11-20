@@ -15,6 +15,7 @@ services:
     ports: ["127.0.0.1:${MUSE_RECO_PORT:-8770}:8001"]
     environment:
       MUSE_READ_KEYS: ${MUSE_READ_KEYS:-}
+      MUSE_CONTROL_KEYS: ${MUSE_CONTROL_KEYS:-}
 
   embedding-worker:
     volumes: [hf_cache:/root/.cache/huggingface]

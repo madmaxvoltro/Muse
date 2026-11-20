@@ -65,17 +65,24 @@ async def get_current_quota_usage_bytes(pool: asyncpg.Pool) -> int:
 
 
 async def is_protected(pool: asyncpg.Pool, source: str, source_item_id: str) -> bool:
-    """Favorited, "loved" (latest thumbs is love, see muse_schema.RATED_WEIGHTS) or
-    partially-watched items are always excluded from auto-delete, regardless of score —
-    decided together as the protection set.
+    """Favorited, "loved" (latest thumbs is love, see muse_schema.RATED_WEIGHTS),
+    partially-watched, requested or watchlisted items are always excluded from auto-delete,
+    regardless of score — decided together as the protection set. Signals count from any
+    source that names the same title: the curator's own tmdb/tvdb id, or a Jellyfin/Vesper
+    event carrying that id in metadata.tmdb_id / tvdb_id.
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT 1 FROM event
-            WHERE source = $1 AND source_item_id = $2
+            WHERE (
+                (source = $1 AND source_item_id = $2)
+                -- the same title as seen by Jellyfin / Vesper (they speak Jellyfin ids; the
+                -- curator speaks tmdb/tvdb ids, which those events carry in metadata)
+                OR (source = 'jellyfin' AND (metadata->>'tmdb_id' = $2 OR metadata->>'tvdb_id' = $2))
+              )
               AND (
-                action = 'favorited'
+                action IN ('favorited', 'requested', 'added_watchlist')
                 OR (action = 'played' AND progress_pct BETWEEN $3 AND $4)
                 OR (
                   action = 'rated' AND action_weight >= 2 AND NOT EXISTS (
