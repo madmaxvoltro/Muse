@@ -23,7 +23,7 @@ from muse_schema import RATED_WEIGHTS, identity_group
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from . import identity, knowledge, music, profile, questions, recclient, search
+from . import groups, identity, knowledge, music, profile, questions, recclient, search, situation
 from .auth import Principal, admin_only, current_principal, resolve_user, writer
 from .db import close_pool, get_pool
 from .embedder import get_embedder
@@ -33,6 +33,8 @@ QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 
 app = FastAPI(title="Muse Query API", version="0.2.0")
 app.include_router(music.router)
+app.include_router(situation.router)
+app.include_router(groups.router)
 _qdrant: QdrantClient | None = None
 
 
@@ -46,6 +48,22 @@ def qdrant() -> QdrantClient:
 def set_qdrant(client: QdrantClient) -> None:
     global _qdrant
     _qdrant = client
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    import asyncio
+
+    from .vectors import ensure_mood_vectors
+
+    async def moods_later():
+        try:
+            await ensure_mood_vectors(qdrant())
+        except Exception:  # Qdrant or the embedders not up yet: the next start retries
+            pass
+
+    if os.environ.get("MUSE_QUERY_EMBED_MOODS", "1") == "1":
+        asyncio.get_running_loop().create_task(moods_later())
 
 
 @app.on_event("shutdown")

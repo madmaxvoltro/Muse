@@ -29,3 +29,16 @@ async def recommendations(user_id: str, item_type: str, **params: Any) -> dict[s
     if r.status_code >= 400:
         raise RecUnavailable(f"recommendation API answered {r.status_code}: {r.text[:200]}")
     return r.json()
+
+
+async def get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    q = {k: v for k, v in params.items() if v is not None}
+    headers = {"X-Muse-Read-Key": READ_KEY} if READ_KEY else {}
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.get(f"{REC_URL}{path}", params=q, headers=headers)
+    except httpx.HTTPError as e:
+        raise RecUnavailable(str(e)) from e
+    if r.status_code >= 400:
+        raise RecUnavailable(f"recommendation API answered {r.status_code}: {r.text[:200]}")
+    return r.json()

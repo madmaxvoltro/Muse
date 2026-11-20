@@ -28,6 +28,7 @@ os.environ.setdefault("MUSE_DATABASE_URL", DB_URL or "postgresql://unused/none")
 os.environ["MUSE_ADAPTER_KEYS"] = "mono:mono-key,jellyfin:jf-key"
 os.environ["MUSE_ADMIN_TOKEN"] = "admin-secret"
 os.environ["MUSE_QUERY_EMBEDDER"] = "none"
+os.environ["MUSE_QUERY_EMBED_MOODS"] = "0"
 
 
 def load_package(name: str, path: Path):

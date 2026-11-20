@@ -85,6 +85,16 @@ async def world(db, monkeypatch):
 
     monkeypatch.setattr(sys.modules["queryapi.recclient"], "recommendations", rec_call)
 
+    async def rec_get(path, params):
+        q = {k: v for k, v in params.items() if v is not None}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=rec.app), base_url="http://rec") as c:
+            r = await c.get(path, params=q)
+        if r.status_code >= 400:
+            raise sys.modules["queryapi.recclient"].RecUnavailable(r.text)
+        return r.json()
+
+    monkeypatch.setattr(sys.modules["queryapi.recclient"], "get", rec_get)
+
     conn = await asyncpg.connect(db)
     for tid, (title, genres) in TRACKS.items():
         await insert(conn, MONO_USER, "mono", tid, "track", "cataloged", 0, {"title": title, "genres": genres, "artist": title.split(" - ")[0]}, 30)

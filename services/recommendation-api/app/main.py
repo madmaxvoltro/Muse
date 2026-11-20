@@ -362,6 +362,16 @@ async def fit(source: str, source_item_id: str, user_id: list[str] = Query(...),
     return {"fits": await G.member_fits(pool, qdrant(), user_id, source, source_item_id, item_type, await _ctx_for(), load_knowledge)}
 
 
+@app.get("/context/{user_id}")
+async def context(user_id: str, tz: str | None = None, device: str | None = None, room: str | None = None) -> dict:
+    """The context Muse would apply right now (time, device, mood and where it came from)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        canonical, _ = await identity_group(conn, _uuid(user_id) and user_id)
+        ctx = await effective_context(conn, qdrant(), canonical, tz=tz, device=device, room=room)
+    return {"user_id": user_id, "canonical_user_id": str(canonical), **ctx.summary()}
+
+
 @app.get("/soon-gone")
 async def soon_gone_list() -> dict:
     """Backs the Jellyfin plugin's "Soon Gone" homepage row."""

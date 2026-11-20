@@ -56,6 +56,7 @@ services:
       MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
       MUSE_ADMIN_TOKEN: ${MUSE_ADMIN_TOKEN}
       MUSE_ADAPTER_KEYS: ${MUSE_ADAPTER_KEYS}
+      MUSE_AUDIO_URL: http://audio-analyzer:8004
     depends_on: [postgres, qdrant, recommendation-api]
     networks: [muse-net]
 
@@ -90,6 +91,21 @@ services:
       MUSE_AUDIO_THREADS: ${MUSE_AUDIO_THREADS:-0}
     volumes: [hf_cache_audio:/root/.cache/huggingface]
     depends_on: [postgres, qdrant]
+    networks: [muse-net]
+
+  # Weather (Open-Meteo), calendars (ICS), webhook delivery, weekly digest, goals, retention.
+  scheduler:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
+      MUSE_WEATHER_LAT: ${MUSE_WEATHER_LAT:-}
+      MUSE_WEATHER_LON: ${MUSE_WEATHER_LON:-}
+    depends_on: [postgres, recommendation-api]
     networks: [muse-net]
 
   mcp-server:
