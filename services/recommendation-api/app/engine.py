@@ -34,6 +34,17 @@ from .context import Ctx
 from .scoring import Candidate, confidence
 
 POOL = 400  # candidates kept before scoring
+IMPORT_SOURCES = ("spotify", "soundcloud", "goodreads", "storygraph", "youtube")
+
+
+def title_key(title: str | None) -> str:
+    import re
+    import unicodedata
+
+    t = unicodedata.normalize("NFKD", title or "")
+    t = "".join(ch for ch in t if not unicodedata.combining(ch)).casefold()
+    t = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", t)  # (Remastered), [Live] ...
+    return re.sub(r"[^a-z0-9]+", "", t)
 
 # Hand weights. Missing features contribute nothing. Every term ends up in `explanation`.
 WEIGHTS = {
@@ -99,6 +110,8 @@ class Person:
     ignored: dict[str, int] = field(default_factory=dict)
     recent_positive: list[str] = field(default_factory=list)
     goals: list[dict] = field(default_factory=list)
+    heard_titles: set[str] = field(default_factory=set)  # from imports (Spotify...): same song, other source
+    exclude_heard: bool = True
 
 
 @dataclass
@@ -168,6 +181,11 @@ async def load_person(conn, qd, canonical: uuid.UUID, group: list[uuid.UUID], it
             canonical, item_type)]
     except Exception:  # database without migrations 008/009
         pass
+    if item_type in ("track", "ebook", "audiobook"):
+        p.heard_titles = {title_key(r["t"]) for r in await conn.fetch(
+            "SELECT DISTINCT metadata->>'title' AS t FROM event WHERE user_id = ANY($1::uuid[]) AND item_type = $2 "
+            "AND source = ANY($3::text[]) AND action IN ('completed', 'favorited', 'rated', 'skipped', 'played') AND metadata ? 'title'",
+            group, item_type, list(IMPORT_SOURCES))}
     p.recent_positive = [f"{r['source']}:{r['source_item_id']}" for r in await conn.fetch(
         "SELECT source, source_item_id FROM event WHERE user_id = ANY($1::uuid[]) AND item_type = $2 AND action_weight > 0 "
         "AND source_item_id IS NOT NULL AND action <> 'cataloged' ORDER BY \"timestamp\" DESC LIMIT 25", group, item_type)]
@@ -321,6 +339,8 @@ async def featurize(conn, qd, p: Person, ctx: Ctx, found: dict[str, set[str]], t
         payload = tp.payload or {}
         if payload.get("item_type") != p.item_type:
             continue
+        if p.exclude_heard and p.heard_titles and k.split(":", 1)[0] not in IMPORT_SOURCES and title_key(payload.get("title")) in p.heard_titles:
+            continue  # heard it on Spotify/SoundCloud already: not a discovery
         tv = list(tp.vector)
         ap = audio.get(pid)
         av = list(ap.vector) if ap is not None else None

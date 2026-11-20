@@ -73,7 +73,7 @@ async def load_knowledge(pool, canonical: uuid.UUID) -> tuple[list[dict], dict]:
             facts = [
                 dict(r)
                 for r in await conn.fetch(
-                    "SELECT kind, domain, subject, sentiment, confidence FROM profile_fact "
+                    "SELECT kind, domain, subject, sentiment, confidence, statement FROM profile_fact "
                     "WHERE user_id = $1 AND retracted_at IS NULL",
                     canonical,
                 )
@@ -220,6 +220,7 @@ async def _sequence_pool(pool, p: E.Person, ctx, seed_keys: list[str], history: 
             "SELECT DISTINCT source, source_item_id FROM event WHERE user_id = ANY($1::uuid[]) AND action = 'skipped' "
             "AND \"timestamp\" > now() - interval '14 days'", p.group)}
         p.owned = recent | set(history) | set(seed_keys) | skipped_lately  # radio may replay favourites, not what just played
+        p.exclude_heard = False
         seeds = [tuple(k.split(":", 1)) for k in seed_keys]
         found = await E.generate(conn, qdrant(), p, ctx, sources=sources, seeds=seeds)
         for k, w in loved.items():  # favourites are radio material too
@@ -360,6 +361,48 @@ async def fit(source: str, source_item_id: str, user_id: list[str] = Query(...),
         _uuid(m)
     pool = await get_pool()
     return {"fits": await G.member_fits(pool, qdrant(), user_id, source, source_item_id, item_type, await _ctx_for(), load_knowledge)}
+
+
+@app.get("/explain/{user_id}/{source}/{source_item_id}")
+async def explain(user_id: str, source: str, source_item_id: str, item_type: str = "track", limit: int = 20) -> dict:
+    """Why an item is (not) recommended to someone: blockers, rank, and its score breakdown."""
+    pool = await get_pool()
+    p, ctx = await _person(pool, user_id, item_type)
+    key = f"{source}:{source_item_id}"
+    blockers = []
+    if key in p.owned:
+        blockers.append("already played or judged: recommendations only show things new to you")
+    if source in (p.overlay.get("disabled_sources") or []):
+        blockers.append(f"the source '{source}' is turned off in your settings")
+    if p.ignored.get(key):
+        blockers.append(f"shown {p.ignored[key]} times recently without a reaction, so it is ranked lower")
+    owned = set(p.owned)
+    p.owned, p.exclude_heard = set(), False
+    async with pool.acquire() as conn:
+        found = await E.generate(conn, qdrant(), p, ctx)
+        reached = set(found.get(key, set()))
+        found.setdefault(key, set()).add("asked")
+        items = await E.featurize(conn, qdrant(), p, ctx, found)
+        weights, _ = await weights_for(conn, item_type)
+    scored = E.score(items, weights)
+    kept = apply_knowledge(list(scored), p.facts, p.overlay.get("source_weights") or {})
+    target = next((it for it in scored if it.key == key), None)
+    if target is None:
+        return {"item": key, "recommendable": False, "blockers": blockers + ["not embedded yet, or not a " + item_type]}
+    if target not in kept:
+        stated = [f["statement"] for f in p.facts if f["kind"] == "avoid"]
+        blockers.append("filtered by something you told Muse" + (f": {stated[0]}" if stated else ""))
+    E.penalize_ignored(kept, p.ignored)
+    ranked = sorted([it for it in kept if it.key not in owned or it.key == key], key=lambda c: -c.score)
+    rank = next((i + 1 for i, it in enumerate(ranked) if it.key == key), None)
+    cutoff = ranked[limit - 1].score if len(ranked) >= limit else None
+    if rank and rank > limit:
+        strongest = sorted(target.reasons.items(), key=lambda kv: kv[1])[:2]
+        blockers.append(f"outranked: #{rank} of {len(ranked)} (a list shows {limit}); weakest terms: " + ", ".join(k for k, _ in strongest))
+    return {"item": key, "title": target.title, "recommendable": not blockers, "rank": rank, "candidates": len(ranked),
+            "cutoff_score": round(cutoff, 4) if cutoff is not None else None, "blockers": blockers,
+            "found_by": sorted(reached) or ["none of the generators reached it on its own"],
+            "detail": _item_json(target, p.facts, ctx, p.pref_summary)}
 
 
 @app.get("/context/{user_id}")

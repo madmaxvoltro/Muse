@@ -40,6 +40,9 @@ QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 MONO_URL = os.environ.get("MUSE_MONO_URL", "").rstrip("/")
 MONO_STREAM_TOKEN = os.environ.get("MUSE_MONO_STREAM_TOKEN", "")
 DEEZER_URL = os.environ.get("MUSE_DEEZER_URL", "https://api.deezer.com").rstrip("/")
+NAVIDROME_URL = os.environ.get("MUSE_NAVIDROME_URL", "").rstrip("/")
+NAVIDROME_USER = os.environ.get("MUSE_NAVIDROME_USER", "")
+NAVIDROME_PASSWORD = os.environ.get("MUSE_NAVIDROME_PASSWORD", "")
 INTERVAL = int(os.environ.get("MUSE_AUDIO_INTERVAL_SECONDS", "60"))
 PER_CYCLE = int(os.environ.get("MUSE_AUDIO_PER_CYCLE", "20"))
 MAX_ATTEMPTS = 3
@@ -56,7 +59,7 @@ def _j(v: Any) -> Any:
 
 
 async def enqueue_library(conn) -> int:
-    sources = ["mono"] if MONO_URL and MONO_STREAM_TOKEN else []
+    sources = (["mono"] if MONO_URL and MONO_STREAM_TOKEN else []) + (["navidrome"] if NAVIDROME_URL and NAVIDROME_USER else [])
     if not sources:
         return 0
     res = await conn.execute(
@@ -79,6 +82,15 @@ async def resolve(conn, http: httpx.AsyncClient, source: str, sid: str) -> tuple
         "ORDER BY \"timestamp\" DESC LIMIT 1", source, sid)) or {}
     if source == "mono" and MONO_URL and MONO_STREAM_TOKEN:
         return f"{MONO_URL}/api/tracks/{sid}/stream?t={MONO_STREAM_TOKEN}", False, md.get("duration_s"), md
+    if source == "navidrome" and NAVIDROME_URL and NAVIDROME_USER:
+        import hashlib
+        import secrets
+        from urllib.parse import urlencode
+
+        salt = secrets.token_hex(6)
+        q = urlencode({"id": sid, "u": NAVIDROME_USER, "t": hashlib.md5((NAVIDROME_PASSWORD + salt).encode()).hexdigest(), "s": salt,
+                       "v": "1.16.1", "c": "muse-audio", "format": "raw"})
+        return f"{NAVIDROME_URL}/rest/stream?{q}", False, md.get("duration_s"), md
     if source == "catalog" and md.get("deezer_id"):
         try:  # preview URLs are signed and expire: always ask for a fresh one
             r = await http.get(f"{DEEZER_URL}/track/{md['deezer_id']}")

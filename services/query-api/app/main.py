@@ -23,7 +23,7 @@ from muse_schema import RATED_WEIGHTS, identity_group
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from . import groups, identity, knowledge, music, profile, questions, recclient, search, situation
+from . import groups, identity, knowledge, mine, music, profile, questions, recclient, search, situation
 from .auth import Principal, admin_only, current_principal, resolve_user, writer
 from .db import close_pool, get_pool
 from .embedder import get_embedder
@@ -35,6 +35,34 @@ app = FastAPI(title="Muse Query API", version="0.2.0")
 app.include_router(music.router)
 app.include_router(situation.router)
 app.include_router(groups.router)
+app.include_router(mine.router)
+
+
+@app.middleware("http")
+async def access_log(request, call_next):
+    """Who touched whose data: every authenticated /v1 call is logged (GET /v1/users/{u}/access-log)."""
+    response = await call_next(request)
+    p = getattr(request.state, "principal", None)
+    if p is not None and request.url.path.startswith("/v1/"):
+        try:
+            parts = request.url.path.split("/")
+            subject = None
+            if len(parts) > 3 and parts[2] == "users" and parts[3] not in ("", "me"):
+                try:
+                    subject = uuid.UUID(parts[3])
+                except ValueError:
+                    subject = None
+            if subject is None and p.user_id is not None:
+                subject = p.user_id
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO access_log (principal, token_id, actor_user_id, subject_user_id, method, path, status) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                    p.kind if p.kind != "adapter" else f"adapter:{p.source}", p.token_id, p.user_id if p.kind == "user" else None, subject,
+                    request.method, request.url.path[:300], response.status_code)
+        except Exception:
+            pass  # logging must never break a request
+    return response
 _qdrant: QdrantClient | None = None
 
 
