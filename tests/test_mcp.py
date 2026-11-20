@@ -39,9 +39,11 @@ async def test_tools_listed(mcp):
     async with mcp() as client:
         names = {t.name for t in (await client.list_tools()).tools}
         assert {"whoami", "search", "recommend", "get_questions", "answer_question", "remember", "suggest_feature",
-                "create_link_code", "link_account", "get_taste_profile"} <= names
+                "create_link_code", "link_account", "get_taste_profile", "radio", "next_up", "search_by_sound", "get_taste_portrait",
+                "new_releases", "wanted", "want", "set_mood", "set_activity", "start_group", "group_recommendations",
+                "record_group_pick", "add_goal", "set_incognito", "forget_history", "why_not", "more_like_this"} <= names
         prompts = {p.name for p in (await client.list_prompts()).prompts}
-        assert {"taste_interview", "use_my_taste"} <= prompts
+        assert {"taste_interview", "use_my_taste", "watch_together"} <= prompts
 
 
 async def test_assistant_loop(mcp):
@@ -80,3 +82,21 @@ async def test_errors_are_tool_errors(mcp):
     async with mcp() as client:
         r = await client.call_tool("get_taste_profile", {"user": "33333333-3333-3333-3333-333333333333"})
         assert r.is_error and "403" in r.content[0].text
+
+
+
+async def test_new_tools(mcp):
+    async with mcp() as client:
+        mood = data(await client.call_tool("set_mood", {"mood": "focus", "hours": 1}))
+        assert mood["value"]["mood"] == "focus"
+        recs = data(await client.call_tool("recommend", {"item_type": "track", "limit": 3}))
+        assert recs["context"]["mood"] == "focus"
+        r = data(await client.call_tool("radio", {"seed_source": "mono", "seed_id": "t1", "length": 3, "playable_source": "mono"}))
+        assert r["tracks"] and r["seed"] == "mono:t1"
+        g = data(await client.call_tool("add_goal", {"title": "Get into Dutch rock", "domain": "track", "genres": ["dutch rock"]}))
+        assert g["status"] == "active"
+        assert data(await client.call_tool("why_not", {"source": "mono", "source_item_id": "t1"}))["blockers"]
+        err = await client.call_tool("forget_history", {})
+        assert err.is_error and "narrow it down" in err.content[0].text
+        grp = data(await client.call_tool("start_group", {"members": ["33333333-3333-3333-3333-333333333333"], "name": "test"}))
+        assert len(grp["members"]) == 2

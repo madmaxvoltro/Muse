@@ -57,7 +57,21 @@ folds it into recommendations. Briefly tell the person what you stored; `forget`
 Only store taste and listening/viewing context — no health, politics, religion, relationships
 or other sensitive details, and nothing the person asks you to keep to yourself.
 
-Feedback: `rate_item` records a thumbs (-1..2) when the person reacts to a specific item.
+Feedback: `rate_item` records a thumbs (-1..2) when the person reacts to a specific item;
+`more_like_this` / `less_like_this` steer harder; `why_not` explains a missing recommendation.
+
+Music: `radio` builds a session that fits the person and flows (sound, key, tempo, energy arc:
+steady, build, wind_down, peak); `next_up` picks what follows a song. `search_by_sound` finds
+music by how it sounds ("dreamy synths, slow"). `get_taste_portrait` says what Muse understands
+beyond tags. `new_releases` and `wanted` cover music that isn't in the library yet (the household's
+download tool works from `wanted`); `want` adds something to it.
+
+Right now: `set_mood` (a preset or a few words) and `set_activity` change recommendations for a
+while; `clear_mood` ends it. Several people together: `start_group` (any number of groups can run
+at once), then `group_recommendations`, and `record_group_pick` when they choose.
+Goals: `add_goal` ("get into jazz", "10 classic films"), `list_goals`.
+Privacy: `set_incognito` stops learning for a while; `forget_history` deletes a time range or
+source (confirm with the person first); `access_log` shows who read their data.
 Ideas: if you notice Muse missing something that would have helped, `suggest_feature`.
 Accounts: one person can have several ids (Jellyfin, Mono, ...); `create_link_code` on one
 account and `link_account` on the other joins them into one profile. Only link accounts that
@@ -297,6 +311,200 @@ async def list_feature_suggestions(ctx: Context, status: str | None = None) -> d
     return await _api(ctx, "GET", "/v1/suggestions", {"status": status})
 
 
+@mcp.tool(annotations=WRITE)
+async def more_like_this(ctx: Context, source: str, source_item_id: str, user: str = "me") -> dict:
+    """Steer towards an item: a thumbs up plus a lasting 'more like this' preference."""
+    return await _api(ctx, "POST", f"/v1/users/{_u(user)}/more-like-this", body={"source": source, "source_item_id": source_item_id})
+
+
+@mcp.tool(annotations=WRITE)
+async def less_like_this(ctx: Context, source: str, source_item_id: str, user: str = "me") -> dict:
+    """Steer away from an item: a thumbs down plus a lasting 'less like this' preference."""
+    return await _api(ctx, "POST", f"/v1/users/{_u(user)}/less-like-this", body={"source": source, "source_item_id": source_item_id})
+
+
+@mcp.tool(annotations=READ)
+async def why_not(ctx: Context, source: str, source_item_id: str, user: str = "me") -> dict:
+    """Why an item isn't recommended: already seen, filtered by something they said, a disabled
+    source, not analysed yet, or outranked (with its rank and the weakest parts of its score)."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/why-not/{source}/{source_item_id}")
+
+
+# --- music ------------------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=READ)
+async def radio(ctx: Context, seed_source: str | None = None, seed_id: str | None = None, length: int = 20, arc: str = "steady",
+                discovery: float = 0.3, mood: str | None = None, playable_source: str | None = None, user: str = "me") -> dict:
+    """A listening session: each song fits the person and flows from the previous one (sound,
+    harmonic key, tempo, energy). arc: steady | build | wind_down | peak. discovery 0 = their
+    favourites, 1 = only new to them. playable_source limits to one player's library (e.g. mono)."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/radio", {"seed_source": seed_source, "seed_id": seed_id, "length": length, "arc": arc,
+                                                                  "discovery": discovery, "mood": mood, "playable_source": playable_source})
+
+
+@mcp.tool(annotations=READ)
+async def next_up(ctx: Context, source: str, source_item_id: str, n: int = 5, user: str = "me") -> dict:
+    """What should play after this song for this person, with why it flows."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/next", {"source": source, "source_item_id": source_item_id, "n": n})
+
+
+@mcp.tool(annotations=READ)
+async def search_by_sound(ctx: Context, description: str, limit: int = 10, user: str = "me") -> dict:
+    """Find music by how it sounds ("melancholic piano, slow", "aggressive riffs, fast"), leaning
+    towards the person's taste in sound. Needs the audio analyzer."""
+    return await _api(ctx, "GET", "/v1/search/sound", {"q": description, "limit": limit, "user": user})
+
+
+@mcp.tool(annotations=READ)
+async def get_taste_portrait(ctx: Context, user: str = "me", item_type: str | None = None) -> dict:
+    """What Muse understands beyond tags: the distinct sides of their taste (named from how the
+    music sounds), what they pick within those, and how reliable that is."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/taste-portrait", {"item_type": item_type})
+
+
+@mcp.tool(annotations=READ)
+async def new_releases(ctx: Context, user: str = "me", days: int = 90) -> dict:
+    """New and upcoming releases by artists this person loves (from MusicBrainz)."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/releases", {"days": days})
+
+
+@mcp.tool(annotations=READ)
+async def wanted(ctx: Context, user: str = "me", status: str = "wanted") -> dict:
+    """Music the household wants acquired (new releases, discoveries, wishlist), with status."""
+    return await _api(ctx, "GET", "/v1/wanted", {"user": user, "status": status})
+
+
+@mcp.tool(annotations=WRITE)
+async def want(ctx: Context, artist: str, title: str | None = None, kind: str = "release", reason: str | None = None, user: str = "me") -> dict:
+    """Add an album (kind=release), a song (recording) or a whole artist to the wanted list."""
+    return await _api(ctx, "POST", f"/v1/users/{_u(user)}/wanted", body={"artist": artist, "title": title, "kind": kind, "reason": reason})
+
+
+# --- right now -------------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=READ)
+async def list_moods(ctx: Context) -> dict:
+    """Mood presets (free text works too)."""
+    return await _api(ctx, "GET", "/v1/moods")
+
+
+@mcp.tool(annotations=WRITE)
+async def set_mood(ctx: Context, mood: str, hours: float = 3, user: str = "me") -> dict:
+    """Set the person's mood for a while: a preset (focus, chill, workout, party, sleep, sad,
+    happy, cooking, ...) or a few words ("rainy sunday, cooking for friends")."""
+    return await _api(ctx, "POST", f"/v1/users/{_u(user)}/context", body={"kind": "mood", "value": {"mood": mood},
+                                                                          "ttl_minutes": max(5, int(hours * 60))})
+
+
+@mcp.tool(annotations=WRITE)
+async def clear_mood(ctx: Context, user: str = "me") -> dict:
+    """End the current mood."""
+    return await _api(ctx, "DELETE", f"/v1/users/{_u(user)}/context/mood")
+
+
+@mcp.tool(annotations=WRITE)
+async def set_activity(ctx: Context, activity: str, hours: float = 2, user: str = "me") -> dict:
+    """What they're doing: cooking, working, studying, working_out, running, sleeping, driving,
+    commuting, party, dinner, relaxing, reading, tv, gaming. Shapes picks for a while."""
+    return await _api(ctx, "POST", f"/v1/users/{_u(user)}/context", body={"kind": "activity", "value": {"activity": activity},
+                                                                          "ttl_minutes": max(5, int(hours * 60))})
+
+
+@mcp.tool(annotations=READ)
+async def get_context(ctx: Context, user: str = "me") -> dict:
+    """Active context: mood, activity, device, weather, calendar kind, rooms they're in."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/context")
+
+
+# --- groups ----------------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=WRITE)
+async def start_group(ctx: Context, members: list[str], name: str | None = None, room: str | None = None, hours: float = 4) -> dict:
+    """Start a group session (who is watching/listening together). Members: user ids or Home
+    Assistant person refs. With a personal token you're always included. Many can run at once."""
+    return await _api(ctx, "POST", "/v1/groups", body={"members": members, "name": name, "room": room, "ttl_minutes": max(5, int(hours * 60))})
+
+
+@mcp.tool(annotations=READ)
+async def list_groups(ctx: Context) -> dict:
+    """Active group sessions you can see."""
+    return await _api(ctx, "GET", "/v1/groups")
+
+
+@mcp.tool(annotations=READ)
+async def group_recommendations(ctx: Context, group_id: str | None = None, members: list[str] | None = None, item_type: str = "movie",
+                                limit: int = 10, mood: str | None = None) -> dict:
+    """Picks for several people at once: fair to each (the least happy member counts), vetoes
+    anything someone said to avoid or disliked, per-member fit and who has already seen it."""
+    if group_id:
+        return await _api(ctx, "GET", f"/v1/groups/{group_id}/recommendations", {"item_type": item_type, "limit": limit, "mood": mood})
+    if not members:
+        raise ToolError("pass group_id, or members")
+    return await _api(ctx, "GET", "/v1/group-recommendations", {"user": members, "item_type": item_type, "limit": limit, "mood": mood})
+
+
+@mcp.tool(annotations=WRITE)
+async def record_group_pick(ctx: Context, group_id: str, source: str, source_item_id: str, item_type: str = "movie") -> dict:
+    """What the group chose: whoever compromised gets more weight next time."""
+    return await _api(ctx, "POST", f"/v1/groups/{group_id}/picks", body={"source": source, "source_item_id": source_item_id, "item_type": item_type})
+
+
+@mcp.tool(annotations=WRITE)
+async def end_group(ctx: Context, group_id: str) -> dict:
+    """End a group session."""
+    return await _api(ctx, "DELETE", f"/v1/groups/{group_id}")
+
+
+# --- goals & privacy --------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=READ)
+async def list_goals(ctx: Context, user: str = "me") -> dict:
+    """The person's goals and progress."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/goals")
+
+
+@mcp.tool(annotations=WRITE)
+async def add_goal(ctx: Context, title: str, domain: str = "general", target: int = 10, genres: list[str] | None = None,
+                   artists: list[str] | None = None, description: str | None = None, user: str = "me") -> dict:
+    """A goal Muse helps with ("Get into jazz", "Watch 10 classic films"): matching picks get a
+    slot in recommendations, and finished items count towards the target."""
+    return await _api(ctx, "POST", f"/v1/users/{_u(user)}/goals", body={"title": title, "domain": domain, "target": target,
+                                                                        "genres": genres or [], "artists": artists or [], "description": description})
+
+
+@mcp.tool(annotations=READ)
+async def year_review(ctx: Context, year: int | None = None, user: str = "me") -> dict:
+    """Their year across everything: totals, favourites, genres, artists, discoveries, when."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/year-review", {"year": year})
+
+
+@mcp.tool(annotations=WRITE)
+async def set_incognito(ctx: Context, minutes: int, user: str = "me") -> dict:
+    """Stop Muse learning from what they play for a while (0 turns it off)."""
+    return await _api(ctx, "PUT", f"/v1/users/{_u(user)}/incognito", body={"minutes": minutes})
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def forget_history(ctx: Context, since: str | None = None, until: str | None = None, source: str | None = None,
+                         item_type: str | None = None, user: str = "me") -> dict:
+    """Permanently delete history in a time range (ISO dates) and/or from one source. Confirm with
+    the person before calling ("forget last weekend, someone else used my account")."""
+    if not (since or until or source or item_type):
+        raise ToolError("narrow it down (since/until/source/item_type); erasing everything is not done from here")
+    return await _api(ctx, "DELETE", f"/v1/users/{_u(user)}/events", {"since": since, "until": until, "source": source,
+                                                                      "item_type": item_type, "confirm": "true"})
+
+
+@mcp.tool(annotations=READ)
+async def access_log(ctx: Context, user: str = "me", limit: int = 50) -> dict:
+    """Who (which app or assistant token) read or changed this person's data, and when."""
+    return await _api(ctx, "GET", f"/v1/users/{_u(user)}/access-log", {"limit": limit})
+
+
 # --- accounts -------------------------------------------------------------------------------
 
 
@@ -338,6 +546,16 @@ def taste_interview(user: str = "me", count: int = 5) -> str:
         "conversationally, reacting to my answers; record each with answer_question. If I mention a lasting "
         "preference along the way, store it with remember and tell me in a few words. Finish with a short summary "
         "of what Muse learned and one recommendation that uses it."
+    )
+
+
+@mcp.prompt(title="What should we watch?")
+def watch_together(members: str = "", item_type: str = "movie") -> str:
+    """Pick something for several people at once, fairly."""
+    return (
+        f"We want to watch something together{' (' + members + ')' if members else ''}. Find out who is in, start a group "
+        f"(start_group) and get group_recommendations with item_type={item_type}. Offer 3 options, say briefly why each "
+        "works for everyone and who has already seen it. When we choose, call record_group_pick."
     )
 
 

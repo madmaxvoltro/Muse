@@ -39,16 +39,20 @@ sends its own token. Expose it only over your tailnet, like the rest of Muse.
 
 ## Tools
 
-| Know | Ask | Teach | Accounts |
-|---|---|---|---|
-| `whoami`, `list_users`, `capabilities` | `get_questions` | `remember`, `list_facts`, `forget` | `list_identities` |
-| `get_taste_profile` | `answer_question` | `rate_item` | `create_link_code` |
-| `search`, `similar_items`, `get_item` | `skip_question` | `update_settings` | `link_account` |
-| `recommend` (incl. `taste_from`) | `ask_later` | `suggest_feature`, `list_feature_suggestions` | `unlink_account` |
-| `get_history` | | | |
+| Area | Tools |
+|---|---|
+| Who | `whoami`, `list_users`, `capabilities`, `list_identities`, `create_link_code`, `link_account`, `unlink_account` |
+| Know | `get_taste_profile`, `get_taste_portrait`, `search`, `search_by_sound`, `similar_items`, `get_item`, `get_history`, `year_review` |
+| Recommend | `recommend` (mood, `taste_from`), `radio` (energy arcs), `next_up`, `why_not` |
+| Together | `start_group`, `list_groups`, `group_recommendations`, `record_group_pick`, `end_group` |
+| Right now | `list_moods`, `set_mood`, `clear_mood`, `set_activity`, `get_context` |
+| Teach | `remember`, `list_facts`, `forget`, `rate_item`, `more_like_this`, `less_like_this`, `update_settings`, `add_goal`, `list_goals` |
+| Ask | `get_questions`, `answer_question`, `skip_question`, `ask_later` |
+| Music to get | `new_releases`, `wanted`, `want` |
+| Privacy | `set_incognito`, `forget_history`, `access_log` |
+| Muse itself | `suggest_feature`, `list_feature_suggestions` |
 
-Prompts: `taste_interview` (a short interview that fills profile gaps) and `use_my_taste`
-(picks in one domain from taste in another, e.g. films for your music taste).
+Prompts: `taste_interview`, `use_my_taste` (e.g. films for your music taste), `watch_together`.
 
 The server's instructions tell the assistant to ask one question at a time, only when it fits,
 to store only taste and listening/viewing context (nothing sensitive), to say what it stored,

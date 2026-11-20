@@ -29,6 +29,7 @@ os.environ["MUSE_ADAPTER_KEYS"] = "mono:mono-key,jellyfin:jf-key"
 os.environ["MUSE_ADMIN_TOKEN"] = "admin-secret"
 os.environ["MUSE_QUERY_EMBEDDER"] = "none"
 os.environ["MUSE_QUERY_EMBED_MOODS"] = "0"
+os.environ["MUSE_OUTBOUND_ALLOW_PRIVATE"] = "example,cal.example"
 
 
 def load_package(name: str, path: Path):

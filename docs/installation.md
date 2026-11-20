@@ -76,6 +76,21 @@ Each adapter has its own setup tutorial, since each upstream service is wired in
 - [Mono](adapters/mono.md) — implemented (Mono talks to Muse directly; configure it on the
   Mono side)
 
+## 4a. Catalog, audio analyzer, scheduler
+
+```bash
+docker compose up -d catalog audio-analyzer scheduler
+```
+
+- `catalog` needs outbound HTTPS to musicbrainz.org, api.listenbrainz.org, labs.api.listenbrainz.org
+  and api.deezer.com. Skip it to keep taste entirely in the house (no discovery or new releases).
+- `audio-analyzer` downloads its model (~600 MB) on first start into a volume; set
+  `MUSE_MONO_URL` + `MUSE_MONO_STREAM_TOKEN` (and `MONO_MUSE_STREAM_TOKEN` on Mono) so it can
+  listen to Mono. CPU by default (`MUSE_AUDIO_PER_CYCLE` tracks per minute); with an NVIDIA GPU:
+  `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build audio-analyzer`.
+- `scheduler`: set `MUSE_WEATHER_LAT/LON` for weather context.
+- Apply `db/migrations/008_*.sql`, `009_*.sql`, `010_*.sql` by hand on existing databases.
+
 ## 4b. Query API and MCP (assistants)
 
 ```bash

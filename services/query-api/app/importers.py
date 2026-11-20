@@ -187,15 +187,24 @@ def soundcloud(name: str, raw: bytes) -> Iterator[dict]:
 PARSERS = {"spotify": spotify, "youtube": youtube, "goodreads": goodreads, "storygraph": storygraph, "soundcloud": soundcloud}
 
 
-def parse(kind: str, files: list[tuple[str, bytes]]) -> list[dict]:
+MAX_UNZIPPED = 1_000_000_000  # zip bombs: refuse archives that expand beyond 1 GB of JSON/CSV
+MAX_FILES = 2000
+
+
+def parse(kind: str, files: list[tuple[str, bytes]], _depth: int = 0) -> list[dict]:
     out: list[dict] = []
     for name, raw in files:
         if name.lower().endswith(".zip"):
             import zipfile
 
+            if _depth > 0:
+                continue  # no zips inside zips
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                inner = [(n, z.read(n)) for n in z.namelist() if n.lower().endswith((".json", ".csv")) and z.getinfo(n).file_size < 200_000_000]
-            out += parse(kind, inner)
+                infos = [i for i in z.infolist() if i.filename.lower().endswith((".json", ".csv"))]
+                if len(infos) > MAX_FILES or sum(i.file_size for i in infos) > MAX_UNZIPPED:
+                    raise ValueError("archive too large once unpacked")
+                inner = [(i.filename, z.read(i)) for i in infos]
+            out += parse(kind, inner, _depth + 1)
             continue
         if kind == "spotify" and not re.search(r"(stream|history|library)", name, re.I):
             continue  # other files in a Spotify export (userdata, inferences...) aren't taste

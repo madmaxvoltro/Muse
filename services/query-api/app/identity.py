@@ -167,14 +167,15 @@ async def list_people(conn) -> list[dict]:
     return sorted(out, key=lambda p: p["last_active"] or "", reverse=True)
 
 
-async def create_token(conn, user_id: uuid.UUID | None, label: str | None, can_write: bool) -> dict:
+async def create_token(conn, user_id: uuid.UUID | None, label: str | None, can_write: bool, expires_days: int | None = None) -> dict:
     token = "muse_" + secrets.token_urlsafe(32)
     if user_id is not None:
         user_id = await canonical_user(conn, user_id)
         await ensure_user(conn, user_id)
+    expires = datetime.now(timezone.utc) + timedelta(days=expires_days) if expires_days else None
     row = await conn.fetchrow(
-        "INSERT INTO api_token (token_hash, user_id, label, can_write) VALUES ($1, $2, $3, $4) RETURNING id, created_at",
-        hash_secret(token), user_id, label, can_write,
+        "INSERT INTO api_token (token_hash, user_id, label, can_write, expires_at) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at",
+        hash_secret(token), user_id, label, can_write, expires,
     )
     return {
         "id": str(row["id"]),
@@ -182,6 +183,7 @@ async def create_token(conn, user_id: uuid.UUID | None, label: str | None, can_w
         "user_id": str(user_id) if user_id else None,
         "label": label,
         "can_write": can_write,
+        "expires_at": expires.isoformat() if expires else None,
         "note": "Shown once. Use it as MUSE_TOKEN for the Muse MCP server, or as a Bearer token for the query API.",
     }
 

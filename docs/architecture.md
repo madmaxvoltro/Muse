@@ -212,3 +212,35 @@ attackers (Tailscale/VLAN already covers that). Principles:
 - Backups (Proxmox Backup Server) must carry the same encryption requirement as the live DB.
 - Anomaly detection on the event store itself (unusual query volume/time) is a candidate future
   feature — an IDS-like layer on top of the append-only log.
+
+## Understanding taste (beyond metadata)
+
+Text embeddings of titles, genres and lyrics only know what tags say. Muse also uses:
+- **Sound**: the audio analyzer decodes parts of each track (intro, body, outro; or a 30 s
+  preview) and computes tempo, key/Camelot, energy, danceability, acousticness... plus a CLAP
+  embedding of how it sounds. Taste in sound is averaged from what is finished/loved vs skipped.
+- **Facets**: spherical k-means per person and domain, in text and sound space, so a person with
+  two tastes gets two centres; each facet gets room in every list. Sound facets are named from a
+  descriptor vocabulary embedded with CLAP's text encoder (the taste portrait).
+- **Behaviour**: items played together in sessions (PPMI + SVD) and A->B transitions with how they
+  ended; relations that no metadata contains.
+- **Preference models**: logistic regression on a person's likes vs skips over audio features,
+  kept only when it predicts on held-out data.
+- **Context tastes**: per daypart, weekend, device class.
+
+## Engine
+
+`services/recommendation-api/app/engine.py`: generators (taste, facets, sound, behaviour,
+co-occurrence, new arrivals, mood, goals) -> features in every space -> hand weights or a learned
+ranker (activated only when it beats them on holdout, trained from logged impressions and their
+outcomes) -> facts, ignored-impression penalty -> re-rank with facet quotas, artist/genre caps,
+explore slots. `/next` and `/radio` score transitions (sound, Camelot key, tempo incl. half/double
+time, energy arc, played-after) with beam search. `/group-recommendations` combines per-member
+scores (mean + least misery, fairness memory, vetoes).
+
+## Outside the library, and outside the house
+
+The catalog worker uses MusicBrainz (ids, genres, release groups), ListenBrainz (listening
+similarity) and Deezer (related artists, previews, BPM): catalog tracks become recommendable as
+discoveries, new releases of loved artists and good discoveries become the wanted list. What
+leaves the house is listed in `docs/security-audit.md`.

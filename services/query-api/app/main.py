@@ -23,7 +23,7 @@ from muse_schema import RATED_WEIGHTS, identity_group
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from . import groups, identity, knowledge, mine, music, profile, questions, recclient, search, situation
+from . import groups, guards, identity, knowledge, mine, music, profile, questions, recclient, search, situation
 from .auth import Principal, admin_only, current_principal, resolve_user, writer
 from .db import close_pool, get_pool
 from .embedder import get_embedder
@@ -184,7 +184,13 @@ async def link(body: LinkIn, user: str = "me", p: Principal = Depends(writer)) -
     async with pool.acquire() as conn:
         uid = p.user_id if (user == "me" and p.kind == "adapter") else await resolve_user(conn, p, user)
         label = body.label or (f"{p.source}" if p.source else None)
-        result = await identity.redeem_link_code(conn, uid, body.code, label)
+        caller = f"{p.kind}:{p.source or ''}:{uid}"
+        guards.link_failures.check(caller)
+        try:
+            result = await identity.redeem_link_code(conn, uid, body.code, label)
+        except HTTPException:
+            guards.link_failures.hit(caller)
+            raise
         return {**result, "identity": await identity.describe_identity(conn, uuid.UUID(result["user_id"]))}
 
 
@@ -222,6 +228,7 @@ class TokenIn(BaseModel):
     can_write: bool = True
     user: str | None = "me"  # admin: a user id, or null for a household token
     display_name: str | None = None  # set the person's name while at it (adapters know it)
+    expires_days: int | None = Field(None, ge=1, le=3650, description="token stops working after this many days")
 
 
 @app.post("/v1/tokens")
@@ -231,11 +238,11 @@ async def new_token(body: TokenIn, p: Principal = Depends(writer)) -> dict:
         if body.user is None:
             if not p.admin:
                 raise HTTPException(403, "only an admin can create household tokens")
-            return await identity.create_token(conn, None, body.label or "household", body.can_write)
+            return await identity.create_token(conn, None, body.label or "household", body.can_write, body.expires_days)
         uid = await resolve_user(conn, p, body.user)
         if body.display_name:
             await identity.ensure_user(conn, uid, body.display_name)
-        return await identity.create_token(conn, uid, body.label, body.can_write)
+        return await identity.create_token(conn, uid, body.label, body.can_write, body.expires_days)
 
 
 @app.get("/v1/tokens")
@@ -345,6 +352,8 @@ async def recommend(
     taste_from: str | None = None,
     blend: float | None = Query(None, ge=0, le=1),
     source: list[str] | None = Query(None),
+    mood: str | None = Query(None, description="a mood preset or a few words"),
+    tz: str | None = None,
     p: Principal = Depends(current_principal),
 ) -> dict:
     pool = await get_pool()
@@ -352,7 +361,7 @@ async def recommend(
         uid = await resolve_user(conn, p, user)
         try:
             recs = await recclient.recommendations(str(uid), item_type, limit=limit, explore_ratio=explore_ratio,
-                                                   taste_from=taste_from, blend=blend, source=source)
+                                                   taste_from=taste_from, blend=blend, source=source, mood=mood, tz=tz)
         except recclient.RecUnavailable as e:
             raise HTTPException(503, f"recommendation API unavailable: {e}")
         items = recs.get("recommendations", [])
@@ -362,6 +371,37 @@ async def recommend(
             if d:
                 r.update({k: v for k, v in summarize_metadata(d["item_type"], d["metadata"]).items() if k not in r or not r[k]})
         return recs
+
+
+@app.get("/v1/users/{user}/radio")
+async def radio(user: str, seed_source: str | None = None, seed_id: str | None = None, item_type: str = "track",
+                length: int = Query(25, ge=2, le=100), arc: str = "steady", discovery: float = Query(0.3, ge=0, le=1),
+                playable_source: list[str] | None = Query(None), mood: str | None = None, tz: str | None = None,
+                p: Principal = Depends(current_principal)) -> dict:
+    """A session that fits the person and flows (sound, key, tempo, energy arc)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        uid = await resolve_user(conn, p, user)
+    try:
+        return await recclient.get(f"/radio/{uid}", {"seed_source": seed_source, "seed_id": seed_id, "item_type": item_type, "length": length,
+                                                     "arc": arc, "discovery": discovery, "playable_source": playable_source, "mood": mood, "tz": tz})
+    except recclient.RecUnavailable as e:
+        raise HTTPException(503, str(e))
+
+
+@app.get("/v1/users/{user}/next")
+async def next_up(user: str, source: str, source_item_id: str, n: int = Query(5, ge=1, le=50), history: list[str] | None = Query(None),
+                  arc: str = "steady", playable_source: list[str] | None = Query(None), mood: str | None = None,
+                  p: Principal = Depends(current_principal)) -> dict:
+    """What should follow an item for this person."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        uid = await resolve_user(conn, p, user)
+    try:
+        return await recclient.get(f"/next/{uid}", {"source": source, "source_item_id": source_item_id, "n": n, "history": history,
+                                                    "arc": arc, "playable_source": playable_source, "mood": mood})
+    except recclient.RecUnavailable as e:
+        raise HTTPException(503, str(e))
 
 
 # --- teach: feedback, facts, settings ------------------------------------------------------------

@@ -17,7 +17,7 @@ from muse_schema import context as C
 from pydantic import BaseModel, Field
 from qdrant_client.http.models import FieldCondition, Filter, FilterSelector, MatchValue
 
-from . import importers, recclient
+from . import guards, importers, recclient
 from .auth import Principal, admin_only, current_principal, resolve_user, writer
 from .db import get_pool
 from .identity import mark_dirty
@@ -247,6 +247,8 @@ async def erase(user: str, confirm: bool = False, p: Principal = Depends(writer)
                 counts[table] = int(res.split()[-1])
             await conn.execute("DELETE FROM user_alias WHERE user_id = $1 OR alias_id = ANY($2::uuid[])", uid, group)
             await conn.execute("UPDATE group_session SET members = array_remove(members, $1)", uid)
+            await conn.execute("UPDATE group_pick SET members = array_remove(members, $1), fits = fits - $2", uid, str(uid))
+            await conn.execute("DELETE FROM notification_log WHERE key LIKE '%' || $1 || '%'", str(uid))
             await conn.execute("UPDATE access_log SET subject_user_id = NULL, actor_user_id = NULL WHERE subject_user_id = $1 OR actor_user_id = $1", uid)
     qd = _q()
     for coll in ("taste_vectors", "audio_taste", "behavior_taste", "taste_facets", "taste_facets_audio"):
@@ -375,17 +377,13 @@ async def add_webhook(body: WebhookIn, p: Principal = Depends(writer)) -> dict:
     bad = [e for e in body.events if e not in EVENT_TYPES]
     if bad:
         raise HTTPException(422, f"unknown events {bad}; choose from {EVENT_TYPES}")
-    if not body.url.startswith(("https://", "http://")):
-        raise HTTPException(422, "url must be http(s)")
+    if body.user is None and not p.admin:
+        raise HTTPException(403, "only an admin can create household webhooks")
+    guards.outbound_url(body.url, p.admin)
     secret = "whsec_" + secrets.token_urlsafe(24)
     pool = await get_pool()
     async with pool.acquire() as conn:
-        if body.user is None:
-            if not p.admin:
-                raise HTTPException(403, "only an admin can create household webhooks")
-            uid = None
-        else:
-            uid = await resolve_user(conn, p, body.user)
+        uid = None if body.user is None else await resolve_user(conn, p, body.user)
         row = await conn.fetchrow("INSERT INTO webhook (user_id, url, secret, events) VALUES ($1,$2,$3,$4) RETURNING id", uid, body.url, secret, body.events)
     return {"id": str(row["id"]), "secret": secret, "events": body.events, "user_id": str(uid) if uid else None,
             "note": "Verify deliveries: X-Muse-Signature = 'sha256=' + hex(HMAC-SHA256(secret, raw body)). The secret is shown once."}

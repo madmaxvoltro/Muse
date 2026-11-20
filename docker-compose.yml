@@ -57,6 +57,7 @@ services:
       MUSE_ADMIN_TOKEN: ${MUSE_ADMIN_TOKEN}
       MUSE_ADAPTER_KEYS: ${MUSE_ADAPTER_KEYS}
       MUSE_AUDIO_URL: http://audio-analyzer:8004
+      MUSE_OUTBOUND_ALLOW_PRIVATE: ${MUSE_OUTBOUND_ALLOW_PRIVATE:-}
     depends_on: [postgres, qdrant, recommendation-api]
     networks: [muse-net]
 

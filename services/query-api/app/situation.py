@@ -175,6 +175,9 @@ async def add_calendar(user: str, body: CalendarIn, p: Principal = Depends(write
     url = body.url.strip().replace("webcal://", "https://", 1)
     if not url.startswith(("https://", "http://")):
         raise HTTPException(422, "calendar url must be http(s) or webcal")
+    from .guards import outbound_url
+
+    outbound_url(url, p.admin)
     pool = await get_pool()
     async with pool.acquire() as conn:
         uid = await resolve_user(conn, p, user)

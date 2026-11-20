@@ -35,6 +35,12 @@ TASTE_BUCKETS = ITEM_TYPES + ["_combined"]
 # MUSE_READ_KEYS="vesper:xxxx,jellyfin-plugin:yyyy": callers must send X-Muse-Read-Key. Read
 # keys can only read; ingestion keys (MUSE_ADAPTER_KEYS) can only write. Unset = open (dev).
 _READ_KEYS = {k.split(":", 1)[1] for k in os.environ.get("MUSE_READ_KEYS", "").split(",") if ":" in k}
+if not _READ_KEYS:
+    import logging
+
+    logging.getLogger("muse.rec").warning(
+        "MUSE_READ_KEYS is not set: anything that can reach this API can read every person's recommendations and context. "
+        "Set read keys (and MUSE_QUERY_READ_KEY for the query API) outside development.")
 
 
 async def require_read_key(request: Request, x_muse_read_key: str | None = Header(default=None)) -> None:
