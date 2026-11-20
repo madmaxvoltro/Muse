@@ -44,6 +44,31 @@ services:
     depends_on: [postgres, qdrant]
     networks: [muse-net]
 
+  query-api:
+    build:
+      context: .
+      dockerfile: services/query-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
+      MUSE_ADMIN_TOKEN: ${MUSE_ADMIN_TOKEN}
+      MUSE_ADAPTER_KEYS: ${MUSE_ADAPTER_KEYS}
+    depends_on: [postgres, qdrant, recommendation-api]
+    networks: [muse-net]
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: services/mcp-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_QUERY_URL: http://query-api:8002
+    depends_on: [query-api]
+    networks: [muse-net]
+
   embedding-worker:
     build:
       context: .

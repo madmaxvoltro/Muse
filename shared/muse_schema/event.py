@@ -18,6 +18,8 @@ class Source(str, Enum):
     OPENWEBUI = "openwebui"
     NAVIDROME = "navidrome"
     AUDIOBOOKSHELF = "audiobookshelf"
+    MONO = "mono"  # self-hosted music server (github.com/madmaxvoltro/mono), item_type "track"
+    MUSE = "muse"  # Muse itself: answers to its questions, things an assistant told it (query API / MCP)
 
 
 class ItemType(str, Enum):
@@ -48,6 +50,8 @@ class Action(str, Enum):
     RATED = "rated"  # explicit thumbs (Vesper, via the Jellyfin user rating); metadata.value -1/1/2
     CATALOGED = "cataloged"  # item exists in a library, no user signal attached — for backfilling
     # content embeddings from a library the adapter didn't watch the user acquire (see jellyfin adapter).
+    UNFAVORITED = "unfavorited"  # took a favourite back; cancels the favourite's pull on the taste vector
+    ADDED_TO_PLAYLIST = "added_to_playlist"  # deliberate curation, stronger than a single play
 
 
 # Default action_weight per action — adapters may override, but this keeps
@@ -66,6 +70,8 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.TRAILER_PLAYED: 0.15,
     Action.REQUESTED: 0.6,
     Action.RATED: 1.0,  # adapters set the real weight from metadata.value, see RATED_WEIGHTS
+    Action.UNFAVORITED: -1.5,  # exactly undoes FAVORITED in the taste vector's weighted sum
+    Action.ADDED_TO_PLAYLIST: 0.8,
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.

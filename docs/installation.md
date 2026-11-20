@@ -73,6 +73,19 @@ Each adapter has its own setup tutorial, since each upstream service is wired in
 - [Audiobookshelf](adapters/audiobookshelf.md) — not yet implemented
 - [arr-stack](adapters/arr.md) — implemented, and required for the curator's add/remove
   calls to work against a real Radarr/Sonarr instance
+- [Mono](adapters/mono.md) — implemented (Mono talks to Muse directly; configure it on the
+  Mono side)
+
+## 4b. Query API and MCP (assistants)
+
+```bash
+docker compose up -d query-api mcp-server
+```
+
+Set `MUSE_ADMIN_TOKEN` in `.env` first. Mint a personal token per person
+(`POST /v1/tokens`, or from Mono's Settings → Muse) and connect an assistant — see
+[`services/mcp-server/README.md`](../services/mcp-server/README.md). On a database created
+before `007_people_and_knowledge.sql` existed, apply it by hand (see the file's header).
 
 Bring adapters online one at a time and check `docker compose logs -f <adapter>` after each —
 easier to spot a misconfigured upstream URL or bad API key than debugging all of them at once.

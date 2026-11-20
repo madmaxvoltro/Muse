@@ -144,6 +144,46 @@ exactly across services.
 - **Cold-start profiles** (e.g. a profile with only Jellyfin data) are handled entirely by the
   existing confidence mechanism — no separate cold-start logic needed.
 
+**Linked identities (implemented).** One person is one canonical `user_id` plus any number of
+aliases (`user_alias`): the Jellyfin GUID, the Mono account, a SearxNG id. Linking is explicit,
+never inferred: a single-use code made on one account and redeemed on the other (query API /
+MCP / Mono's settings), or an admin call. Events keep the id they were written with — the store
+stays append-only and unlinking is a row delete — and readers resolve at read time
+(`shared/muse_schema/identity.py`): the embedding worker builds one taste vector per person over
+all their ids, the recommendation API excludes what any of their ids has seen, profiles and
+search cover them all.
+
+## What Muse is told (facts, questions)
+
+Behaviour is ambiguous; people and their assistants can say what it means. Three tables
+(`db/migrations/007_people_and_knowledge.sql`), all written through the query API:
+
+- **Facts** (`profile_fact`): "loves slow Dutch ballads", "never suggest musicals". Facts with a
+  sentiment are embedded and averaged into the taste vector like items (so a fact can create a
+  domain's vector from nothing — cold start by interview); facts that name a `subject` are also
+  applied exactly at ranking time (`avoid` filters, `likes`/`dislikes` move the score, and the
+  reason shows up in `why`). Retracting one undoes it on the next worker cycle.
+- **Questions** (`question`): Muse generates them where behaviour can't answer — a domain the
+  household uses but this person hasn't touched, genres/artists with mixed signals, uncertain
+  recommendations, how adventurous to be, whether one domain's taste may steer another.
+  Options carry effects (a `rated` event, a fact, an overlay setting). Assistants ask them in
+  conversation via MCP; Mono shows them in its Muse screen.
+- **Feature suggestions** (`feature_suggestion`): assistants propose improvements to Muse
+  itself while helping someone; duplicates become votes.
+
+The overlay gained `preferences.taste_blend`: how much of the cross-domain (`_combined`) taste is
+mixed into each domain's own, and the recommendation API accepts `taste_from=<domain>` to rank one
+domain with another's taste (music taste → films).
+
+## Query API and MCP
+
+`services/query-api` is the read-and-teach API for apps and assistants: search (semantic +
+keyword, personalised), profile, history, recommendations, facts, questions, identities, tokens.
+Per-person bearer tokens limit an assistant to one person; a source server can act for its own
+users with its ingestion key. `services/mcp-server` exposes it as MCP tools (stdio or shared
+streamable HTTP), with instructions that keep assistants to taste-only facts, one question at a
+time, and one person's data per conversation.
+
 ## Jellyfin plugin scope
 
 Deliberately scoped to the official `IHomeScreenSection` plugin API (Jellyfin 10.9+) rather than

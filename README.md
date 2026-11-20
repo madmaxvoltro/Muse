@@ -24,8 +24,11 @@ actually drives what gets suggested and, optionally, what gets downloaded.
 - **Autonomous discovery/curator**: optionally lets Muse manage a fixed storage budget
   (add *and* remove content) against Radarr/Sonarr, with a "Soon Gone" 48h grace window and
   whitelist-by-watching so nothing you actually want gets silently deleted.
-- **Multi-user**: auto-imports Jellyfin users as profiles, with privacy-safe identity resolution
-  across your other self-hosted accounts.
+- **Multi-user**: auto-imports Jellyfin users as profiles; one person's accounts on different
+  services (Jellyfin, Mono, ...) are linked explicitly with single-use codes into one profile.
+- **Teachable, and assistant-ready**: a query API (search, profile, recommendations incl.
+  "use my music taste for films") and an MCP server let an AI assistant know your taste, ask the
+  questions Muse has about you, and tell Muse what it learns — which then shapes recommendations.
 
 Full design rationale: [`docs/architecture.md`](docs/architecture.md).
 
@@ -37,7 +40,12 @@ SearxNG/Jellyfin/arr adapters. A local `docker compose build` succeeded for the 
 services; a full `up` wasn't completed in the dev sandbox (Docker Hub rate-limited image
 pulls there) — verify on your actual host. The Jellyfin plugin (C#/.NET) is written but not
 yet compiled/tested against a real Jellyfin instance. Still not started: Open WebUI,
-Navidrome, and Audiobookshelf adapters. See `docs/architecture.md` for the full design, and
+Navidrome, and Audiobookshelf adapters.
+
+Added since: Mono as a music source (see `docs/adapters/mono.md`), linked identities, facts and
+questions that feed the taste vector, the query API (`services/query-api`) and the MCP server
+(`services/mcp-server`). These are covered by an end-to-end test suite (`tests/`, runs the
+embedding worker, recommendation API, query API and MCP server against a real Postgres). See `docs/architecture.md` for the full design, and
 the `README.md` in each `services/*`/`adapters/*`/`jellyfin-plugin/` directory for
 per-component status and known gaps.
 
@@ -49,10 +57,13 @@ db/migrations/           Postgres/TimescaleDB schema
 services/ingestion-api/  write-only endpoint all adapters POST events to
 services/recommendation-api/  the 3-stage recommendation funnel
 services/embedding-worker/    content + taste embedding computation
+services/query-api/           search, profile, facts, questions, identity linking, tokens
+services/mcp-server/          MCP server for AI assistants (thin client of the query API)
 services/curator/             autonomous storage-budget manager
 adapters/                one subdirectory per source, each a small standalone service
 jellyfin-plugin/          C#/.NET plugin, IHomeScreenSection-scoped
 docs/                     architecture.md + installation.md + one setup guide per adapter
+tests/                    end-to-end tests (MUSE_TEST_DATABASE_URL=... pytest)
 ```
 
 ## Getting started

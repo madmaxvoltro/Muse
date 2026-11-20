@@ -4,18 +4,22 @@ re-ranking (scoring.rerank). Explainability comes for free: `reasons` on every
 scored candidate is exactly which weighted factors produced its score.
 """
 
+import json
 import os
+import uuid
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from muse_schema import identity_group
 from qdrant_client import QdrantClient
 
 from .candidates import generate_candidates
 from .db import close_pool, get_pool
-from .scoring import score_candidate, rerank
+from .scoring import EXPLORE_RATIO_DEFAULT, apply_knowledge, describe, rerank, score_candidate
 from . import soon_gone as soon_gone_repo
 
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 ITEM_TYPES = ["movie", "series", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
+TASTE_BUCKETS = ITEM_TYPES + ["_combined"]
 
 # MUSE_READ_KEYS="vesper:xxxx,jellyfin-plugin:yyyy": callers must send X-Muse-Read-Key. Read
 # keys can only read; ingestion keys (MUSE_ADAPTER_KEYS) can only write. Unset = open (dev).
@@ -50,35 +54,92 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def load_knowledge(pool, canonical: uuid.UUID) -> tuple[list[dict], dict]:
+    """Active facts and the overlay row (sliders, preferences) for one person.
+    Tolerates databases without migration 007 (no facts, plain overlay)."""
+    async with pool.acquire() as conn:
+        try:
+            facts = [
+                dict(r)
+                for r in await conn.fetch(
+                    "SELECT kind, domain, subject, sentiment, confidence FROM profile_fact "
+                    "WHERE user_id = $1 AND retracted_at IS NULL",
+                    canonical,
+                )
+            ]
+        except Exception:  # undefined_table on an un-migrated database
+            facts = []
+        try:
+            row = await conn.fetchrow(
+                "SELECT source_weights, explore_ratio, disabled_sources, preferences FROM user_overlay WHERE user_id = $1",
+                canonical,
+            )
+        except Exception:
+            row = await conn.fetchrow(
+                "SELECT source_weights, explore_ratio, disabled_sources FROM user_overlay WHERE user_id = $1", canonical
+            )
+    overlay: dict = {}
+    if row:
+        for k, v in dict(row).items():
+            overlay[k] = json.loads(v) if isinstance(v, str) and k != "explore_ratio" else v
+    return facts, overlay
+
+
 @app.get("/recommendations/{user_id}")
 async def recommendations(
     user_id: str,
     item_type: str = Query(..., description=f"one of {ITEM_TYPES}"),
     limit: int = Query(20, ge=1, le=100),
-    explore_ratio: float | None = Query(None, ge=0.0, le=1.0, description="overrides the default explore-slot ratio"),
+    explore_ratio: float | None = Query(None, ge=0.0, le=1.0, description="overrides the explore-slot ratio (default: the person's overlay, else 0.125)"),
+    source: list[str] | None = Query(None, description="only items from these sources, e.g. source=mono"),
+    taste_from: str | None = Query(None, description=f"rank with another domain's taste, one of {TASTE_BUCKETS} (e.g. music taste -> films)"),
+    blend: float | None = Query(None, ge=0.0, le=1.0, description="share of cross-domain taste mixed in (default: overlay preference taste_blend, else 0)"),
 ) -> dict:
     if item_type not in ITEM_TYPES:
         raise HTTPException(status_code=400, detail=f"item_type must be one of {ITEM_TYPES}")
+    if taste_from is not None and taste_from not in TASTE_BUCKETS:
+        raise HTTPException(status_code=400, detail=f"taste_from must be one of {TASTE_BUCKETS}")
+    try:
+        uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id must be a UUID")
 
     pool = await get_pool()
-    candidates = await generate_candidates(pool, qdrant(), user_id, item_type)
-    if not candidates:
-        return {"user_id": user_id, "item_type": item_type, "recommendations": [], "note": "cold-start: no taste vector yet"}
+    async with pool.acquire() as conn:
+        canonical, group = await identity_group(conn, user_id)
+    facts, overlay = await load_knowledge(pool, canonical)
+    prefs = overlay.get("preferences") or {}
+    if blend is None:
+        blend = float(prefs.get("taste_blend", 0.0) or 0.0)
+    if explore_ratio is None:
+        explore_ratio = float(overlay.get("explore_ratio") or EXPLORE_RATIO_DEFAULT)
 
-    scored = [score_candidate(c) for c in candidates]
-    kwargs = {"explore_ratio": explore_ratio} if explore_ratio is not None else {}
-    final = rerank(scored, limit=limit, **kwargs)
+    candidates = await generate_candidates(
+        pool, qdrant(), str(canonical), item_type,
+        group=group, taste_from=taste_from, blend=blend,
+        sources=source, exclude_sources=overlay.get("disabled_sources") or None,
+    )
+    base = {"user_id": user_id, "canonical_user_id": str(canonical), "item_type": item_type}
+    if not candidates:
+        return {**base, "recommendations": [], "note": "cold-start: no taste vector yet"}
+
+    domain_facts = [f for f in facts if f["domain"] in ("general", item_type)]
+    scored = apply_knowledge([score_candidate(c) for c in candidates], domain_facts, overlay.get("source_weights") or {})
+    final = rerank(scored, limit=limit, explore_ratio=explore_ratio)
 
     return {
-        "user_id": user_id,
-        "item_type": item_type,
+        **base,
         "recommendations": [
             {
                 "source": c.source,
                 "source_item_id": c.source_item_id,
+                "title": c.title,
+                "genres": c.genres,
                 "score": round(c.score, 4),
                 "confidence": round(c.confidence, 4),
+                "explore": c.confidence < 0.5,
                 "explanation": {k: round(v, 4) for k, v in c.reasons.items()},
+                "why": describe(c, domain_facts),
             }
             for c in final
         ],
