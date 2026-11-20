@@ -23,7 +23,7 @@ from muse_schema import RATED_WEIGHTS, identity_group
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from . import identity, knowledge, profile, questions, recclient, search
+from . import identity, knowledge, music, profile, questions, recclient, search
 from .auth import Principal, admin_only, current_principal, resolve_user, writer
 from .db import close_pool, get_pool
 from .embedder import get_embedder
@@ -31,7 +31,8 @@ from .items import DOMAINS, ITEM_TYPES, interactions, item_details, summarize_me
 
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 
-app = FastAPI(title="Muse Query API", version="0.1.0")
+app = FastAPI(title="Muse Query API", version="0.2.0")
+app.include_router(music.router)
 _qdrant: QdrantClient | None = None
 
 

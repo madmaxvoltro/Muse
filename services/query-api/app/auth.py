@@ -21,12 +21,15 @@ import os
 import uuid
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from muse_schema import canonical_user
 
 from .db import get_pool
 
 ADMIN_TOKEN = os.environ.get("MUSE_ADMIN_TOKEN", "")
+# History imports run as the person (via a token or an adapter): their events don't make an id
+# "belong" to that service for the adapter guard below.
+IMPORT_SOURCES = ("spotify", "youtube", "goodreads", "storygraph", "soundcloud", "app", "catalog")
 _ADAPTER_KEYS: dict[str, str] = {}
 for pair in os.environ.get("MUSE_ADAPTER_KEYS", "").split(","):
     if ":" in pair:
@@ -45,34 +48,46 @@ class Principal:
     can_write: bool
     label: str
     source: str | None = None  # adapter source name
+    token_id: uuid.UUID | None = None
+    app_source: str | None = None  # apps allowed to write events under their own source name
 
     @property
     def admin(self) -> bool:
         return self.kind == "admin"
 
 
+async def principal_for_token(token: str) -> Principal:
+    if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
+        return Principal("admin", None, True, "admin token")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE api_token SET last_used_at = now() WHERE token_hash = $1 AND revoked_at IS NULL "
+            "AND (expires_at IS NULL OR expires_at > now()) RETURNING id, user_id, label, can_write, app_source",
+            hash_secret(token),
+        )
+        if row is None:
+            raise HTTPException(401, "invalid, expired or revoked token")
+        if row["user_id"] is None:
+            return Principal("admin", None, row["can_write"], row["label"] or "household token", token_id=row["id"])
+        canonical = await canonical_user(conn, row["user_id"])
+    return Principal("user", canonical, row["can_write"], row["label"] or "token", token_id=row["id"], app_source=row["app_source"])
+
+
 async def current_principal(
+    request: Request,
     authorization: str | None = Header(default=None),
     x_muse_api_key: str | None = Header(default=None),
     x_muse_user: str | None = Header(default=None),
 ) -> Principal:
+    p = await _identify(authorization, x_muse_api_key, x_muse_user)
+    request.state.principal = p  # for the access log
+    return p
+
+
+async def _identify(authorization: str | None, x_muse_api_key: str | None, x_muse_user: str | None) -> Principal:
     if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-        if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
-            return Principal("admin", None, True, "admin token")
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "UPDATE api_token SET last_used_at = now() WHERE token_hash = $1 AND revoked_at IS NULL "
-                "RETURNING id, user_id, label, can_write",
-                hash_secret(token),
-            )
-            if row is None:
-                raise HTTPException(401, "invalid or revoked token")
-            if row["user_id"] is None:
-                return Principal("admin", None, row["can_write"], row["label"] or "household token")
-            canonical = await canonical_user(conn, row["user_id"])
-        return Principal("user", canonical, row["can_write"], row["label"] or "token")
+        return await principal_for_token(authorization[7:].strip())
 
     if x_muse_api_key:
         source = _ADAPTER_KEYS.get(x_muse_api_key.strip())
@@ -89,8 +104,9 @@ async def current_principal(
             # Events Muse wrote itself (answers, ratings via the API) carry metadata.via and
             # may be about any source's items; only ingested events say whose id this is.
             other = await conn.fetchval(
-                "SELECT source FROM event WHERE user_id = $1 AND source <> ALL($2::text[]) AND NOT metadata ? 'via' LIMIT 1",
-                uid, [source, "muse"],
+                "SELECT source FROM event WHERE user_id = $1 AND source <> ALL($2::text[]) AND NOT metadata ? 'via' "
+                "AND source <> ALL($3::text[]) LIMIT 1",
+                uid, [source, "muse"], list(IMPORT_SOURCES),
             )
         if other:
             raise HTTPException(403, f"user {uid} belongs to source '{other}', not '{source}'")

@@ -20,6 +20,14 @@ class Source(str, Enum):
     AUDIOBOOKSHELF = "audiobookshelf"
     MONO = "mono"  # self-hosted music server (github.com/madmaxvoltro/mono), item_type "track"
     MUSE = "muse"  # Muse itself: answers to its questions, things an assistant told it (query API / MCP)
+    CATALOG = "catalog"  # music that exists outside the library (MusicBrainz/ListenBrainz/Deezer, services/catalog)
+    # History imports (query API /v1/users/{u}/imports): not playable here, but real taste.
+    SPOTIFY = "spotify"
+    YOUTUBE = "youtube"
+    GOODREADS = "goodreads"
+    STORYGRAPH = "storygraph"
+    SOUNDCLOUD = "soundcloud"
+    APP = "app"  # third-party apps writing events with an app token (metadata.app names the app)
 
 
 class ItemType(str, Enum):

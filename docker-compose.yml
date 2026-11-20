@@ -59,6 +59,39 @@ services:
     depends_on: [postgres, qdrant, recommendation-api]
     networks: [muse-net]
 
+  # Music beyond the library: MusicBrainz / ListenBrainz / Deezer, new releases, wanted list.
+  # Needs outbound HTTPS to musicbrainz.org, api.listenbrainz.org, labs.api.listenbrainz.org, api.deezer.com.
+  catalog:
+    build:
+      context: .
+      dockerfile: services/catalog/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
+    depends_on: [postgres, recommendation-api]
+    networks: [muse-net]
+
+  # Listens to music: tempo, key, energy... and CLAP audio embeddings (what it sounds like).
+  # MUSE_MONO_URL + MUSE_MONO_STREAM_TOKEN let it stream Mono's files (only the parts it needs).
+  audio-analyzer:
+    build:
+      context: .
+      dockerfile: services/audio-analyzer/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_MONO_URL: ${MUSE_MONO_URL:-}
+      MUSE_MONO_STREAM_TOKEN: ${MUSE_MONO_STREAM_TOKEN:-}
+      MUSE_DEVICE: ${MUSE_DEVICE:-cpu}
+      MUSE_AUDIO_PER_CYCLE: ${MUSE_AUDIO_PER_CYCLE:-20}
+      MUSE_AUDIO_THREADS: ${MUSE_AUDIO_THREADS:-0}
+    volumes: [hf_cache_audio:/root/.cache/huggingface]
+    depends_on: [postgres, qdrant]
+    networks: [muse-net]
+
   mcp-server:
     build:
       context: .
@@ -150,3 +183,4 @@ networks:
 volumes:
   postgres_data:
   qdrant_data:
+  hf_cache_audio:
