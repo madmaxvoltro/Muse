@@ -17,35 +17,4 @@ def camelot(pitch_class: int, mode: str) -> str:
     return f"{(_MAJOR if mode == 'major' else _MINOR)[pitch_class % 12]}{'B' if mode == 'major' else 'A'}"
 
 
-def parse_camelot(code: str | None) -> tuple[int, str] | None:
-    if not code or len(code) < 2 or code[-1] not in "AB":
-        return None
-    try:
-        n = int(code[:-1])
-    except ValueError:
-        return None
-    return (n, code[-1]) if 1 <= n <= 12 else None
-
-
-def key_compatibility(a: str | None, b: str | None) -> float:
-    """1.0 same key; ~0.9 adjacent / relative; falls off further round the wheel. 0.5 if unknown."""
-    pa, pb = parse_camelot(a), parse_camelot(b)
-    if pa is None or pb is None:
-        return 0.5
-    steps = min((pa[0] - pb[0]) % 12, (pb[0] - pa[0]) % 12)
-    same_mode = pa[1] == pb[1]
-    if steps == 0:
-        return 1.0 if same_mode else 0.9
-    if steps == 1:
-        return 0.9 if same_mode else 0.7
-    if steps == 2:
-        return 0.6 if same_mode else 0.45
-    return max(0.0, 0.5 - 0.08 * steps)
-
-
-def tempo_compatibility(a: float | None, b: float | None) -> float:
-    """Closeness of two tempos, counting half/double time as close (85 -> 170 BPM is a mix)."""
-    if not a or not b:
-        return 0.5
-    best = min(abs(a - b * r) / a for r in (0.5, 1.0, 2.0))
-    return max(0.0, 1.0 - best / 0.12)  # within ~12% is mixable, linearly worse until there
+from muse_schema.audio import key_compatibility, parse_camelot, tempo_compatibility  # noqa: E402,F401  (shared with ranking)

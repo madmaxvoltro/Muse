@@ -31,6 +31,7 @@ from typing import Any
 
 import asyncpg
 from muse_schema import canonical_map, content_point_id, identity_group, taste_point_id
+from muse_schema import context as ctxmod
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
 
@@ -41,11 +42,13 @@ DATABASE_URL = os.environ["MUSE_DATABASE_URL"]
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 MODEL_NAME = os.environ.get("MUSE_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 RUN_INTERVAL_SECONDS = int(os.environ.get("MUSE_EMBEDDING_INTERVAL_SECONDS", "300"))
+DEEP_INTERVAL_SECONDS = int(os.environ.get("MUSE_DEEP_TASTE_INTERVAL_SECONDS", "3600"))
 DECAY_HALFLIFE_DAYS = float(os.environ.get("MUSE_TASTE_DECAY_HALFLIFE_DAYS", "60"))
 TASTE_LOOKBACK_DAYS = int(os.environ.get("MUSE_TASTE_LOOKBACK_DAYS", "730"))
 # A stated preference counts like this many favourites' worth of weight at full confidence.
 FACT_WEIGHT = float(os.environ.get("MUSE_FACT_WEIGHT", "2.0"))
 FACT_KINDS = ("likes", "dislikes", "avoid")
+CONTEXT_MIN_EVENTS = int(os.environ.get("MUSE_CONTEXT_MIN_EVENTS", "15"))
 
 CONTENT_COLLECTION = "content_items"
 TASTE_COLLECTION = "taste_vectors"
@@ -98,12 +101,14 @@ async def embed_new_content(
         state = await conn.fetchrow("SELECT last_processed_at FROM embedding_worker_state")
         since = state["last_processed_at"]
 
+        # The newest event *with metadata* per item: plays and skips often carry none, and
+        # picking one of those would leave the item un-embedded forever.
         rows = await conn.fetch(
             """
             SELECT DISTINCT ON (source, source_item_id)
                 source, source_item_id, item_type, metadata, user_id, "timestamp"
             FROM event
-            WHERE ingested_at > $1 AND source_item_id IS NOT NULL
+            WHERE ingested_at > $1 AND source_item_id IS NOT NULL AND metadata <> '{}'::jsonb
             ORDER BY source, source_item_id, "timestamp" DESC
             """,
             since,
@@ -164,7 +169,7 @@ async def recompute_taste_vectors(
             canonical, group = await identity_group(conn, user_id)
             rows = await conn.fetch(
                 """
-                SELECT source, source_item_id, item_type, action_weight, "timestamp"
+                SELECT source, source_item_id, item_type, action_weight, "timestamp", device_context
                 FROM event
                 WHERE user_id = ANY($1::uuid[])
                   AND source_item_id IS NOT NULL
@@ -192,6 +197,13 @@ async def recompute_taste_vectors(
                     continue
                 per_type[row["item_type"]].append((row["source"], row["source_item_id"], w))
                 per_type["_combined"].append((row["source"], row["source_item_id"], w))
+                # Context tastes: "track@night", "movie@weekend", "track@car" ...
+                dc = row["device_context"]
+                dc = json.loads(dc) if isinstance(dc, str) else dc
+                for b in ctxmod.buckets(dc, row["timestamp"]):
+                    per_type[ctxmod.bucket_key(row["item_type"], b)].append((row["source"], row["source_item_id"], w))
+            for bucket in [b for b in per_type if "@" in b and len(per_type[b]) < CONTEXT_MIN_EVENTS]:
+                del per_type[bucket]  # too little to say anything about that situation
 
             # Facts: (vector, weight) per bucket. 'general' facts go into every bucket.
             fact_entries: dict[str, list[tuple[list[float], float]]] = defaultdict(list)
@@ -208,7 +220,7 @@ async def recompute_taste_vectors(
                         fact_entries[f["domain"]].append(entry)
                     fact_entries["_combined"].append(entry)
                 for bucket in set(per_type) | set(fact_entries):
-                    if bucket != "_combined":
+                    if bucket != "_combined" and "@" not in bucket:
                         fact_entries[bucket].extend(general)
 
             for item_type in set(per_type) | set(fact_entries):
@@ -284,6 +296,35 @@ async def run_once(pool: asyncpg.Pool, qdrant: QdrantClient, model: Any) -> None
             await conn.execute("UPDATE embedding_worker_state SET last_processed_at = $1", max_ts)
 
 
+async def maybe_deep_taste(pool: asyncpg.Pool, qdrant: QdrantClient, state: dict) -> dict | None:
+    """Hourly: facets, audio taste, preference models, behaviour embeddings (deep_taste.py),
+    for people with activity since the last run."""
+    import deep_taste
+
+    now = time.monotonic()
+    if state.get("last_deep") is not None and now - state["last_deep"] < DEEP_INTERVAL_SECONDS:
+        return None
+    since = state.get("deep_since", datetime(1970, 1, 1, tzinfo=timezone.utc))
+    started = datetime.now(timezone.utc)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT COALESCE(a.user_id, e.user_id) AS person FROM event e LEFT JOIN user_alias a ON a.alias_id = e.user_id "
+            "WHERE e.ingested_at > $1 AND e.action <> 'cataloged'", since)
+    if state.get("descriptors") is None:
+        state["descriptors"] = await deep_taste.descriptor_vectors()
+    result = await deep_taste.run(pool, qdrant, [str(r["person"]) for r in rows], state.get("descriptors"))
+    import ranker_training
+
+    async with pool.acquire() as conn:
+        try:
+            result["impressions_labelled"] = await ranker_training.label_outcomes(conn)
+            result["ranker"] = await ranker_training.train(conn)
+        except asyncpg.UndefinedTableError:
+            pass  # database without migration 008
+    state["last_deep"], state["deep_since"] = now, started
+    return result
+
+
 async def _json_codecs(conn: asyncpg.Connection) -> None:
     # asyncpg returns json/jsonb as text by default; event.metadata is read as a dict.
     for typ in ("json", "jsonb"):
@@ -302,12 +343,17 @@ async def main() -> None:
     pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=_json_codecs)
 
     logger.info("embedding worker started, interval=%ds", RUN_INTERVAL_SECONDS)
+    deep_state: dict = {}
     while True:
         start = time.monotonic()
         try:
             await run_once(pool, qdrant, model)
         except Exception:
             logger.exception("embedding worker cycle failed")
+        try:
+            await maybe_deep_taste(pool, qdrant, deep_state)
+        except Exception:
+            logger.exception("deep taste cycle failed")
         elapsed = time.monotonic() - start
         await asyncio.sleep(max(RUN_INTERVAL_SECONDS - elapsed, 5))
 

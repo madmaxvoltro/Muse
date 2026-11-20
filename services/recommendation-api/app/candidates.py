@@ -18,6 +18,23 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchAny, MatchVal
 
 from .scoring import Candidate, confidence
 
+
+class _Conn:
+    """`async with _acq(x)`: a pool gives a connection, a connection is used as is."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _acq(x):
+    return x.acquire() if hasattr(x, "acquire") else _Conn(x)
+
 CANDIDATE_POOL_SIZE = 200
 
 
@@ -30,7 +47,7 @@ async def get_owned_item_ids(pool: asyncpg.Pool, user_ids: list[uuid.UUID]) -> s
     searched, trailer_played, added_watchlist, requested) must not, or a
     library-backed client such as Vesper would see every title it owns excluded.
     """
-    async with pool.acquire() as conn:
+    async with _acq(pool) as conn:
         rows = await conn.fetch(
             """
             SELECT DISTINCT source, source_item_id FROM event
@@ -50,7 +67,7 @@ async def get_user_genre_stats(
     basis for scoring candidates that share a genre. See Candidate.within_user_popularity
     / completion_rate / recency_of_similar / confidence in scoring.py.
     """
-    async with pool.acquire() as conn:
+    async with _acq(pool) as conn:
         rows = await conn.fetch(
             """
             SELECT source, source_item_id, action, action_weight, "timestamp"
