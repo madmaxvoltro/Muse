@@ -144,6 +144,46 @@ exactly across services.
 - **Cold-start profiles** (e.g. a profile with only Jellyfin data) are handled entirely by the
   existing confidence mechanism — no separate cold-start logic needed.
 
+**Linked identities (implemented).** One person is one canonical `user_id` plus any number of
+aliases (`user_alias`): the Jellyfin GUID, the Mono account, a SearxNG id. Linking is explicit,
+never inferred: a single-use code made on one account and redeemed on the other (query API /
+MCP / Mono's settings), or an admin call. Events keep the id they were written with — the store
+stays append-only and unlinking is a row delete — and readers resolve at read time
+(`shared/muse_schema/identity.py`): the embedding worker builds one taste vector per person over
+all their ids, the recommendation API excludes what any of their ids has seen, profiles and
+search cover them all.
+
+## What Muse is told (facts, questions)
+
+Behaviour is ambiguous; people and their assistants can say what it means. Three tables
+(`db/migrations/007_people_and_knowledge.sql`), all written through the query API:
+
+- **Facts** (`profile_fact`): "loves slow Dutch ballads", "never suggest musicals". Facts with a
+  sentiment are embedded and averaged into the taste vector like items (so a fact can create a
+  domain's vector from nothing — cold start by interview); facts that name a `subject` are also
+  applied exactly at ranking time (`avoid` filters, `likes`/`dislikes` move the score, and the
+  reason shows up in `why`). Retracting one undoes it on the next worker cycle.
+- **Questions** (`question`): Muse generates them where behaviour can't answer — a domain the
+  household uses but this person hasn't touched, genres/artists with mixed signals, uncertain
+  recommendations, how adventurous to be, whether one domain's taste may steer another.
+  Options carry effects (a `rated` event, a fact, an overlay setting). Assistants ask them in
+  conversation via MCP; Mono shows them in its Muse screen.
+- **Feature suggestions** (`feature_suggestion`): assistants propose improvements to Muse
+  itself while helping someone; duplicates become votes.
+
+The overlay gained `preferences.taste_blend`: how much of the cross-domain (`_combined`) taste is
+mixed into each domain's own, and the recommendation API accepts `taste_from=<domain>` to rank one
+domain with another's taste (music taste → films).
+
+## Query API and MCP
+
+`services/query-api` is the read-and-teach API for apps and assistants: search (semantic +
+keyword, personalised), profile, history, recommendations, facts, questions, identities, tokens.
+Per-person bearer tokens limit an assistant to one person; a source server can act for its own
+users with its ingestion key. `services/mcp-server` exposes it as MCP tools (stdio or shared
+streamable HTTP), with instructions that keep assistants to taste-only facts, one question at a
+time, and one person's data per conversation.
+
 ## Jellyfin plugin scope
 
 Deliberately scoped to the official `IHomeScreenSection` plugin API (Jellyfin 10.9+) rather than
@@ -172,3 +212,35 @@ attackers (Tailscale/VLAN already covers that). Principles:
 - Backups (Proxmox Backup Server) must carry the same encryption requirement as the live DB.
 - Anomaly detection on the event store itself (unusual query volume/time) is a candidate future
   feature — an IDS-like layer on top of the append-only log.
+
+## Understanding taste (beyond metadata)
+
+Text embeddings of titles, genres and lyrics only know what tags say. Muse also uses:
+- **Sound**: the audio analyzer decodes parts of each track (intro, body, outro; or a 30 s
+  preview) and computes tempo, key/Camelot, energy, danceability, acousticness... plus a CLAP
+  embedding of how it sounds. Taste in sound is averaged from what is finished/loved vs skipped.
+- **Facets**: spherical k-means per person and domain, in text and sound space, so a person with
+  two tastes gets two centres; each facet gets room in every list. Sound facets are named from a
+  descriptor vocabulary embedded with CLAP's text encoder (the taste portrait).
+- **Behaviour**: items played together in sessions (PPMI + SVD) and A->B transitions with how they
+  ended; relations that no metadata contains.
+- **Preference models**: logistic regression on a person's likes vs skips over audio features,
+  kept only when it predicts on held-out data.
+- **Context tastes**: per daypart, weekend, device class.
+
+## Engine
+
+`services/recommendation-api/app/engine.py`: generators (taste, facets, sound, behaviour,
+co-occurrence, new arrivals, mood, goals) -> features in every space -> hand weights or a learned
+ranker (activated only when it beats them on holdout, trained from logged impressions and their
+outcomes) -> facts, ignored-impression penalty -> re-rank with facet quotas, artist/genre caps,
+explore slots. `/next` and `/radio` score transitions (sound, Camelot key, tempo incl. half/double
+time, energy arc, played-after) with beam search. `/group-recommendations` combines per-member
+scores (mean + least misery, fairness memory, vetoes).
+
+## Outside the library, and outside the house
+
+The catalog worker uses MusicBrainz (ids, genres, release groups), ListenBrainz (listening
+similarity) and Deezer (related artists, previews, BPM): catalog tracks become recommendable as
+discoveries, new releases of loved artists and good discoveries become the wanted list. What
+leaves the house is listed in `docs/security-audit.md`.
