@@ -27,11 +27,18 @@ actually drives what gets suggested and, optionally, what gets downloaded.
 - **Multi-user**: auto-imports Jellyfin users as profiles, with privacy-safe identity resolution
   across your other self-hosted accounts.
 
-Full design rationale: [`docs/architecture.md`](docs/architecture.md).
+- **One person, many apps**: link a Vesper profile and a Mono account to one Muse identity with
+  a short pairing code; watch together and get picks for everyone in the room.
+
+Full design rationale: [`docs/architecture.md`](docs/architecture.md). Client contract (Vesper,
+Mono, the Jellyfin plugin): [`docs/vesper.md`](docs/vesper.md).
 
 ## Status
 
-Core pipeline implemented and unit-tested: event schema, ingestion API, embedding worker,
+Muse now powers Vesper end to end: taste facets, seeded rows ("Because you watched…", "More
+like this" with an explore dial), "Why this" reason codes, moods, group recommendations, search
+by meaning, prefetch, Wrapped, linked identities and Soon Gone with Jellyfin ids. Schema
+migrations apply themselves on start-up. Core pipeline implemented and unit-tested: event schema, ingestion API, embedding worker,
 recommendation API (full 3-stage funnel), curator (300GB budget + Soon Gone), and the
 SearxNG/Jellyfin/arr adapters. A local `docker compose build` succeeded for the Python
 services; a full `up` wasn't completed in the dev sandbox (Docker Hub rate-limited image

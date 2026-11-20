@@ -8,6 +8,8 @@ COPY services/embedding-worker/requirements.txt .
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir /shared
-COPY services/embedding-worker/worker.py .
+COPY services/embedding-worker/worker.py services/embedding-worker/content.py ./
+
+EXPOSE 8002
 
 CMD ["python", "worker.py"]

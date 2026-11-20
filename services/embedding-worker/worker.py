@@ -13,6 +13,7 @@ Design (see docs/architecture.md):
 
 import asyncio
 import json
+import threading
 import logging
 import math
 import os
@@ -27,6 +28,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
 from sentence_transformers import SentenceTransformer
 
+from content import build_payload, collapse_events, item_text, merge_metadata
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("muse.embedding_worker")
 
@@ -40,19 +43,16 @@ TASTE_LOOKBACK_DAYS = int(os.environ.get("MUSE_TASTE_LOOKBACK_DAYS", "730"))
 CONTENT_COLLECTION = "content_items"
 TASTE_COLLECTION = "taste_vectors"
 VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dim
+EMBED_PORT = int(os.environ.get("MUSE_EMBED_PORT", "8002"))  # 0 disables the /embed endpoint
+
+# One model instance serves the worker loop and the /embed endpoint; encode() calls are
+# serialised so they never run concurrently on the same model.
+_model_lock = threading.Lock()
 
 
-def item_text(metadata: dict) -> str:
-    """Builds the text blob to embed for an item. v1: metadata fields only.
-    TODO (see docs/architecture.md): incorporate transcripts/subtitles where available.
-    """
-    parts = [
-        metadata.get("title", ""),
-        metadata.get("description", ""),
-        " ".join(metadata.get("genres", []) or []),
-        metadata.get("query", ""),  # search_query items
-    ]
-    return " ".join(p for p in parts if p).strip()
+def encode(model: SentenceTransformer, texts: list[str]) -> list[list[float]]:
+    with _model_lock:
+        return model.encode(texts, normalize_embeddings=True, batch_size=32).tolist()
 
 
 def ensure_collections(client: QdrantClient) -> None:
@@ -94,34 +94,38 @@ async def embed_new_content(
         )
         touched_users: set[str] = {str(u["user_id"]) for u in users}
         max_ts = max([since, *(u["last"] for u in users)])
-        points: list[PointStruct] = []
 
-        for row in rows:
+    # Merge with what Qdrant already knows about each item, so an event with thin metadata
+    # (a Vesper detail view) never erases directors, ratings or ids from a catalog event.
+    ids = [content_point_id(r["source"], r["source_item_id"]) for r in rows]
+    previous: dict[str, dict] = {}
+    for i in range(0, len(ids), 256):
+        for p in qdrant.retrieve(collection_name=CONTENT_COLLECTION, ids=ids[i : i + 256], with_payload=True):
+            previous[str(p.id)] = p.payload or {}
 
-            text = item_text(dict(row["metadata"]) if row["metadata"] else {})
-            if not text:
-                continue  # nothing to embed this item on yet
+    now_iso = datetime.now(timezone.utc).isoformat()
+    pending: list[tuple[str, dict, str]] = []
+    for row, pid in zip(rows, ids):
+        prev = previous.get(pid)
+        metadata = merge_metadata((prev or {}).get("metadata"), dict(row["metadata"]) if row["metadata"] else {})
+        text = item_text(metadata)
+        if not text:
+            continue  # nothing to embed this item on yet
+        payload = build_payload(row["source"], row["source_item_id"], row["item_type"], metadata, prev, now_iso)
+        pending.append((pid, payload, text))
 
-            vector = model.encode(text, normalize_embeddings=True).tolist()
-            points.append(
-                PointStruct(
-                    id=content_point_id(row["source"], row["source_item_id"]),
-                    vector=vector,
-                    payload={
-                        "source": row["source"],
-                        "source_item_id": row["source_item_id"],
-                        "item_type": row["item_type"],
-                        "title": (row["metadata"] or {}).get("title", ""),
-                        "genres": (row["metadata"] or {}).get("genres", []) or [],
-                    },
-                )
-            )
+    points: list[PointStruct] = []
+    for i in range(0, len(pending), 256):
+        batch = pending[i : i + 256]
+        vectors = await asyncio.to_thread(encode, model, [t for _, _, t in batch])
+        points.extend(PointStruct(id=pid, vector=v, payload=payload) for (pid, payload, _), v in zip(batch, vectors))
 
-        if points:
-            qdrant.upsert(collection_name=CONTENT_COLLECTION, points=points)
-            logger.info("upserted %d content embeddings", len(points))
+    if points:
+        for i in range(0, len(points), 256):
+            qdrant.upsert(collection_name=CONTENT_COLLECTION, points=points[i : i + 256])
+        logger.info("upserted %d content embeddings", len(points))
 
-        return touched_users, since, max_ts
+    return touched_users, since, max_ts
 
 
 def decay_weight(event_ts: datetime, now: datetime) -> float:
@@ -140,10 +144,12 @@ async def recompute_taste_vectors(
         for user_id in user_ids:
             rows = await conn.fetch(
                 """
-                SELECT source, source_item_id, item_type, action_weight, "timestamp"
+                SELECT source, source_item_id, item_type, action, action_weight, "timestamp",
+                       coalesce((metadata->>'co_viewer')::boolean, false) AS co_viewer
                 FROM event
                 WHERE user_id = $1
                   AND source_item_id IS NOT NULL
+                  AND action_weight <> 0
                   AND "timestamp" > now() - make_interval(days => $2::int)
                 """,
                 uuid.UUID(user_id),
@@ -154,12 +160,12 @@ async def recompute_taste_vectors(
 
             # Group weighted content-vector lookups per item_type, plus one combined bucket.
             per_type: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
-            for row in rows:
-                w = row["action_weight"] * decay_weight(row["timestamp"], now)
+            for source, sid, item_type, weight, ts in collapse_events([dict(r) for r in rows]):
+                w = weight * decay_weight(ts, now)
                 if w == 0:
                     continue
-                per_type[row["item_type"]].append((row["source"], row["source_item_id"], w))
-                per_type["_combined"].append((row["source"], row["source_item_id"], w))
+                per_type[item_type].append((source, sid, w))
+                per_type["_combined"].append((source, sid, w))
 
             for item_type, entries in per_type.items():
                 point_ids = [content_point_id(s, sid) for s, sid, _ in entries]
@@ -206,15 +212,42 @@ async def _json_codecs(conn: asyncpg.Connection) -> None:
     for typ in ("json", "jsonb"):
         await conn.set_type_codec(typ, encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
-async def main() -> None:
-    logger.info("loading embedding model %s", MODEL_NAME)
-    model = SentenceTransformer(MODEL_NAME)
+def embed_app(model: SentenceTransformer):
+    """POST /embed {"texts": [...]} -> {"vectors": [[...]]}. Used by the recommendation API
+    for semantic search and mood prompts, so queries are embedded with exactly the model the
+    content was embedded with, and the model is loaded once. Internal network only.
+    """
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel, Field
 
-    qdrant = QdrantClient(url=QDRANT_URL)
-    ensure_collections(qdrant)
+    app = FastAPI(title="Muse Embedding Worker", version="0.2.0")
 
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=_json_codecs)
+    class EmbedRequest(BaseModel):
+        texts: list[str] = Field(..., min_length=1, max_length=64)
 
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"status": "ok", "model": MODEL_NAME, "dim": VECTOR_SIZE}
+
+    @app.post("/embed")
+    async def embed(req: EmbedRequest) -> dict:
+        texts = [t.strip()[:2000] for t in req.texts]
+        if not all(texts):
+            raise HTTPException(status_code=400, detail="texts must be non-empty")
+        vectors = await asyncio.to_thread(encode, model, texts)
+        return {"model": MODEL_NAME, "dim": VECTOR_SIZE, "vectors": vectors}
+
+    return app
+
+
+async def serve_embed(model: SentenceTransformer) -> None:
+    import uvicorn
+
+    server = uvicorn.Server(uvicorn.Config(embed_app(model), host="0.0.0.0", port=EMBED_PORT, log_level="warning"))
+    await server.serve()
+
+
+async def worker_loop(pool: asyncpg.Pool, qdrant: QdrantClient, model: SentenceTransformer) -> None:
     logger.info("embedding worker started, interval=%ds", RUN_INTERVAL_SECONDS)
     while True:
         start = time.monotonic()
@@ -224,6 +257,22 @@ async def main() -> None:
             logger.exception("embedding worker cycle failed")
         elapsed = time.monotonic() - start
         await asyncio.sleep(max(RUN_INTERVAL_SECONDS - elapsed, 5))
+
+
+async def main() -> None:
+    logger.info("loading embedding model %s", MODEL_NAME)
+    model = SentenceTransformer(MODEL_NAME)
+
+    qdrant = QdrantClient(url=QDRANT_URL)
+    ensure_collections(qdrant)
+
+    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=_json_codecs)
+
+    tasks = [worker_loop(pool, qdrant, model)]
+    if EMBED_PORT:
+        logger.info("embed endpoint on :%d", EMBED_PORT)
+        tasks.append(serve_embed(model))
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
