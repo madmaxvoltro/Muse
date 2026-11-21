@@ -4,6 +4,7 @@ behind each stage.
   GET  /recommendations/{user_id}       ranked, explained, calibrated recommendations
   GET  /profile/{user_id}               the taste profile: interests, summary, what Muse learned
   GET  /evolution/{user_id}             how your taste is changing: timeline, lifecycle, rhythms
+  GET  /questions/{user_id}/queue       background-filled question queue (optional to use)
   GET  /questions/{user_id}/next        the single most useful question to ask right now
   GET  /questions/{user_id}/onboarding  diverse well-known titles to tap ("which do you love?")
   GET  /questions/{user_id}/this-or-that a pairwise question where Muse is least sure
@@ -194,6 +195,20 @@ async def evolution(user_id: str, domain: str = Query("video", description="vide
         "milestones": ev.get("milestones", []),
         "stretch": ev.get("stretch", {}),
     }
+
+
+@app.get("/questions/{user_id}/queue")
+async def question_queue(
+    user_id: str,
+    limit: int = Query(5, ge=1, le=50),
+    domain: str | None = Query(None, description="video | youtube | music | books"),
+    kind: list[str] | None = Query(None, description="onboarding | abandon | interest | this_or_that (repeatable)"),
+    mark_served: bool = Query(True, description="mark returned pending questions as served"),
+    include_served: bool = Query(True, description="also return questions served earlier and not answered yet"),
+) -> dict:
+    """Questions the worker queued in the background, most valuable first. Each entry includes
+    the exact body to POST to the ingestion API's /answers. Optional: nothing waits for it."""
+    return await questions.queue(await engine(), user_id, limit, domain, kind, mark_served, include_served)
 
 
 @app.get("/questions/{user_id}/next")

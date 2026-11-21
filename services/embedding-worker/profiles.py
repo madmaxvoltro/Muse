@@ -25,6 +25,8 @@ from muse_taste.signals import ItemSignal, SignalEvent, aggregate, from_rows
 from muse_taste.store import ITEMS_COLLECTION
 from qdrant_client import QdrantClient
 
+import questions_producer
+
 logger = logging.getLogger("muse.worker.profiles")
 
 LOOKBACK_DAYS = int(os.environ.get("MUSE_TASTE_LOOKBACK_DAYS", "3650"))
@@ -198,6 +200,11 @@ async def recompute_users(
                     prof.to_json(),
                 )
             count += 1
+            # Optional question queue: never let it affect profiles (see questions_producer).
+            try:
+                await questions_producer.produce(pool, qdrant, prof, titles, vectors)
+            except Exception:
+                logger.exception("question queue update failed for user=%s domain=%s (ignored)", uid, domain)
             logger.info(
                 "profile user=%s domain=%s: %d interests, %d+/%d- titles, %d related, %d household",
                 uid, domain, len(prof.interests), prof.n_positive, prof.n_negative, len(prof.related), len(prof.household),

@@ -43,6 +43,7 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "rediscovery": 0.30,  # belongs to a dormant interest you used to love
     "context": 0.30,  # belongs to an interest you tend to watch at this time / day / season
     "stretch": 0.15,  # just beyond the edge of one of your interests (broadening)
+    "steer": 0.30,  # belongs to an interest you asked for more (+) or less (-) of
 }
 
 FEATURE_TEXT = {
@@ -148,7 +149,7 @@ def score_candidates(
         sims = np.zeros((n, 0))
 
     # taste evolution: per-interest values, spread over each candidate's interest membership
-    evo = {f: np.zeros(n) for f in ("trend", "satiation", "rediscovery", "context", "stretch")}
+    evo = {f: np.zeros(n) for f in ("trend", "satiation", "rediscovery", "context", "stretch", "steer")}
     stretch_k = np.full(n, -1)
     if evolution is not None and member.size:
         mn = member / np.maximum(member.sum(1, keepdims=True), 1e-9)
@@ -156,6 +157,8 @@ def score_candidates(
         evo["satiation"] = mn @ evolution.satiation
         evo["rediscovery"] = mn @ evolution.rediscovery
         evo["context"] = mn @ evolution.context
+        if evolution.steer is not None:
+            evo["steer"] = mn @ evolution.steer
         radii = np.array([i.radius for i in profile.interests])
         evo["stretch"] = stretch_score(sims, radii, profile.importance_vector(), evolution.band)
         stretch_k = (sims - radii[None, :]).argmax(1)
@@ -304,6 +307,8 @@ def explain(s: Scored, profile: TasteProfile, titles: dict[str, str], max_reason
             reasons.append((v, f"It's been a while since your {_interest_name(profile, s.interest_id, titles)} phase"))
         elif k == "context" and s.interest_id is not None and s.payload.get("context_label"):
             reasons.append((v, f"You often pick {_interest_name(profile, s.interest_id, titles)} on {s.payload['context_label']}s"))
+        elif k == "steer" and s.interest_id is not None:
+            reasons.append((v, f"You asked for more {_interest_name(profile, s.interest_id, titles)}"))
         elif k == "stretch" and s.payload.get("stretch_interest") is not None:
             reasons.append((v, f"One step beyond {_interest_name(profile, s.payload['stretch_interest'], titles)}"))
     if s.explore:

@@ -14,6 +14,8 @@ may post answers and imports; `import` may post imports and events claiming an i
 
 import json
 import logging
+
+import asyncpg
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -157,6 +159,24 @@ class AbandonAnswer(BaseModel):
     reason: Literal["not_for_me", "not_in_mood", "too_slow", "too_intense", "will_finish_later", "watched_elsewhere", "bad_quality"]
 
 
+class InterestAnswer(BaseModel):
+    kind: Literal["interest"]
+    user_id: str
+    question_id: str  # required: the interest is looked up from the queued question
+    response: Literal["more", "keep", "less", "break", "no_break", "bring_back", "moved_on"]
+
+
+class Dismiss(BaseModel):
+    """'Don't ask me this': closes the question, writes no taste data."""
+
+    kind: Literal["dismiss"]
+    user_id: str
+    question_id: str
+
+
+DOMAIN_ITEM_TYPE = {"video": "movie", "youtube": "youtube_video", "music": "track", "books": "audiobook"}
+
+
 def _answer_event(user_id: str, item_type: str, canon: str, action: str, qid: str | None, extra: dict | None = None, weight: float | None = None) -> Event:
     md = {"canon_key": canon, "via": "question", **(extra or {})}
     if qid:
@@ -167,11 +187,33 @@ def _answer_event(user_id: str, item_type: str, canon: str, action: str, qid: st
 
 
 @app.post("/answers", status_code=202)
-async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer, source: str = Depends(require_adapter_key)) -> dict:
+async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer | InterestAnswer | Dismiss, source: str = Depends(require_adapter_key)) -> dict:
+    """Answers are optional: Muse works the same whether or not anyone answers its questions."""
     if source != "muse":
         raise HTTPException(status_code=403, detail="answers need the `muse` key")
+    pool = await get_pool()
+    question = None
+    if body.question_id:
+        async with pool.acquire() as conn:
+            question = await conn.fetchrow("SELECT user_id::text AS user_id, kind, payload, domain, status FROM question_log WHERE id::text = $1", body.question_id)
+        if question is not None and question["user_id"] != body.user_id:
+            raise HTTPException(status_code=403, detail="question belongs to another user")
     evs: list[Event] = []
-    if isinstance(body, OnboardingAnswer):
+    if isinstance(body, Dismiss):
+        if question is None:
+            raise HTTPException(status_code=404, detail="unknown question")
+    elif isinstance(body, InterestAnswer):
+        if question is None or question["kind"] != "interest":
+            raise HTTPException(status_code=404, detail="unknown interest question")
+        payload = question["payload"] if isinstance(question["payload"], dict) else json.loads(question["payload"])
+        interest = payload.get("interest") or {}
+        anchor = interest.get("anchor_key")
+        if not anchor:
+            raise HTTPException(status_code=422, detail="question has no interest anchor")
+        item_type = DOMAIN_ITEM_TYPE.get(question["domain"] or "video", "movie")
+        evs.append(_answer_event(body.user_id, item_type, anchor, "interest_feedback", body.question_id,
+                                 {"response": body.response, "members": interest.get("members", []), "subkind": payload.get("subkind"), "via": "interest_question"}))
+    elif isinstance(body, OnboardingAnswer):
         for keys, value in ((body.loved, 2), (body.liked, 1), (body.disliked, -1)):
             for k in keys:
                 evs.append(_answer_event(body.user_id, body.item_type, k, "rated", body.question_id, {"value": value, "via": "onboarding"}, RATED_WEIGHTS[value]))
@@ -186,10 +228,16 @@ async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer, source: s
     check_rate_limit(source, max(len(evs), 1))
     if evs:
         await _insert(evs)
-    if body.question_id:
-        pool = await get_pool()
+    if question is not None:
+        status = "dismissed" if isinstance(body, Dismiss) else "answered"
         async with pool.acquire() as conn:
-            await conn.execute("UPDATE question_log SET answered_at = now() WHERE id::text = $1", body.question_id)
+            try:
+                await conn.execute(
+                    "UPDATE question_log SET answered_at = now(), status = $2, answer = $3::jsonb WHERE id::text = $1",
+                    body.question_id, status, body.model_dump_json(exclude={"user_id"}),
+                )
+            except asyncpg.UndefinedColumnError:  # database without migration 009
+                await conn.execute("UPDATE question_log SET answered_at = now() WHERE id::text = $1", body.question_id)
     return {"status": "accepted", "events": len(evs)}
 
 

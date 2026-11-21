@@ -6,9 +6,12 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+import asyncpg
+
 import numpy as np
 from muse_taste.canon import domain_of
 from muse_taste.elicitation import ABANDON_REASONS, onboarding_spread, this_or_that
+from muse_taste.questions import ANSWER_TEMPLATES
 from muse_taste.store import ITEMS_COLLECTION
 from qdrant_client.http import models as qm
 
@@ -31,10 +34,59 @@ def _item(pl: dict) -> dict:
 
 
 async def _log(engine: Engine, user_id: str, kind: str, payload: dict) -> str:
+    """On-demand questions are logged as already served (so answers can reference them and
+    they aren't asked again), never as pending queue entries."""
     qid = uuid.uuid4()
     async with engine.pool.acquire() as conn:
-        await conn.execute("INSERT INTO question_log (id, user_id, kind, payload) VALUES ($1, $2, $3, $4::jsonb)", qid, uuid.UUID(user_id), kind, payload)
+        try:
+            await conn.execute(
+                "INSERT INTO question_log (id, user_id, kind, payload, status, served_at) VALUES ($1, $2, $3, $4::jsonb, 'served', now())",
+                qid, uuid.UUID(user_id), kind, payload,
+            )
+        except asyncpg.UndefinedColumnError:  # database without migration 009
+            await conn.execute("INSERT INTO question_log (id, user_id, kind, payload) VALUES ($1, $2, $3, $4::jsonb)", qid, uuid.UUID(user_id), kind, payload)
     return str(qid)
+
+
+async def queue(engine: Engine, user_id: str, limit: int = 5, domain: str | None = None, kinds: list[str] | None = None,
+                mark_served: bool = True, include_served: bool = True) -> dict:
+    """The background-filled queue (worker: questions_producer), most valuable first. Fetching
+    is optional and so is answering; unanswered questions expire on their own."""
+    statuses = ["pending", "served"] if include_served else ["pending"]
+    async with engine.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, kind, domain, priority, payload, status, asked_at, expires_at FROM question_log
+            WHERE user_id = $1 AND status = ANY($2::text[]) AND (expires_at IS NULL OR expires_at > now())
+              AND ($3::text IS NULL OR domain = $3) AND ($4::text[] IS NULL OR kind = ANY($4::text[]))
+            ORDER BY (status = 'pending') DESC, priority DESC, asked_at
+            LIMIT $5
+            """,
+            uuid.UUID(user_id), statuses, domain, kinds, limit,
+        )
+        if mark_served and rows:
+            await conn.execute(
+                "UPDATE question_log SET status = 'served', served_at = now() WHERE id = ANY($1::uuid[]) AND status = 'pending'",
+                [r["id"] for r in rows],
+            )
+    return {
+        "user_id": user_id,
+        "questions": [
+            {
+                "question_id": str(r["id"]),
+                "kind": r["kind"],
+                "domain": r["domain"],
+                "priority": round(r["priority"], 3),
+                "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+                **(r["payload"] or {}),
+                "answer_with": {"POST": "/answers (ingestion API, muse key)",
+                                "body": {**ANSWER_TEMPLATES.get(r["kind"], {}), "user_id": user_id, "question_id": str(r["id"])},
+                                "or_dismiss": {"kind": "dismiss", "user_id": user_id, "question_id": str(r["id"])}},
+            }
+            for r in rows
+        ],
+        "note": "Answering is optional; unanswered questions expire and change nothing.",
+    }
 
 
 async def _asked(engine: Engine, user_id: str, kind: str, days: int = 90) -> set[str]:
@@ -128,10 +180,18 @@ async def abandoned(engine: Engine, user_id: str, item_type: str, limit: int = 3
 
 
 async def next_question(engine: Engine, user_id: str, item_type: str) -> dict:
-    """The single most useful question right now: onboarding while Muse knows little, then
-    'why did you stop?' (cheap, high value), then this-or-that where Muse is least sure."""
+    """The single most useful question right now: the top of the background queue if there is
+    one, otherwise generated on demand: onboarding while Muse knows little, then 'why did you
+    stop?' (cheap, high value), then this-or-that where Muse is least sure."""
     types = TARGET_TYPES.get(item_type, [item_type])
-    prof = await engine.profile(user_id, domain_of(types[0]))
+    domain = domain_of(types[0])
+    try:
+        queued = await queue(engine, user_id, limit=1, domain=domain, include_served=False)
+        if queued["questions"]:
+            return queued["questions"][0]
+    except asyncpg.UndefinedColumnError:
+        pass  # database without migration 009: on-demand only
+    prof = await engine.profile(user_id, domain)
     if prof is None or prof.total_confidence < ONBOARDING_CONFIDENCE:
         q = await onboarding(engine, user_id, item_type, n=18)
         if q.get("items"):

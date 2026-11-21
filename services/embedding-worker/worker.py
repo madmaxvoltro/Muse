@@ -31,6 +31,7 @@ import catalog
 import embed
 import enrich
 import profiles
+import questions_producer
 import ranker_fit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -77,6 +78,10 @@ class Worker:
             st = await conn.fetchrow("SELECT last_processed_at, last_full_profile_at, last_ranker_fit_at FROM embedding_worker_state")
             touched, max_ts = await catalog.sync_items(conn, st["last_processed_at"])
         report["touched_users"] = len(touched)
+        try:
+            report["questions_expired"] = await questions_producer.expire(self.pool)
+        except Exception:  # optional feature: a missing migration 009 must not stop the worker
+            logger.exception("question expiry failed (ignored)")
 
         if self.tmdb is not None:
             report["tmdb"] = await enrich.enrich_tmdb(self.pool, self.tmdb)

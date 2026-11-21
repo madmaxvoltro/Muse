@@ -1,9 +1,8 @@
 import asyncio
 import uuid
 
-
 from conftest import use_service
-from fixtures import EXTERNAL_REC, USER_A, insert
+from fixtures import EXTERNAL_REC, USER_A, USER_B, insert
 from test_worker import run_worker
 
 
@@ -119,3 +118,78 @@ def test_evolution_endpoint_and_strength(db_dsn):
     feats_off = [s.features for s in off.pool]
     assert any(abs(f["trend"]) > 0 for f in feats_on)
     assert all(f["trend"] == 0 and f["stretch"] == 0 and f["context"] == 0 for f in feats_off)
+
+
+def test_question_queue_end_to_end(db_dsn, monkeypatch):
+    """Worker fills the queue; API serves it; answers are optional and steer evolution."""
+    import httpx
+
+    async def go():
+        pool, qdrant, _ = await run_worker(db_dsn)
+        async with pool.acquire() as conn:
+            queued = await conn.fetch("SELECT kind, dedupe_key, status FROM question_log WHERE user_id = $1", USER_A)
+            prof = await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A)
+            it = prof["interests"][0]
+            # an interest question as the producer would write it
+            qid = uuid.uuid4()
+            await conn.execute(
+                """INSERT INTO question_log (id, user_id, kind, payload, status, domain, priority, dedupe_key, expires_at)
+                   VALUES ($1, $2, 'interest', $3::jsonb, 'pending', 'video', 0.6, 'interest:emerging:test', now() + interval '1 day')""",
+                qid, USER_A, {"subkind": "emerging", "prompt": "More?", "interest": {"anchor_key": it["medoid_key"], "members": it["members"]}},
+            )
+            stale = uuid.uuid4()
+            await conn.execute("INSERT INTO question_log (id, user_id, kind, payload, status, expires_at) VALUES ($1, $2, 'abandon', '{}'::jsonb, 'pending', now() - interval '1 hour')", stale, USER_A)
+
+        use_service("recommendation-api")
+        from app import main as reco_main
+        from app.engine import Engine
+
+        reco_main._engine = Engine(pool, qdrant)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=reco_main.app), base_url="http://t") as c:
+            q1 = (await c.get(f"/questions/{USER_A}/queue", params={"limit": 20})).json()
+            q2 = (await c.get(f"/questions/{USER_A}/queue", params={"limit": 20, "include_served": "false"})).json()
+        reco_main._engine = None
+
+        monkeypatch.setenv("MUSE_DATABASE_URL", db_dsn)
+        monkeypatch.setenv("MUSE_ADAPTER_KEYS", "muse:mk")
+        use_service("ingestion-api")
+        import importlib
+
+        import app.auth
+        import app.db
+        import app.main as ing_main
+
+        importlib.reload(app.auth)
+        importlib.reload(app.db)
+        ing_main = importlib.reload(ing_main)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ing_main.app), base_url="http://t") as c:
+            ans = await c.post("/answers", headers={"X-Muse-Api-Key": "mk"}, json={"kind": "interest", "user_id": str(USER_A), "question_id": str(qid), "response": "more"})
+            other = await c.post("/answers", headers={"X-Muse-Api-Key": "mk"}, json={"kind": "interest", "user_id": str(USER_B), "question_id": str(qid), "response": "less"})
+        await ing_main.close_pool()
+
+        import worker as worker_mod
+        from conftest import FakeEmbedder
+        from fixtures import FakeTMDB
+
+        w = worker_mod.Worker(pool, qdrant, FakeEmbedder(), tmdb=FakeTMDB())
+        await w.run_once()
+        async with pool.acquire() as conn:
+            statuses = {r["id"]: r["status"] for r in await conn.fetch("SELECT id, status FROM question_log WHERE id = ANY($1::uuid[])", [qid, stale])}
+            prof2 = await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A)
+            dupes = await conn.fetchval("SELECT count(*) - count(DISTINCT dedupe_key) FROM question_log WHERE user_id = $1 AND dedupe_key IS NOT NULL", USER_A)
+        await pool.close()
+        return queued, q1, q2, ans, other, statuses, prof2, qid, stale, dupes
+
+    queued, q1, q2, ans, other, statuses, prof2, qid, stale, dupes = asyncio.run(go())
+    kinds = {r["kind"] for r in queued}
+    assert "abandon" in kinds and "this_or_that" in kinds, queued
+    assert any(r["dedupe_key"] == "abandon:tmdb:movie:112" for r in queued)
+    ids = [q["question_id"] for q in q1["questions"]]
+    assert str(qid) in ids and str(stale) not in ids  # expired questions are never served
+    assert all("answer_with" in q for q in q1["questions"])
+    assert q2["questions"] == []  # everything was marked served by the first fetch
+    assert ans.status_code == 202 and ans.json()["events"] == 1
+    assert other.status_code == 403
+    assert statuses[qid] == "answered" and statuses[stale] == "expired"
+    assert any(v.get("steer", 0) > 0.5 for v in prof2["evolution"]["interests"].values())
+    assert dupes == 0  # a second worker cycle doesn't re-queue the same questions
