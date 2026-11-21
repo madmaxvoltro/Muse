@@ -17,7 +17,8 @@ import numpy as np
 from muse_schema import canon_point_id
 from muse_taste.profile import TasteProfile
 from muse_taste.ranking import CandidateInput, Scored, score_candidates
-from muse_taste.store import ITEMS_COLLECTION
+from muse_schema.crypto import P_PROFILE, get_vault
+from muse_taste.store import ITEMS_COLLECTION, blind_canon
 from qdrant_client import QdrantClient
 
 ADD_SCORE_THRESHOLD = float(os.environ.get("MUSE_CURATOR_ADD_SCORE", "0.55"))
@@ -27,8 +28,13 @@ REMOVE_SCORE_THRESHOLD = float(os.environ.get("MUSE_CURATOR_REMOVE_SCORE", "0.10
 ARR_KIND = {"movie": "movie", "series_episode": "tv", "series": "tv"}
 
 
-def canon_for(arr_item_type: str, tmdb_id: str) -> str:
+def real_canon_for(arr_item_type: str, tmdb_id: str) -> str:
     return f"tmdb:{ARR_KIND.get(arr_item_type, 'movie')}:{tmdb_id}"
+
+
+def canon_for(arr_item_type: str, tmdb_id: str) -> str:
+    """The stored (blind) canonical key, as used in profiles and the vector store."""
+    return blind_canon(real_canon_for(arr_item_type, tmdb_id))
 
 
 class ProfileScorer:
@@ -47,12 +53,7 @@ class ProfileScorer:
             )
         profiles = {}
         for r in rows:
-            p = r["profile"]
-            if isinstance(p, str):
-                import json
-
-                p = json.loads(p)
-            profiles[str(r["user_id"])] = TasteProfile.from_json(p)
+            profiles[str(r["user_id"])] = TasteProfile.from_json(get_vault().open_json(r["profile"], P_PROFILE))
         return cls(qdrant, profiles)
 
     def vectors(self, keys: list[str]) -> dict[str, np.ndarray]:

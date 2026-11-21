@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
+from muse_schema.crypto import P_DOWNLOAD_ITEM, get_vault
 
 logger = logging.getLogger("muse.curator.budget")
 
@@ -63,32 +64,29 @@ async def get_current_quota_usage_bytes(pool: asyncpg.Pool) -> int:
     return int(total)
 
 
-async def is_protected(pool: asyncpg.Pool, source: str, source_item_id: str) -> bool:
+async def is_protected(pool: asyncpg.Pool, item_type: str, tmdb_id: str) -> bool:
     """Favorited, "loved" (latest thumbs is love, see muse_schema.RATED_WEIGHTS) or
     partially-watched items are always excluded from auto-delete, regardless of score —
-    decided together as the protection set.
-    """
+    decided together as the protection set. Matched by canonical title, so a favourite in
+    Jellyfin protects the copy Radarr manages (ids are blind indexes at rest)."""
+    from scoring import canon_for
+
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT 1 FROM event
-            WHERE source = $1 AND source_item_id = $2
-              AND (
-                action = 'favorited'
-                OR (action = 'played' AND progress_pct BETWEEN $3 AND $4)
-                OR (
-                  action = 'rated' AND action_weight >= 2 AND NOT EXISTS (
-                    SELECT 1 FROM event later
-                    WHERE later.source = event.source AND later.source_item_id = event.source_item_id
-                      AND later.user_id = event.user_id AND later.action = 'rated'
-                      AND later."timestamp" > event."timestamp"
-                  )
-                )
-              )
+            WITH ev AS (
+                SELECT e.user_id, e.action, e.action_weight, e.progress_pct, e."timestamp"
+                FROM event e JOIN item i ON i.item_key = e.source || ':' || e.source_item_id
+                WHERE i.canon_key = $1 AND e.action IN ('favorited', 'played', 'rated')
+            )
+            SELECT 1 FROM ev
+            WHERE action = 'favorited'
+               OR (action = 'played' AND progress_pct BETWEEN $2 AND $3)
+               OR (action = 'rated' AND action_weight >= 2 AND NOT EXISTS (
+                     SELECT 1 FROM ev later WHERE later.user_id = ev.user_id AND later.action = 'rated' AND later."timestamp" > ev."timestamp"))
             LIMIT 1
             """,
-            source,
-            source_item_id,
+            canon_for(item_type, tmdb_id),
             PROTECT_PROGRESS_MIN,
             PROTECT_PROGRESS_MAX,
         )
@@ -98,10 +96,11 @@ async def is_protected(pool: asyncpg.Pool, source: str, source_item_id: str) -> 
 async def record_download(pool: asyncpg.Pool, user_id: str, source_item_id: str, item_type: str, estimated_bytes: int, arr_id: str) -> None:
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # who caused which download is personal: the item is stored as a blind index
             await conn.execute(
                 "INSERT INTO curator_download_log (user_id, source_item_id) VALUES ($1, $2)",
                 uuid.UUID(user_id),
-                source_item_id,
+                get_vault().bid(f"{item_type}:{source_item_id}", P_DOWNLOAD_ITEM),
             )
             await conn.execute(
                 """

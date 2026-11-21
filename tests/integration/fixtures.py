@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from muse_schema.crypto import get_vault
+from muse_schema.storage import INSERT_DEDUPED_SQL, INSERT_SQL, event_row
 from muse_taste.tmdb import parse_details
 
 NOW = datetime.now(timezone.utc)
@@ -69,11 +71,13 @@ class FakeTMDB:
 
 
 async def insert(conn, user, source, sid, item_type, action, days_ago, weight=0.0, progress=None, md=None):
-    await conn.execute(
-        """INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, "timestamp", progress_pct, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)""",
-        user, source, sid, item_type, action, weight, NOW - timedelta(days=days_ago), progress, md or {},
-    )
+    """Writes an event exactly as the ingestion API stores it (blind ids, sealed metadata)."""
+    args, dedupe = event_row(get_vault(), user_id=user, source=source, source_item_id=sid, item_type=item_type, action=action,
+                             action_weight=weight, timestamp=NOW - timedelta(days=days_ago), progress_pct=progress, metadata=md or {})
+    if dedupe is None:
+        await conn.execute(INSERT_SQL, *args)
+    else:
+        await conn.execute(INSERT_DEDUPED_SQL, *args, dedupe)
 
 
 async def seed(conn):

@@ -45,7 +45,7 @@ from scoring import ADD_SCORE_THRESHOLD, REMOVE_SCORE_THRESHOLD, ProfileScorer, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("muse.curator")
 
-DATABASE_URL = os.environ.get("MUSE_DATABASE_URL", "")
+from muse_schema.config import database_url, secret
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 
 SOON_GONE_CHECK_INTERVAL_SECONDS = int(os.environ.get("MUSE_SOON_GONE_CHECK_INTERVAL_SECONDS", "1800"))
@@ -68,9 +68,11 @@ async def run_soon_gone_expiry(pool: asyncpg.Pool, arr_client: httpx.AsyncClient
         await finalize_removal(pool, str(row["id"]), row["source_item_id"])
 
 
-async def _arr_id_for(tmdb: TMDBClient | None, arr_item_type: str, canon: str) -> str | None:
+async def _arr_id_for(tmdb: TMDBClient | None, arr_item_type: str, real_canon: str | None) -> str | None:
     """Radarr adds by TMDB id; Sonarr by TVDB id, which needs a TMDB lookup."""
-    tmdb_id = canon.rsplit(":", 1)[1]
+    if not real_canon or not real_canon.startswith("tmdb:"):
+        return None
+    tmdb_id = real_canon.rsplit(":", 1)[1]
     if arr_item_type == "movie":
         return tmdb_id
     if tmdb is None:
@@ -114,18 +116,20 @@ async def run_add_cycle(pool, qdrant, embedder, arr_client, arr_config, tmdb, ac
                 cap = await get_dynamic_daily_cap(pool, driving_user)
                 if await get_downloads_today(pool, driving_user) >= cap:
                     continue
-                arr_lookup_id = await _arr_id_for(tmdb, item_type, c.key)
+                real = c.payload.get("real_key")
+                arr_lookup_id = await _arr_id_for(tmdb, item_type, real)
                 if arr_lookup_id is None:
-                    logger.info("no TVDB id for %s, skipping", c.key)
+                    logger.info("no arr lookup id for a candidate, skipping")
                     continue
-                logger.info("adding %s '%s' (score=%.3f, driven by user=%s)", item_type, c.payload.get("title"), score, driving_user)
+                # logs are files too: an id, never a title or a person
+                logger.info("adding %s %s (score=%.3f)", item_type, real, score)
                 try:
                     arr_id = await add_wanted(ext_client, arr_config, item_type, arr_lookup_id)
                 except (httpx.HTTPError, RuntimeError):
-                    logger.exception("failed to add %s '%s' via arr, skipping", item_type, c.payload.get("title"))
+                    logger.exception("failed to add %s %s via arr, skipping", item_type, real)
                     continue
                 # managed items are tracked by TMDB id (what canon keys and enrichment speak)
-                await record_download(pool, driving_user, c.key.rsplit(":", 1)[1], item_type, estimated_bytes, arr_id)
+                await record_download(pool, driving_user, real.rsplit(":", 1)[1], item_type, estimated_bytes, arr_id)
                 added.append({"canon_key": c.key, "score": score, "user": driving_user})
                 headroom -= estimated_bytes
                 if headroom <= 0:
@@ -140,7 +144,7 @@ async def run_remove_cycle(pool: asyncpg.Pool, qdrant: QdrantClient, active_user
     scorer = await ProfileScorer.load(pool, qdrant, active_users)
     async with pool.acquire() as conn:
         managed = await conn.fetch("SELECT source, source_item_id, item_type FROM curator_managed_item WHERE removed_at IS NULL")
-    rows = [r for r in managed if not await is_protected(pool, r["source"], r["source_item_id"])]
+    rows = [r for r in managed if not await is_protected(pool, r["item_type"], r["source_item_id"])]
     keys = {canon_for(r["item_type"], r["source_item_id"]): r for r in rows}
     vecs = scorer.vectors(list(keys))
     from muse_taste.ranking import CandidateInput
@@ -169,8 +173,8 @@ async def _json_codecs(conn: asyncpg.Connection) -> None:
 
 async def main() -> None:
     embedder = embedder_mod.from_env()  # same model + settings as the embedding worker
-    qdrant = QdrantClient(url=QDRANT_URL)
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=_json_codecs)
+    qdrant = QdrantClient(url=QDRANT_URL, api_key=secret("MUSE_QDRANT_API_KEY") or None)  # read-only key
+    pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=5, init=_json_codecs)
     arr_config = ArrConfig.from_env()
     last_add_remove_cycle = float("-inf")
     logger.info("curator started")

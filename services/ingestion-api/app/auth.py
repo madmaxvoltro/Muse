@@ -3,21 +3,19 @@ see docs/installation.md) so a compromised adapter's blast radius is limited to 
 being revoked, and requests are attributable to a specific adapter in logs.
 """
 
-import os
+import hmac
 
 from fastapi import Header, HTTPException
+from muse_schema.config import key_list
 
-# MUSE_ADAPTER_KEYS="jellyfin:xxxx,searxng:yyyy,..." — simple env-based key->source map for now.
-_KEYS: dict[str, str] = {}
-for pair in os.environ.get("MUSE_ADAPTER_KEYS", "").split(","):
-    if ":" in pair:
-        source, key = pair.split(":", 1)
-        _KEYS[key] = source
+# MUSE_ADAPTER_KEYS_FILE (a Docker secret, one "source:key" per line) or MUSE_ADAPTER_KEYS
+# (comma separated, development). Each adapter has its own key.
+_KEYS: dict[str, str] = key_list("MUSE_ADAPTER_KEYS")
 
 
 async def require_adapter_key(x_muse_api_key: str = Header(...)) -> str:
-    """Returns the source name the key belongs to, or raises 401."""
-    source = _KEYS.get(x_muse_api_key)
-    if source is None:
-        raise HTTPException(status_code=401, detail="invalid or missing X-Muse-Api-Key")
-    return source
+    """Returns the source name the key belongs to, or raises 401. Constant-time comparison."""
+    for key, source in _KEYS.items():
+        if hmac.compare_digest(key.encode(), x_muse_api_key.encode()):
+            return source
+    raise HTTPException(status_code=401, detail="invalid or missing X-Muse-Api-Key")

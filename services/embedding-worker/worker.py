@@ -37,7 +37,8 @@ import ranker_fit
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("muse.worker")
 
-DATABASE_URL = os.environ.get("MUSE_DATABASE_URL", "")
+from muse_schema.config import database_url, secret
+from muse_schema.crypto import get_vault
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 RUN_INTERVAL_SECONDS = int(os.environ.get("MUSE_EMBEDDING_INTERVAL_SECONDS", "300"))
 FULL_PROFILE_HOURS = int(os.environ.get("MUSE_FULL_PROFILE_HOURS", "24"))
@@ -119,8 +120,9 @@ async def main() -> None:
     llm = llm_mod.from_env()
     if llm is not None:
         logger.info("LLM enrichment on: %s (%s)", llm.name, "external" if llm.external else "local")
-    qdrant = QdrantClient(url=QDRANT_URL)
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=json_codecs)
+    get_vault()  # fail fast without the master key
+    qdrant = QdrantClient(url=QDRANT_URL, api_key=secret("MUSE_QDRANT_API_KEY") or None)
+    pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=5, init=json_codecs)
     http = httpx.AsyncClient(timeout=20.0)
     tmdb = TMDBClient(TMDB_CREDENTIAL, http, language=TMDB_LANGUAGE) if TMDB_CREDENTIAL else None
     if tmdb is None:

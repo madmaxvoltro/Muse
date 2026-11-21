@@ -6,6 +6,8 @@
 -- One row per (source, source_item_id) the event log has mentioned, plus TMDB items Muse
 -- discovered through enrichment (source = 'tmdb'). canon_key ties rows that are the same
 -- real-world title together (muse_taste.canon); taste and exclusion work on canon_key.
+-- Encrypted at rest: item_key/source_item_id/canon_key/parent_key are blind indexes,
+-- metadata/enrichment/llm_profile are sealed ({"_enc": ...}).
 CREATE TABLE IF NOT EXISTS item (
     item_key        TEXT PRIMARY KEY,               -- '<source>:<source_item_id>'
     source          TEXT NOT NULL,
@@ -17,6 +19,7 @@ CREATE TABLE IF NOT EXISTS item (
     enrichment      JSONB,                           -- TMDB (muse_taste.tmdb.parse_details)
     llm_profile     JSONB,                           -- optional LLM tone/themes/audience
     available       BOOLEAN NOT NULL DEFAULT FALSE,  -- playable in the library (Jellyfin)
+    describable     BOOLEAN NOT NULL DEFAULT FALSE,  -- has a title or enrichment (sealed data can't be inspected in SQL)
     first_seen      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     enriched_at     TIMESTAMPTZ,
@@ -27,28 +30,21 @@ CREATE INDEX IF NOT EXISTS idx_item_canon ON item (canon_key);
 CREATE INDEX IF NOT EXISTS idx_item_enrich_todo ON item (enriched_at NULLS FIRST) WHERE source <> 'tmdb';
 CREATE INDEX IF NOT EXISTS idx_item_parent ON item (parent_key) WHERE parent_key IS NOT NULL;
 
--- One row per canonical title: what gets embedded. doc_hash changes when the document text
--- or the embedding model changes, which is how the worker knows what to (re-)embed.
+-- One row per canonical title: what gets embedded. Encrypted at rest (muse_schema.crypto):
+-- canon_key is a blind index and everything descriptive (title, tags, document, related
+-- titles, library ids, vote stats, the real TMDB key) lives in the sealed `data` column.
+-- doc_hash changes when the document or the embedding model changes (keyed hash).
 CREATE TABLE IF NOT EXISTS canon_item (
-    canon_key       TEXT PRIMARY KEY,
+    canon_key       TEXT PRIMARY KEY,                -- blind index of the real canonical key
     item_type       TEXT NOT NULL,
     domain          TEXT NOT NULL,
-    title           TEXT NOT NULL DEFAULT '',
-    year            INTEGER,
-    tags            TEXT[] NOT NULL DEFAULT '{}',
-    related         TEXT[] NOT NULL DEFAULT '{}',    -- canon keys of TMDB recommendations, ranked
-    collection_id   TEXT,
-    vote_average    REAL,
-    vote_count      REAL,
-    popularity      REAL,
     available       BOOLEAN NOT NULL DEFAULT FALSE,
-    library_refs    JSONB NOT NULL DEFAULT '[]'::jsonb,  -- [{"source":"jellyfin","source_item_id":"..."}]
     added_at        TIMESTAMPTZ,                     -- first time it appeared in the library
-    document        TEXT NOT NULL DEFAULT '',        -- what the embedder sees (muse_taste.documents)
-    doc_hash        TEXT,                            -- hash(model, document): re-embed when it changes
+    data            JSONB NOT NULL DEFAULT '{}'::jsonb,  -- sealed: {"_enc": ...}
+    doc_hash        TEXT,                            -- re-embed when it changes; NULL = nothing to embed
     embedded_hash   TEXT,
-    payload_hash    TEXT,                            -- hash of the Qdrant payload fields
-    synced_payload_hash TEXT,                        -- payload-only changes skip re-embedding
+    payload_hash    TEXT,
+    synced_payload_hash TEXT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_canon_embed_todo ON canon_item (canon_key) WHERE embedded_hash IS DISTINCT FROM doc_hash;

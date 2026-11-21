@@ -1,7 +1,7 @@
 import json
-import os
 
 import asyncpg
+from muse_schema.config import database_url
 
 _pool: asyncpg.Pool | None = None
 
@@ -15,7 +15,7 @@ async def _codecs(conn: asyncpg.Connection) -> None:
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(dsn=os.environ["MUSE_DATABASE_URL"], min_size=1, max_size=10, init=_codecs)
+        _pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=10, init=_codecs)
     return _pool
 
 

@@ -13,7 +13,11 @@ import asyncpg
 from muse_taste import llm as llm_mod
 from muse_taste.canon import external_ids
 from muse_taste.documents import merged_fields
+from muse_schema.crypto import P_ITEM_KEY, get_vault
+from muse_taste.store import blind_canon
 from muse_taste.tmdb import TMDBClient
+
+from catalog import open_item, seal
 
 logger = logging.getLogger("muse.worker.enrich")
 
@@ -38,14 +42,15 @@ async def enrich_tmdb(pool: asyncpg.Pool, tmdb: TMDBClient) -> int:
             TMDB_ITEMS_PER_CYCLE,
         )
     done = 0
-    for row in todo:
+    for raw in todo:
+        row = open_item(raw)
         kind = "movie" if row["item_type"] == "movie" else "tv"
         md = row["metadata"] or {}
         try:
-            tmdb_id = await _resolve(tmdb, kind, md, row["canon_key"])
+            tmdb_id = await _resolve(tmdb, kind, md, md.get("_canon") or "")
             details = await tmdb.details(kind, tmdb_id) if tmdb_id else None
         except Exception as exc:  # network / API errors: count and move on
-            logger.warning("tmdb lookup failed for %s: %s", row["item_key"], exc)
+            logger.warning("tmdb lookup failed (%s)", type(exc).__name__)
             details = None
         async with pool.acquire() as conn:
             if not details:
@@ -55,10 +60,12 @@ async def enrich_tmdb(pool: asyncpg.Pool, tmdb: TMDBClient) -> int:
                 continue
             new_canon = f"tmdb:{kind}:{details['tmdb_id']}"
             await conn.execute(
-                "UPDATE item SET enrichment = $2::jsonb, enriched_at = now(), enrich_failures = 0, canon_key = $3, updated_at = now() WHERE item_key = $1",
+                """UPDATE item SET enrichment = $2::jsonb, metadata = $3::jsonb, enriched_at = now(), enrich_failures = 0,
+                   canon_key = $4, describable = TRUE, updated_at = now() WHERE item_key = $1""",
                 row["item_key"],
-                details,
-                new_canon,
+                seal(details),
+                seal({**md, "_canon": new_canon}),
+                blind_canon(new_canon),
             )
             await _upsert_related(conn, details)
         done += 1
@@ -107,17 +114,19 @@ async def _upsert_related(conn: asyncpg.Connection, details: dict) -> None:
             "language": rel.get("original_language"),
             "external_ids": {"tmdb": str(rel["tmdb_id"])},
         }
+        real = f"tmdb:{kind}:{rel['tmdb_id']}"
+        blind_item = get_vault().bid(real, P_ITEM_KEY)
         await conn.execute(
             """
-            INSERT INTO item (item_key, source, source_item_id, item_type, canon_key, metadata, available)
-            VALUES ($1, 'tmdb', $2, $3, $4, $5::jsonb, FALSE)
+            INSERT INTO item (item_key, source, source_item_id, item_type, canon_key, metadata, available, describable)
+            VALUES ($1, 'tmdb', $2, $3, $4, $5::jsonb, FALSE, TRUE)
             ON CONFLICT (item_key) DO NOTHING
             """,
-            f"tmdb:{kind}:{rel['tmdb_id']}",
-            f"{kind}:{rel['tmdb_id']}",
+            f"tmdb:{blind_item}",
+            blind_item,
             "movie" if kind == "movie" else "series",
-            f"tmdb:{kind}:{rel['tmdb_id']}",
-            md,  # the pool codec encodes jsonb
+            blind_canon(real),
+            seal({**md, "_canon": real}),
         )
 
 
@@ -136,18 +145,19 @@ async def describe_items(pool: asyncpg.Pool, llm: llm_mod.LLM) -> int:
             LLM_ITEMS_PER_CYCLE,
         )
     done = 0
-    for row in todo:
+    for raw in todo:
+        row = open_item(raw)
         fields = merged_fields(row["item_type"], row["metadata"] or {}, row["enrichment"])
         try:
             prof = await asyncio.to_thread(llm_mod.describe_item, llm, fields)
         except Exception as exc:
-            logger.warning("llm describe failed for %s: %s", row["item_key"], exc)
+            logger.warning("llm describe failed (%s)", type(exc).__name__)
             prof = None
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE item SET llm_profile = $2::jsonb, llm_at = now(), updated_at = CASE WHEN $2::jsonb IS NULL THEN updated_at ELSE now() END WHERE item_key = $1",
                 row["item_key"],
-                prof,
+                seal(prof),
             )
         done += bool(prof)
     if todo:

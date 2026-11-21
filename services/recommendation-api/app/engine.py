@@ -28,7 +28,8 @@ from muse_taste.ranking import DEFAULT_WEIGHTS, CandidateInput, Scored, explain,
 from muse_taste.rerank import daily_seed, select
 from muse_taste.retrieval import interest_quotas, rrf
 from muse_taste.signals import aggregate, from_rows
-from muse_taste.store import ITEMS_COLLECTION
+from muse_schema.crypto import P_PROFILE, get_vault
+from muse_taste.store import ITEMS_COLLECTION, open_canon_data, open_payload
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
@@ -101,7 +102,7 @@ class Engine:
             row = await conn.fetchrow("SELECT profile, computed_at FROM taste_profile WHERE user_id = $1 AND domain = $2", uuid.UUID(user_id), domain)
         if not row:
             return None
-        p = TasteProfile.from_json(row["profile"])
+        p = TasteProfile.from_json(get_vault().open_json(row["profile"], P_PROFILE))
         p.computed_at = row["computed_at"].isoformat()
         return p
 
@@ -110,6 +111,21 @@ class Engine:
             # SELECT * so a database without migration 008 (evolution_strength) still works
             row = await conn.fetchrow("SELECT * FROM user_overlay WHERE user_id = $1", uuid.UUID(user_id))
         return dict(row) if row else {}
+
+    async def titles_for(self, keys: list[str]) -> dict[str, str]:
+        """Titles for blind canonical keys (canon_item data is sealed)."""
+        if not keys:
+            return {}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT canon_key, data FROM canon_item WHERE canon_key = ANY($1::text[])", list(keys))
+        return {r["canon_key"]: open_canon_data(r["data"]).get("title") or "" for r in rows}
+
+    async def canon_items(self, keys: list[str]) -> list[dict]:
+        if not keys:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT canon_key, item_type, available, data FROM canon_item WHERE canon_key = ANY($1::text[])", list(keys))
+        return [{**open_canon_data(r["data"]), "canon_key": r["canon_key"], "item_type": r["item_type"], "available": r["available"]} for r in rows]
 
     def embedder(self):
         if self._embedder is None:
@@ -187,9 +203,10 @@ class Engine:
             return []
         keys = []
         for p in pts:
-            k = (p.payload or {}).get("canon_key")
+            k = (p.payload or {}).get("ck")
             if k:
-                pool.setdefault(k, (np.asarray(p.vector, dtype=np.float32), p.payload))
+                if k not in pool:
+                    pool[k] = (np.asarray(p.vector, dtype=np.float32), open_payload(p.payload))
                 keys.append(k)
         return keys
 
@@ -201,9 +218,9 @@ class Engine:
         idl = list(want)
         for i in range(0, len(idl), 256):
             for p in self.qdrant.retrieve(ITEMS_COLLECTION, ids=idl[i : i + 256], with_vectors=True, with_payload=True):
-                pl = p.payload or {}
-                if pl.get("item_type") in types and (include_unavailable or pl.get("available")):
-                    got[want[str(p.id)]] = (np.asarray(p.vector, dtype=np.float32), pl)
+                raw = p.payload or {}
+                if raw.get("item_type") in types and (include_unavailable or raw.get("available")):
+                    got[want[str(p.id)]] = (np.asarray(p.vector, dtype=np.float32), open_payload(raw))
         for k, v in got.items():
             pool.setdefault(k, v)
         return [k for k in keys if k in got]
@@ -241,9 +258,10 @@ class Engine:
             pts, _ = self.qdrant.scroll(ITEMS_COLLECTION, scroll_filter=flt, limit=80, with_vectors=True, with_payload=True)
         q_keys = []
         for p in pts:
-            k = (p.payload or {}).get("canon_key")
+            k = (p.payload or {}).get("ck")
             if k:
-                pool.setdefault(k, (np.asarray(p.vector, dtype=np.float32), p.payload))
+                if k not in pool:
+                    pool[k] = (np.asarray(p.vector, dtype=np.float32), open_payload(p.payload))
                 q_keys.append(k)
         lists["quality"] = q_keys
         return lists, pool
@@ -337,6 +355,7 @@ class Engine:
                         "available": pl.get("available"),
                         "library_refs": pl.get("library_refs") or [],
                         "item_type": pl.get("item_type"),
+                        "real_key": pl.get("real_key"),
                     },
                 )
             )
@@ -356,8 +375,8 @@ class Engine:
         need += [i.medoid_key for i in prof.interests if i.medoid_key not in titles]
         if need:
             async with self.pool.acquire() as conn:
-                for r in await conn.fetch("SELECT canon_key, title FROM canon_item WHERE canon_key = ANY($1::text[])", need):
-                    titles[r["canon_key"]] = r["title"]
+                for r in await conn.fetch("SELECT canon_key, data FROM canon_item WHERE canon_key = ANY($1::text[])", need):
+                    titles[r["canon_key"]] = open_canon_data(r["data"]).get("title") or ""
 
         request_id = str(uuid.uuid4())
         if req.log and items:
@@ -375,16 +394,19 @@ class Engine:
 
     def describe(self, s: Scored, prof: TasteProfile, titles: dict[str, str]) -> dict:
         refs = s.payload.get("library_refs") or []
+        real = s.payload.get("real_key") or ""
         if refs:
             source, sid = refs[0]["source"], refs[0]["source_item_id"]
+        elif ":" in real:  # not in the library: e.g. ("tmdb", "movie:603")
+            source, sid = real.split(":", 1)
         else:
-            parts = s.key.split(":")
-            source, sid = (parts[0], ":".join(parts[1:])) if len(parts) > 1 else ("muse", s.key)
+            source, sid = "muse", s.key
         interest = prof.interests[s.interest_id] if s.interest_id is not None and s.interest_id < len(prof.interests) else None
         return {
             "source": source,
             "source_item_id": sid,
-            "canon_key": s.key,
+            "canon_key": s.key,  # opaque id: send it back as-is in answers
+            "tmdb_id": _tmdb_id(s.payload.get("real_key")),
             "title": s.payload.get("title"),
             "year": s.payload.get("year"),
             "item_type": s.payload.get("item_type"),
@@ -398,6 +420,15 @@ class Engine:
             "explanation": {k: round(v, 4) for k, v in s.contributions.items() if abs(v) >= 1e-4},
             "generators": s.payload.get("generators", []),
         }
+
+
+def _tmdb_id(real_key: str | None) -> int | None:
+    if real_key and real_key.startswith("tmdb:"):
+        try:
+            return int(real_key.rsplit(":", 1)[1])
+        except ValueError:
+            return None
+    return None
 
 
 def _empty_profile(user_id: str, domain: str) -> TasteProfile:

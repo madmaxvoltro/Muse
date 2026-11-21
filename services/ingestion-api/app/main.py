@@ -23,6 +23,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from muse_schema import DEFAULT_ACTION_WEIGHTS, IMPORT_SOURCES, RATED_WEIGHTS, Event, Source
 from pydantic import BaseModel, Field
 
+from muse_schema.crypto import P_ANSWER, P_QUESTION, get_vault
+from muse_schema.storage import INSERT_DEDUPED_SQL, INSERT_SQL, event_row
+
 from .auth import require_adapter_key
 from .db import close_pool, get_pool
 from .ratelimit import check_rate_limit
@@ -33,25 +36,11 @@ logger = logging.getLogger("muse.ingestion")
 app = FastAPI(title="Muse Ingestion API", version="0.2.0")
 
 MAX_IMPORT_BYTES = 512 * 1024 * 1024
-INSERT_SQL = """
-INSERT INTO event (
-    user_id, source, source_item_id, item_type, action, action_weight,
-    "timestamp", duration_ms, progress_pct, metadata, device_context
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
-"""
 
-# With metadata.dedupe_key the insert is idempotent per (user, source, key): pollers can
-# re-send after a restart (or import history) without double counting.
-INSERT_DEDUPED_SQL = """
-INSERT INTO event (
-    user_id, source, source_item_id, item_type, action, action_weight,
-    "timestamp", duration_ms, progress_pct, metadata, device_context
-)
-SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb
-WHERE NOT EXISTS (
-    SELECT 1 FROM event WHERE user_id = $1 AND source = $2 AND metadata->>'dedupe_key' = $12
-)
-"""
+
+@app.on_event("startup")
+async def _startup() -> None:
+    get_vault()  # fail fast without a master key (MUSE_ENCRYPTION=off only for development)
 
 
 @app.on_event("shutdown")
@@ -81,16 +70,25 @@ def _effective_source(event: Event, key_source: str) -> None:
         raise HTTPException(status_code=403, detail=f"key source {key_source!r} cannot write events") from None
 
 
+def _stored_args(e: Event, vault) -> tuple[list, str | None]:
+    """An event as it is stored (muse_schema.storage): blind item id, sealed metadata."""
+    weight = e.action_weight if e.action_weight is not None else DEFAULT_ACTION_WEIGHTS[e.action]
+    args, dedupe = event_row(
+        vault, user_id=e.user_id, source=e.source.value, source_item_id=e.source_item_id, item_type=e.item_type.value,
+        action=e.action.value, action_weight=weight, timestamp=e.timestamp, duration_ms=e.duration_ms,
+        progress_pct=e.progress_pct, metadata=e.metadata, device_context=e.device_context,
+    )
+    args[9] = json.dumps(args[9])  # this pool has no jsonb codec
+    args[10] = json.dumps(args[10]) if args[10] is not None else None
+    return args, dedupe
+
+
 async def _insert(events: list[Event]) -> int:
+    vault = get_vault()
     plain, deduped = [], []
     for e in events:
-        weight = e.action_weight if e.action_weight is not None else DEFAULT_ACTION_WEIGHTS[e.action]
-        args = [
-            e.user_id, e.source.value, e.source_item_id, e.item_type.value, e.action.value, weight, e.timestamp,
-            e.duration_ms, e.progress_pct, json.dumps(e.metadata), json.dumps(e.device_context) if e.device_context is not None else None,
-        ]
-        dedupe = e.metadata.get("dedupe_key")
-        (deduped if dedupe is not None else plain).append(args + ([str(dedupe)] if dedupe is not None else []))
+        args, dedupe = _stored_args(e, vault)
+        (deduped if dedupe is not None else plain).append(args + ([dedupe] if dedupe is not None else []))
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -113,7 +111,8 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
     _effective_source(event, source)
     check_rate_limit(source)
     await _insert([event])
-    logger.info("ingested event source=%s action=%s user=%s", event.source.value, event.action.value, event.user_id)
+    # No user ids, items or actions in logs: logs are files too.
+    logger.debug("ingested 1 event from %s", event.source.value)
     return {"status": "accepted"}
 
 
@@ -205,7 +204,7 @@ async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer | Interest
     elif isinstance(body, InterestAnswer):
         if question is None or question["kind"] != "interest":
             raise HTTPException(status_code=404, detail="unknown interest question")
-        payload = question["payload"] if isinstance(question["payload"], dict) else json.loads(question["payload"])
+        payload = get_vault().open_json(question["payload"], P_QUESTION) or {}
         interest = payload.get("interest") or {}
         anchor = interest.get("anchor_key")
         if not anchor:
@@ -234,7 +233,7 @@ async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer | Interest
             try:
                 await conn.execute(
                     "UPDATE question_log SET answered_at = now(), status = $2, answer = $3::jsonb WHERE id::text = $1",
-                    body.question_id, status, body.model_dump_json(exclude={"user_id"}),
+                    body.question_id, status, json.dumps(get_vault().seal_json(body.model_dump(exclude={"user_id"}), P_ANSWER)),
                 )
             except asyncpg.UndefinedColumnError:  # database without migration 009
                 await conn.execute("UPDATE question_log SET answered_at = now() WHERE id::text = $1", body.question_id)
@@ -272,6 +271,8 @@ async def import_history(
     by_action: dict[str, int] = {}
     for e in events:
         by_action[e.action.value] = by_action.get(e.action.value, 0) + 1
-    logger.info("import kind=%s user=%s events=%d", kind, user_id, len(events))
+    # The uploaded file only ever lives in memory: it is parsed, encrypted per event and dropped.
+    del data, raw
+    logger.info("import: %d %s events", len(events), kind)
     return {"status": "accepted", "kind": kind, "events": len(events), "by_action": by_action,
             "note": "duplicates of earlier imports are skipped; the taste profile updates on the next worker cycle"}

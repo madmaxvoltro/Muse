@@ -57,6 +57,10 @@ def test_answers_imports_and_source_rules(db_dsn, monkeypatch):
         by_source.setdefault(r["source"], []).append(r)
     assert len(by_source["letterboxd"]) == 2  # second import deduplicated
     assert {r["action"] for r in by_source["muse"]} == {"chose", "passed_over", "rated"}
-    assert all(json.loads(r["metadata"])["canon_key"].startswith("tmdb:") for r in by_source["muse"])
+    from muse_schema.crypto import P_EVENT_METADATA, get_vault
+
+    assert all(get_vault().open_json(r["metadata"], P_EVENT_METADATA)["canon_key"].startswith("tmdb:") for r in by_source["muse"])
+    assert all("_enc" in json.loads(r["metadata"]) for r in rows)  # metadata sealed at rest
+    assert not any("Arrival" in r["metadata"] or "boxd.it" in r["metadata"] for r in rows)
     assert "netflix" not in by_source and len(by_source["jellyfin"]) == 1  # server-side source wins
     assert len(by_source["spotify"]) == 5

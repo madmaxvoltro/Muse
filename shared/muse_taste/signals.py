@@ -343,20 +343,24 @@ def total_confidence(signals: dict[str, ItemSignal]) -> float:
     return sum(s.confidence for s in signals.values())
 
 
-def from_rows(rows: Iterable[Any]) -> list[SignalEvent]:
+def from_rows(rows: Iterable[Any], vault: Any = None) -> list[SignalEvent]:
     """Event rows joined with their catalog item (columns: source, source_item_id, item_type,
     action, action_weight, timestamp, progress_pct, metadata, canon_key, parent_key,
     parent_canon) -> SignalEvents keyed by canonical title, episodes rolled up to their series.
     Shared by the worker and the recommendation API so both see the same keys."""
+    from muse_schema.crypto import P_CANON, P_EVENT_METADATA, get_vault
+
+    vault = vault or get_vault()
     out = []
     for r in rows:
-        md = r["metadata"] or {}
+        md = vault.open_json(r["metadata"], P_EVENT_METADATA) or {}  # sealed at rest
         own = r["canon_key"] or f"{r['source']}:{r['source_item_id']}"
         if r["item_type"] == "series_episode":
             key = r["parent_canon"] or r["parent_key"] or own
             sub = own
         else:
-            key = md.get("canon_key") or own
+            # Muse's own events (answers) reference a canonical title; store-side keys are blind
+            key = vault.bid(str(md["canon_key"]), P_CANON) if md.get("canon_key") else own
             sub = None
         out.append(
             SignalEvent(

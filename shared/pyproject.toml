@@ -3,7 +3,7 @@ name = "muse-schema"
 version = "0.2.0"
 description = "Shared event schema and the muse_taste recommendation engine used by every Muse service"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.6"]
+dependencies = ["pydantic>=2.6", "cryptography>=42"]
 
 [project.optional-dependencies]
 # numpy/scipy for the engine (worker, recommendation API, curator); the ingestion API only

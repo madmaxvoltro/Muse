@@ -22,7 +22,8 @@ from muse_taste.learn import label_impression
 from muse_taste.profile import TasteProfile, build_profile, estimate_baseline
 from muse_taste.retrieval import household_support, related_support
 from muse_taste.signals import ItemSignal, SignalEvent, aggregate, from_rows
-from muse_taste.store import ITEMS_COLLECTION
+from muse_schema.crypto import P_OVERLAY, P_PROFILE, get_vault
+from muse_taste.store import ITEMS_COLLECTION, open_canon_data
 from qdrant_client import QdrantClient
 
 import questions_producer
@@ -48,6 +49,14 @@ def to_signal_events(rows: list) -> list[SignalEvent]:
     return from_rows(rows)
 
 
+async def canon_data(conn: asyncpg.Connection, keys: list[str]) -> dict[str, dict]:
+    """Opened (decrypted) canon_item data for blind keys."""
+    if not keys:
+        return {}
+    rows = await conn.fetch("SELECT canon_key, data FROM canon_item WHERE canon_key = ANY($1::text[])", keys)
+    return {r["canon_key"]: open_canon_data(r["data"]) for r in rows}
+
+
 def fetch_vectors(qdrant: QdrantClient, keys: list[str]) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     ids = {canon_point_id(k): k for k in keys}
@@ -66,12 +75,17 @@ class DomainStats:
 
     async def get(self, conn: asyncpg.Connection, qdrant: QdrantClient, domain: str) -> tuple[dict[str, int], int, float]:
         if domain not in self._cache:
-            rows = await conn.fetch("SELECT t, count(*) AS n FROM canon_item, unnest(tags) t WHERE domain = $1 GROUP BY t", domain)
-            n = await conn.fetchval("SELECT count(*) FROM canon_item WHERE domain = $1", domain)
+            # tags are sealed: count them here, not in SQL
+            df: dict[str, int] = {}
+            n = 0
+            for r in await conn.fetch("SELECT data FROM canon_item WHERE domain = $1", domain):
+                n += 1
+                for t in open_canon_data(r["data"]).get("tags") or []:
+                    df[t] = df.get(t, 0) + 1
             sample = await conn.fetch("SELECT canon_key FROM canon_item WHERE domain = $1 AND embedded_hash IS NOT NULL ORDER BY random() LIMIT 800", domain)
             vecs = fetch_vectors(qdrant, [r["canon_key"] for r in sample])
             base = estimate_baseline(np.stack(list(vecs.values()))) if len(vecs) >= 20 else 0.2
-            self._cache[domain] = ({r["t"]: r["n"] for r in rows}, int(n or 0), base)
+            self._cache[domain] = (df, n, base)
         return self._cache[domain]
 
 
@@ -79,7 +93,9 @@ async def load_overlay(conn: asyncpg.Connection, user_id: str) -> dict:
     row = await conn.fetchrow("SELECT source_weights, disabled_sources, pinned_topics FROM user_overlay WHERE user_id = $1", uuid.UUID(user_id))
     if not row:
         return {"source_weights": {}, "disabled_sources": [], "pinned_topics": []}
-    return {k: (row[k] or ({} if k == "source_weights" else [])) for k in ("source_weights", "disabled_sources", "pinned_topics")}
+    out = {k: (row[k] or ({} if k == "source_weights" else [])) for k in ("source_weights", "disabled_sources", "pinned_topics")}
+    out["pinned_topics"] = get_vault().open_json(out["pinned_topics"], P_OVERLAY) or []  # sealed: free text about you
+    return out
 
 
 async def user_signals(conn: asyncpg.Connection, user_id: str, now: datetime) -> tuple[dict[str, ItemSignal], dict, list[SignalEvent]]:
@@ -129,7 +145,7 @@ async def recompute_users(
         for uid in set(everyone) | user_ids:
             all_signals[uid], overlays[uid], all_events[uid] = await user_signals(conn, uid, now)
         old_profiles = {
-            (str(r["user_id"]), r["domain"]): r["profile"]
+            (str(r["user_id"]), r["domain"]): get_vault().open_json(r["profile"], P_PROFILE)
             for r in await conn.fetch("SELECT user_id, domain, profile FROM taste_profile WHERE user_id = ANY($1::uuid[])", [uuid.UUID(u) for u in user_ids])
         }
 
@@ -149,10 +165,10 @@ async def recompute_users(
             async with pool.acquire() as conn:
                 tag_df, n_catalog, baseline = await stats.get(conn, qdrant, domain)
                 keys = list(dsig)
-                tag_rows = await conn.fetch("SELECT canon_key, tags, title, related FROM canon_item WHERE canon_key = ANY($1::text[])", keys)
-            tags = {r["canon_key"]: list(r["tags"]) for r in tag_rows}
-            titles = {r["canon_key"]: r["title"] for r in tag_rows}
-            related_of = {r["canon_key"]: list(r["related"]) for r in tag_rows}
+                cdata = await canon_data(conn, keys)
+            tags = {k: list(d.get("tags") or []) for k, d in cdata.items()}
+            titles = {k: d.get("title") or "" for k, d in cdata.items()}
+            related_of = {k: list(d.get("related") or []) for k, d in cdata.items()}
             vectors = await asyncio.to_thread(fetch_vectors, qdrant, keys)
             pinned = []
             if embedder is not None and domain in PINNED_DOMAINS:
@@ -197,7 +213,7 @@ async def recompute_users(
                     """,
                     uuid.UUID(uid),
                     domain,
-                    prof.to_json(),
+                    get_vault().seal_json(prof.to_json(), P_PROFILE),
                 )
             count += 1
             # Optional question queue: never let it affect profiles (see questions_producer).
@@ -228,8 +244,8 @@ async def _llm_touches(prof: TasteProfile, old: dict | None, llm, titles: dict[s
     need_titles = [k for i in prof.interests for k in i.members if k not in titles]
     if need_titles:
         async with pool.acquire() as conn:
-            for r in await conn.fetch("SELECT canon_key, title FROM canon_item WHERE canon_key = ANY($1::text[])", need_titles):
-                titles[r["canon_key"]] = r["title"]
+            for k, d in (await canon_data(conn, need_titles)).items():
+                titles[k] = d.get("title") or ""
     changed = False
     for it in prof.interests:
         if it.kind != "behaviour":

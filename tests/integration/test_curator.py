@@ -4,6 +4,7 @@ import sys
 from conftest import ROOT, FakeEmbedder
 from fixtures import EXTERNAL_REC, USER_A, USER_B
 from test_worker import run_worker
+from muse_taste.store import blind_canon
 
 sys.path.insert(0, str(ROOT / "services" / "curator"))
 
@@ -36,7 +37,7 @@ def test_curator_adds_what_the_household_would_like(db_dsn, monkeypatch):
         return ranked, added, managed
 
     ranked, added, managed = asyncio.run(go())
-    assert ranked[0][1] == f"tmdb:movie:{EXTERNAL_REC}", ranked[:3]
-    assert added and added[0]["canon_key"] == f"tmdb:movie:{EXTERNAL_REC}"
+    assert ranked[0][1] == blind_canon(f"tmdb:movie:{EXTERNAL_REC}"), ranked[:3]
+    assert added and added[0]["canon_key"] == blind_canon(f"tmdb:movie:{EXTERNAL_REC}")
     assert added_calls == [("movie", str(EXTERNAL_REC))]
     assert [(r["source_item_id"], r["arr_id"]) for r in managed] == [(str(EXTERNAL_REC), f"arr-{EXTERNAL_REC}")]

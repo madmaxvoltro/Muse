@@ -3,7 +3,8 @@ import uuid
 
 from conftest import use_service
 from fixtures import EXTERNAL_REC, USER_A, USER_B, insert
-from test_worker import run_worker
+from test_worker import B, run_worker
+from muse_schema.crypto import P_PROFILE, P_QUESTION, get_vault
 
 
 
@@ -41,22 +42,23 @@ def test_recommendations_questions_and_feedback(db_dsn):
 
     out = asyncio.run(go())
     lib = out["lib"]
-    seen = {"tmdb:movie:100", "tmdb:movie:101", "tmdb:movie:102", "tmdb:movie:103", "tmdb:movie:104", "tmdb:movie:106", "tmdb:movie:112"}
+    seen = {B(f"tmdb:movie:{i}") for i in (100, 101, 102, 103, 104, 106, 112)}
     keys = [r["canon_key"] for r in lib]
     assert not seen & set(keys), keys
     assert all(r["available"] and r["source"] == "jellyfin" for r in lib)
-    assert keys[0] == "tmdb:movie:105", lib[:3]  # the one unseen crime film, also liked by user B
+    assert keys[0] == B("tmdb:movie:105"), lib[:3]  # the one unseen crime film, also liked by user B
+    assert lib[0]["tmdb_id"] == 105 and lib[0]["title"] == "Crime Film 5"
     assert lib[0]["reasons"] and isinstance(lib[0]["explanation"], dict)
     assert all(isinstance(v, float) for v in lib[0]["explanation"].values())
-    horror = [k for k in keys if k in {f"tmdb:movie:{i}" for i in range(112, 118)}]
-    assert not horror or keys.index(horror[0]) > keys.index("tmdb:movie:105")
-    ext = [r for r in out["all"] if r["canon_key"] == f"tmdb:movie:{EXTERNAL_REC}"]
+    horror = [k for k in keys if k in {B(f"tmdb:movie:{i}") for i in range(112, 118)}]
+    assert not horror or keys.index(horror[0]) > keys.index(B("tmdb:movie:105"))
+    ext = [r for r in out["all"] if r["canon_key"] == B(f"tmdb:movie:{EXTERNAL_REC}")]
     assert ext and not ext[0]["available"] and ext[0]["source"] == "tmdb"
     assert any("also liked" in reason for reason in ext[0]["reasons"]), ext[0]
     assert out["impressions"] == len(lib)
-    assert "tmdb:movie:105" not in out["after"] and "tmdb:movie:105" in out["neg_keys"]
+    assert B("tmdb:movie:105") not in out["after"] and B("tmdb:movie:105") in out["neg_keys"]
     assert len(out["onboarding"]["items"]) == 6 and out["onboarding"]["question_id"]
-    assert [i["canon_key"] for i in out["abandoned"]["items"]] == ["tmdb:movie:112"]
+    assert [i["canon_key"] for i in out["abandoned"]["items"]] == [B("tmdb:movie:112")]
     assert out["pair"]["question_id"] and out["pair"]["a"]["canon_key"] != out["pair"]["b"]["canon_key"]
     assert out["cold"][0] and out["cold"][1]
 
@@ -81,7 +83,7 @@ def test_http_routes(db_dsn):
         return r, p, q, bad
 
     r, p, q, bad = asyncio.run(go())
-    assert r.status_code == 200 and r.json()["recommendations"][0]["canon_key"] == "tmdb:movie:105"
+    assert r.status_code == 200 and r.json()["recommendations"][0]["canon_key"] == B("tmdb:movie:105")
     assert {"source", "source_item_id", "score", "confidence", "explanation"} <= set(r.json()["recommendations"][0])  # plugin contract
     assert p.status_code == 200 and p.json()["interests"] and p.json()["stats"]["liked"] > 0
     assert q.status_code == 200 and q.json()["kind"] in ("onboarding", "abandon", "this_or_that")
@@ -127,15 +129,15 @@ def test_question_queue_end_to_end(db_dsn, monkeypatch):
     async def go():
         pool, qdrant, _ = await run_worker(db_dsn)
         async with pool.acquire() as conn:
-            queued = await conn.fetch("SELECT kind, dedupe_key, status FROM question_log WHERE user_id = $1", USER_A)
-            prof = await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A)
+            queued = await conn.fetch("SELECT kind, dedupe_key, status, payload FROM question_log WHERE user_id = $1", USER_A)
+            prof = get_vault().open_json(await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A), P_PROFILE)
             it = prof["interests"][0]
             # an interest question as the producer would write it
             qid = uuid.uuid4()
             await conn.execute(
                 """INSERT INTO question_log (id, user_id, kind, payload, status, domain, priority, dedupe_key, expires_at)
                    VALUES ($1, $2, 'interest', $3::jsonb, 'pending', 'video', 0.6, 'interest:emerging:test', now() + interval '1 day')""",
-                qid, USER_A, {"subkind": "emerging", "prompt": "More?", "interest": {"anchor_key": it["medoid_key"], "members": it["members"]}},
+                qid, USER_A, get_vault().seal_json({"subkind": "emerging", "prompt": "More?", "interest": {"anchor_key": it["medoid_key"], "members": it["members"]}}, P_QUESTION),
             )
             stale = uuid.uuid4()
             await conn.execute("INSERT INTO question_log (id, user_id, kind, payload, status, expires_at) VALUES ($1, $2, 'abandon', '{}'::jsonb, 'pending', now() - interval '1 hour')", stale, USER_A)
@@ -175,7 +177,7 @@ def test_question_queue_end_to_end(db_dsn, monkeypatch):
         await w.run_once()
         async with pool.acquire() as conn:
             statuses = {r["id"]: r["status"] for r in await conn.fetch("SELECT id, status FROM question_log WHERE id = ANY($1::uuid[])", [qid, stale])}
-            prof2 = await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A)
+            prof2 = get_vault().open_json(await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A), P_PROFILE)
             dupes = await conn.fetchval("SELECT count(*) - count(DISTINCT dedupe_key) FROM question_log WHERE user_id = $1 AND dedupe_key IS NOT NULL", USER_A)
         await pool.close()
         return queued, q1, q2, ans, other, statuses, prof2, qid, stale, dupes
@@ -183,7 +185,8 @@ def test_question_queue_end_to_end(db_dsn, monkeypatch):
     queued, q1, q2, ans, other, statuses, prof2, qid, stale, dupes = asyncio.run(go())
     kinds = {r["kind"] for r in queued}
     assert "abandon" in kinds and "this_or_that" in kinds, queued
-    assert any(r["dedupe_key"] == "abandon:tmdb:movie:112" for r in queued)
+    assert any(r["dedupe_key"] == get_vault().bid("abandon:" + B("tmdb:movie:112"), P_QUESTION) for r in queued)
+    assert all("_enc" in r["payload"] for r in queued)  # question payloads are sealed
     ids = [q["question_id"] for q in q1["questions"]]
     assert str(qid) in ids and str(stale) not in ids  # expired questions are never served
     assert all("answer_with" in q for q in q1["questions"])

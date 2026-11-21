@@ -15,11 +15,14 @@ Answers to questions go to the ingestion API (POST /answers): this service never
 taste data, only impressions and question bookkeeping.
 """
 
+import hmac
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from muse_schema.config import key_list, secret
+from muse_schema.crypto import get_vault
 from qdrant_client import QdrantClient
 
 from . import questions
@@ -30,16 +33,34 @@ from .engine import TARGET_TYPES, Engine, Request as RecoRequest
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 ITEM_TYPES = list(TARGET_TYPES)
 
-# MUSE_READ_KEYS="vesper:xxxx,jellyfin-plugin:yyyy": callers must send X-Muse-Read-Key. Read
-# keys can only read; ingestion keys (MUSE_ADAPTER_KEYS) can only write. Unset = open (dev).
-_READ_KEYS = {k.split(":", 1)[1] for k in os.environ.get("MUSE_READ_KEYS", "").split(",") if ":" in k}
+# MUSE_READ_KEYS_FILE (a Docker secret, one "client:key" per line, e.g. vesper:..., jellyfin-plugin:...)
+# or MUSE_READ_KEYS (comma separated, development). Callers send X-Muse-Read-Key. Read keys can
+# only read; ingestion keys can only write. Secure by default: with no read keys configured
+# every request is refused, unless MUSE_ALLOW_OPEN_READ=true (development only).
+_READ_KEYS = key_list("MUSE_READ_KEYS")
+_PUBLIC = {"/healthz"}
+
+
+def _open_read_allowed() -> bool:
+    return os.environ.get("MUSE_ALLOW_OPEN_READ", "false").lower() in ("1", "true", "yes")
 
 
 async def require_read_key(request: Request, x_muse_read_key: str | None = Header(default=None)) -> None:
-    if request.url.path == "/healthz":
+    if request.url.path in _PUBLIC or (request.url.path.startswith("/status") and _status_token_ok(request)):
         return
-    if _READ_KEYS and x_muse_read_key not in _READ_KEYS:
+    if not _READ_KEYS:
+        if _open_read_allowed():
+            return
+        raise HTTPException(status_code=503, detail="no read keys configured (MUSE_READ_KEYS_FILE); run ./muse setup")
+    supplied = (x_muse_read_key or "").encode()
+    if not any(hmac.compare_digest(k.encode(), supplied) for k in _READ_KEYS):
         raise HTTPException(status_code=401, detail="invalid or missing X-Muse-Read-Key")
+
+
+def _status_token_ok(request: Request) -> bool:
+    token = secret("MUSE_STATUS_TOKEN")
+    supplied = request.query_params.get("token") or request.cookies.get("muse_status") or ""
+    return bool(token) and hmac.compare_digest(token.encode(), supplied.encode())
 
 
 def _embedder_factory():
@@ -55,12 +76,14 @@ _engine: Engine | None = None
 async def engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = Engine(await get_pool(), QdrantClient(url=QDRANT_URL), _embedder_factory)
+        # read-only Qdrant key: this service can search vectors but never change them
+        _engine = Engine(await get_pool(), QdrantClient(url=QDRANT_URL, api_key=secret("MUSE_QDRANT_API_KEY") or None), _embedder_factory)
     return _engine
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    get_vault()  # fail fast without the master key
     yield
     await close_pool()
 
@@ -115,8 +138,7 @@ async def profile(user_id: str, domain: str = Query("video", description="video 
     if prof is None:
         raise HTTPException(status_code=404, detail="no profile for this user/domain yet")
     keys = list({m for i in prof.interests for m in i.members[:6]} | {n.key for n in prof.negatives[:10]} | {a.key for a in prof.anchors[:15]})
-    async with eng.pool.acquire() as conn:
-        titles = {r["canon_key"]: r["title"] for r in await conn.fetch("SELECT canon_key, title FROM canon_item WHERE canon_key = ANY($1::text[])", keys)}
+    titles = await eng.titles_for(keys)
     return {
         "user_id": user_id,
         "domain": domain,
@@ -153,8 +175,7 @@ async def evolution(user_id: str, domain: str = Query("video", description="vide
         raise HTTPException(status_code=404, detail="no evolution report yet (needs a profile with some history)")
     ev = prof.evolution
     keys = list({i.medoid_key for i in prof.interests} | {m for i in prof.interests for m in i.members[:4]})
-    async with eng.pool.acquire() as conn:
-        titles = {r["canon_key"]: r["title"] for r in await conn.fetch("SELECT canon_key, title FROM canon_item WHERE canon_key = ANY($1::text[])", keys)}
+    titles = await eng.titles_for(keys)
 
     def name(k: int) -> str:
         it = prof.interests[k]

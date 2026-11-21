@@ -12,7 +12,8 @@ import numpy as np
 from muse_taste.canon import domain_of
 from muse_taste.elicitation import ABANDON_REASONS, onboarding_spread, this_or_that
 from muse_taste.questions import ANSWER_TEMPLATES
-from muse_taste.store import ITEMS_COLLECTION
+from muse_schema.crypto import P_QUESTION, get_vault
+from muse_taste.store import ITEMS_COLLECTION, open_payload
 from qdrant_client.http import models as qm
 
 from .engine import TARGET_TYPES, Engine, Request
@@ -41,10 +42,11 @@ async def _log(engine: Engine, user_id: str, kind: str, payload: dict) -> str:
         try:
             await conn.execute(
                 "INSERT INTO question_log (id, user_id, kind, payload, status, served_at) VALUES ($1, $2, $3, $4::jsonb, 'served', now())",
-                qid, uuid.UUID(user_id), kind, payload,
+                qid, uuid.UUID(user_id), kind, get_vault().seal_json(payload, P_QUESTION),
             )
         except asyncpg.UndefinedColumnError:  # database without migration 009
-            await conn.execute("INSERT INTO question_log (id, user_id, kind, payload) VALUES ($1, $2, $3, $4::jsonb)", qid, uuid.UUID(user_id), kind, payload)
+            await conn.execute("INSERT INTO question_log (id, user_id, kind, payload) VALUES ($1, $2, $3, $4::jsonb)", qid, uuid.UUID(user_id), kind,
+                               get_vault().seal_json(payload, P_QUESTION))
     return str(qid)
 
 
@@ -78,7 +80,7 @@ async def queue(engine: Engine, user_id: str, limit: int = 5, domain: str | None
                 "domain": r["domain"],
                 "priority": round(r["priority"], 3),
                 "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
-                **(r["payload"] or {}),
+                **(get_vault().open_json(r["payload"], P_QUESTION) or {}),
                 "answer_with": {"POST": "/answers (ingestion API, muse key)",
                                 "body": {**ANSWER_TEMPLATES.get(r["kind"], {}), "user_id": user_id, "question_id": str(r["id"])},
                                 "or_dismiss": {"kind": "dismiss", "user_id": user_id, "question_id": str(r["id"])}},
@@ -97,7 +99,7 @@ async def _asked(engine: Engine, user_id: str, kind: str, days: int = 90) -> set
         )
     out: set[str] = set()
     for r in rows:
-        out.update((r["payload"] or {}).get("keys", []))
+        out.update((get_vault().open_json(r["payload"], P_QUESTION) or {}).get("keys", []))
     return out
 
 
@@ -117,16 +119,17 @@ async def onboarding(engine: Engine, user_id: str, item_type: str, n: int = 24) 
                 break
         return pts
 
-    pts = await asyncio.to_thread(collect)
-    pts = [p for p in pts if (p.payload or {}).get("canon_key") not in exclude]
+    raw_pts = await asyncio.to_thread(collect)
+    pts = [(np.asarray(p.vector, dtype=np.float32), open_payload(p.payload)) for p in raw_pts]
+    pts = [(v, pl) for v, pl in pts if pl.get("canon_key") not in exclude]
     if not pts:
         return {"question_id": None, "kind": "onboarding", "items": []}
-    keys = [p.payload["canon_key"] for p in pts]
-    V = np.stack([np.asarray(p.vector, dtype=np.float32) for p in pts])
+    keys = [pl["canon_key"] for _, pl in pts]
+    V = np.stack([v for v, _ in pts])
     # Library titles first (people judge what they can watch); TMDB popularity as recognisability.
-    pop = np.array([(p.payload.get("vote_count") or 0.0) * (3.0 if p.payload.get("available") else 1.0) + 1.0 for p in pts])
+    pop = np.array([(pl.get("vote_count") or 0.0) * (3.0 if pl.get("available") else 1.0) + 1.0 for _, pl in pts])
     picks = onboarding_spread(keys, V, pop, n=n, baseline=prof.baseline if prof else 0.2)
-    by_key = {p.payload["canon_key"]: p.payload for p in pts}
+    by_key = {pl["canon_key"]: pl for _, pl in pts}
     qid = await _log(engine, user_id, "onboarding", {"keys": picks, "item_type": item_type})
     return {
         "question_id": qid,
@@ -166,9 +169,7 @@ async def abandoned(engine: Engine, user_id: str, item_type: str, limit: int = 3
     keys = [k for k in prof.abandoned if k not in asked][:limit]
     if not keys:
         return {"kind": "abandon", "items": []}
-    async with engine.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT canon_key, title, year, item_type, available, library_refs FROM canon_item WHERE canon_key = ANY($1::text[])", keys)
-    items = [_item(dict(r)) for r in rows]
+    items = [_item(r) for r in await engine.canon_items(keys)]
     qid = await _log(engine, user_id, "abandon", {"keys": keys, "item_type": item_type})
     return {
         "question_id": qid,

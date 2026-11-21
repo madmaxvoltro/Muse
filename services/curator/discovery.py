@@ -18,7 +18,7 @@ import httpx
 import numpy as np
 from muse_taste.documents import build_document, build_tags, merged_fields
 from muse_taste.ranking import CandidateInput
-from muse_taste.store import ITEMS_COLLECTION
+from muse_taste.store import ITEMS_COLLECTION, blind_canon, open_payload
 from muse_taste.tmdb import TMDBClient
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
@@ -44,8 +44,8 @@ def catalog_candidates(qdrant: QdrantClient, arr_item_type: str, limit: int = 30
     while len(out) < limit:
         pts, offset = qdrant.scroll(ITEMS_COLLECTION, scroll_filter=flt, limit=500, offset=offset, with_vectors=True, with_payload=True)
         for p in pts:
-            pl = p.payload or {}
-            if str(pl.get("canon_key", "")).startswith("tmdb:"):
+            pl = open_payload(p.payload)
+            if str(pl.get("real_key") or "").startswith("tmdb:"):
                 out.append(_cand(pl["canon_key"], np.asarray(p.vector, dtype=np.float32), pl))
         if offset is None:
             break
@@ -54,7 +54,7 @@ def catalog_candidates(qdrant: QdrantClient, arr_item_type: str, limit: int = 30
 
 def _cand(key: str, vec: np.ndarray, pl: dict) -> CandidateInput:
     return CandidateInput(key=key, vector=vec, tags=pl.get("tags") or [], vote_average=pl.get("vote_average"), vote_count=pl.get("vote_count"),
-                          payload={"title": pl.get("title"), "year": pl.get("year"), "collection_id": pl.get("collection_id")})
+                          payload={"title": pl.get("title"), "year": pl.get("year"), "collection_id": pl.get("collection_id"), "real_key": pl.get("real_key")})
 
 
 async def trending_candidates(tmdb: TMDBClient | None, http: httpx.AsyncClient, trakt_client_id: str | None, embedder, arr_item_type: str) -> list[CandidateInput]:
@@ -84,7 +84,7 @@ async def trending_candidates(tmdb: TMDBClient | None, http: httpx.AsyncClient, 
     fields = [merged_fields(item_type, {"title": r["title"], "year": r.get("year"), "genres": r.get("genres") or [], "description": r.get("overview") or ""}) for r in raw.values()]
     vecs = embedder.embed([build_document(f) for f in fields])
     return [
-        CandidateInput(key=f"tmdb:{kind}:{r['tmdb_id']}", vector=v, tags=build_tags(f), vote_average=r.get("vote_average"), vote_count=r.get("vote_count"),
-                       payload={"title": r["title"], "year": r.get("year")})
+        CandidateInput(key=blind_canon(f"tmdb:{kind}:{r['tmdb_id']}"), vector=v, tags=build_tags(f), vote_average=r.get("vote_average"), vote_count=r.get("vote_count"),
+                       payload={"title": r["title"], "year": r.get("year"), "real_key": f"tmdb:{kind}:{r['tmdb_id']}"})
         for r, f, v in zip(raw.values(), fields, vecs)
     ]

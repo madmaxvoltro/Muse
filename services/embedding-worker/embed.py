@@ -6,13 +6,12 @@ collection."""
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 
 import asyncpg
 from muse_schema import canon_point_id
-from muse_taste.store import BOOL_INDEXES, FLOAT_INDEXES, ITEMS_COLLECTION, KEYWORD_INDEXES, payload_for
+from muse_taste.store import BOOL_INDEXES, FLOAT_INDEXES, ITEMS_COLLECTION, KEYWORD_INDEXES, open_canon_data, payload_for
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
@@ -42,7 +41,7 @@ def ensure_collection(qdrant: QdrantClient, dim: int) -> bool:
     return True
 
 
-CANON_COLS = "canon_key, item_type, domain, title, year, tags, collection_id, vote_average, vote_count, popularity, available, library_refs, added_at, document, doc_hash, payload_hash"
+CANON_COLS = "canon_key, item_type, domain, available, added_at, data, doc_hash, payload_hash"
 
 
 async def sync_vectors(pool: asyncpg.Pool, qdrant: QdrantClient, embedder, time_budget_s: float = 240.0) -> int:
@@ -51,16 +50,17 @@ async def sync_vectors(pool: asyncpg.Pool, qdrant: QdrantClient, embedder, time_
     while time.monotonic() - start < time_budget_s:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT {CANON_COLS} FROM canon_item WHERE embedded_hash IS DISTINCT FROM doc_hash ORDER BY available DESC, canon_key LIMIT $1",
+                f"SELECT {CANON_COLS} FROM canon_item WHERE doc_hash IS NOT NULL AND embedded_hash IS DISTINCT FROM doc_hash ORDER BY available DESC, canon_key LIMIT $1",
                 BATCH,
             )
         if not rows:
             break
-        docs = [r["document"] for r in rows]
+        opened = [_row(r) for r in rows]
+        docs = [r["data"].get("document") or "" for r in opened]
         vecs = await asyncio.to_thread(embedder.embed, docs)
         points = [
-            qm.PointStruct(id=canon_point_id(r["canon_key"]), vector=v.tolist(), payload=payload_for(_row(r)))
-            for r, v in zip(rows, vecs)
+            qm.PointStruct(id=canon_point_id(r["canon_key"]), vector=v.tolist(), payload=payload_for(r))
+            for r, v in zip(opened, vecs)
         ]
         qdrant.upsert(ITEMS_COLLECTION, points=points)
         async with pool.acquire() as conn:
@@ -88,8 +88,7 @@ async def sync_vectors(pool: asyncpg.Pool, qdrant: QdrantClient, embedder, time_
 
 def _row(r: asyncpg.Record) -> dict:
     d = dict(r)
-    if isinstance(d.get("library_refs"), str):
-        d["library_refs"] = json.loads(d["library_refs"])
+    d["data"] = open_canon_data(d.get("data"))
     return d
 
 

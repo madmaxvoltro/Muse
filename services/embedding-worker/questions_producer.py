@@ -20,7 +20,8 @@ from muse_taste.questions import (
     pair_question,
 )
 from muse_taste.ranking import CandidateInput, score_candidates
-from muse_taste.store import ITEMS_COLLECTION
+from muse_schema.crypto import P_QUESTION, get_vault
+from muse_taste.store import ITEMS_COLLECTION, open_canon_data, open_payload
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
@@ -52,9 +53,11 @@ async def expire(pool: asyncpg.Pool) -> int:
 
 async def enqueue(pool: asyncpg.Pool, user_id: str, specs: list[QuestionSpec]) -> int:
     added = 0
+    vault = get_vault()
     uid = uuid.UUID(user_id)
     async with pool.acquire() as conn:
         for q in specs:
+            dedupe = vault.bid(q.dedupe_key, P_QUESTION)
             exists = await conn.fetchval(
                 """
                 SELECT 1 FROM question_log
@@ -62,7 +65,7 @@ async def enqueue(pool: asyncpg.Pool, user_id: str, specs: list[QuestionSpec]) -
                   AND (status IN ('pending', 'served') OR asked_at > now() - make_interval(days => $3::int))
                 LIMIT 1
                 """,
-                uid, q.dedupe_key, q.reask_days,
+                uid, dedupe, q.reask_days,
             )
             if exists:
                 continue
@@ -71,7 +74,7 @@ async def enqueue(pool: asyncpg.Pool, user_id: str, specs: list[QuestionSpec]) -
                 INSERT INTO question_log (id, user_id, kind, payload, status, domain, priority, dedupe_key, expires_at)
                 VALUES ($1, $2, $3, $4::jsonb, 'pending', $5, $6, $7, now() + make_interval(days => $8::int))
                 """,
-                uuid.uuid4(), uid, q.kind, q.payload, q.domain, q.priority, q.dedupe_key, q.ttl_days,
+                uuid.uuid4(), uid, q.kind, vault.seal_json(q.payload, P_QUESTION), q.domain, q.priority, dedupe, q.ttl_days,
             )
             added += 1
         # keep the queue short: beyond the cap, the least valuable pending questions expire
@@ -96,13 +99,14 @@ def _onboarding_items(qdrant: QdrantClient, prof: TasteProfile, n: int = 18) -> 
         if offset is None:
             break
     seen = set(prof.seen)
-    pts = [p for p in pts if (p.payload or {}).get("canon_key") not in seen]
-    if not pts:
+    opened = [(np.asarray(p.vector, dtype=np.float32), open_payload(p.payload)) for p in pts]
+    opened = [(v, pl) for v, pl in opened if pl.get("canon_key") not in seen]
+    if not opened:
         return []
-    keys = [p.payload["canon_key"] for p in pts]
-    V = np.stack([np.asarray(p.vector, dtype=np.float32) for p in pts])
-    pop = np.array([(p.payload.get("vote_count") or 0.0) * (3.0 if p.payload.get("available") else 1.0) + 1.0 for p in pts])
-    by_key = {p.payload["canon_key"]: p.payload for p in pts}
+    keys = [pl["canon_key"] for _, pl in opened]
+    V = np.stack([v for v, _ in opened])
+    pop = np.array([(pl.get("vote_count") or 0.0) * (3.0 if pl.get("available") else 1.0) + 1.0 for _, pl in opened])
+    by_key = {pl["canon_key"]: pl for _, pl in opened}
     return [_item(by_key[k]) for k in onboarding_spread(keys, V, pop, n=n, baseline=prof.baseline)]
 
 
@@ -115,9 +119,10 @@ def _pair(qdrant: QdrantClient, prof: TasteProfile, anchor_vectors: dict[str, np
     pool: dict[str, tuple] = {}
     for it in prof.interests[:6]:
         for p in qdrant.query_points(ITEMS_COLLECTION, query=it.medoid, query_filter=flt, limit=40, with_vectors=True, with_payload=True).points:
-            k = (p.payload or {}).get("canon_key")
+            pl = open_payload(p.payload)
+            k = pl.get("canon_key")
             if k and k not in seen:
-                pool.setdefault(k, (np.asarray(p.vector, dtype=np.float32), p.payload))
+                pool.setdefault(k, (np.asarray(p.vector, dtype=np.float32), pl))
     if len(pool) < 2:
         return None
     cands = [CandidateInput(key=k, vector=v, tags=pl.get("tags") or [], vote_average=pl.get("vote_average"), vote_count=pl.get("vote_count"), payload=pl)
@@ -135,10 +140,8 @@ async def produce(pool: asyncpg.Pool, qdrant: QdrantClient, prof: TasteProfile, 
     specs += interest_questions(prof, titles)
     if prof.abandoned:
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT canon_key, title, year, item_type, available, library_refs FROM canon_item WHERE canon_key = ANY($1::text[])", prof.abandoned[:5]
-            )
-        items = {r["canon_key"]: _item(dict(r)) for r in rows}
+            rows = await conn.fetch("SELECT canon_key, item_type, available, data FROM canon_item WHERE canon_key = ANY($1::text[])", prof.abandoned[:5])
+        items = {r["canon_key"]: _item({**open_canon_data(r["data"]), "canon_key": r["canon_key"], "item_type": r["item_type"], "available": r["available"]}) for r in rows}
         specs += abandon_questions(prof, {**titles, **{k: v["title"] for k, v in items.items()}}, items)
     cold = prof.total_confidence < COLD_EVIDENCE
     q = onboarding_question(prof.domain, _onboarding_items(qdrant, prof), cold) if cold or len(prof.interests) <= 1 else None
