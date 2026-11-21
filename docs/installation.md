@@ -18,8 +18,9 @@ it as your highest-value target. Before installing anything:
 ## 1. Prerequisites
 
 - Docker + Docker Compose v2
-- A dedicated VM/LXC (recommended: 4 vCPU / 8GB RAM minimum to start; more once the embedding
-  worker is running local models)
+- A dedicated VM/LXC (recommended: 4 vCPU / 8GB RAM minimum; 16GB+ for the default
+  Qwen3-Embedding-0.6B model on CPU, or a GPU / an Ollama or vLLM server — see
+  `docs/recommender.md`, "Models and hardware")
 - `openssl` (for generating adapter API keys)
 
 ## 2. Clone and configure
@@ -93,8 +94,18 @@ Plugins → Repositories.
    ```bash
    docker compose exec postgres psql -U muse -d muse -c "SELECT source, action, metadata FROM event ORDER BY timestamp DESC LIMIT 5;"
    ```
-3. Once the embedding worker and recommendation API are implemented, check
-   `GET /recommendations/<your-user-id>` on the recommendation-api returns something.
+3. Start the embedding worker (`docker compose up -d embedding-worker`) and watch its log: the
+   first cycles download the embedding model, build the catalog, enrich it (with
+   `TMDB_API_KEY` set) and embed it. Then:
+   - `GET /profile/<your-user-id>` on the recommendation-api shows the taste profile Muse built;
+   - `GET /recommendations/<your-user-id>?item_type=movie` returns explained recommendations;
+   - `GET /questions/<your-user-id>/next` returns the next question to ask.
+4. Optionally import history from other services (`adapters/importer/import_history.py`, or
+   `POST /import/{kind}` on the ingestion API) and measure with
+   `docker compose exec embedding-worker python evaluate.py`. See `docs/recommender.md`.
+
+Upgrading an existing install: apply `db/migrations/007_taste_engine.sql` by hand (see
+`docs/recommender.md`, "Upgrading from v1").
 
 ## Troubleshooting
 

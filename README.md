@@ -14,11 +14,26 @@ actually drives what gets suggested and, optionally, what gets downloaded.
 - **Unified event store**: every watch/search/listen/skip across all connected sources lands in
   one append-only Postgres+TimescaleDB table, negative signals (skipped/rejected) included from
   day one.
-- **Cross-domain taste profile**: local-model embeddings, no external API calls — content never
-  leaves your network for profiling purposes.
-- **Google-level recommendation funnel**: candidate generation → ranking → re-ranking, with
-  confidence as a first-class scoring input (not just a UI label) and a lightweight
-  multi-armed-bandit explore mechanism.
+- **Multi-interest taste profile**: one judgement per title (no more over-counting progress
+  polls or binges), several interest clusters per person instead of one blurry average,
+  disliked titles as repulsors, canonical identity across every source. Embeddings run locally
+  (CPU or GPU) or on your own Ollama/vLLM; content understanding is enriched with TMDB
+  keywords/credits and optional LLM tone descriptors.
+- **Research-grounded recommendation funnel**: eight candidate generators fused with RRF
+  (including TMDB "fans also liked" as borrowed collaborative filtering), an explainable
+  ranker with per-candidate uncertainty, lists calibrated to your interest mix, and
+  Thompson-sampled exploration. Weights re-fit from what you actually watch. Details and
+  citations: [`docs/recommender.md`](docs/recommender.md).
+- **Taste evolution**: tracks how each interest emerges, grows, fades and comes back, notices
+  when you've had enough of something, learns your rhythms (weekday evenings vs Sunday
+  mornings), and broadens your taste step by step beyond the edge of what you like. All subtle,
+  explained, and adjustable per user; `GET /evolution/{user}` shows the timeline.
+- **Muse asks the right questions, optionally**: a background-filled queue (onboarding picks,
+  "this or that?" where it is least sure, "why did you stop?", and taste-evolution checks like
+  "more of that?") served by the API and an optional MCP server. Nothing depends on answers.
+  Plus history import from YouTube, Spotify, Letterboxd, IMDb, Netflix, Trakt and SoundCloud.
+- **Measurable**: an offline evaluator replays your own history and reports Recall/nDCG/
+  diversity/calibration for every stage, so changes are judged by numbers.
 - **User control overlay**: sliders, pins, an explore-dial, and per-recommendation explainability
   — sits on top of the automatic profile, never mutates it, always reversible.
 - **Autonomous discovery/curator**: optionally lets Muse manage a fixed storage budget
@@ -31,9 +46,10 @@ Full design rationale: [`docs/architecture.md`](docs/architecture.md).
 
 ## Status
 
-Core pipeline implemented and unit-tested: event schema, ingestion API, embedding worker,
-recommendation API (full 3-stage funnel), curator (300GB budget + Soon Gone), and the
-SearxNG/Jellyfin/arr adapters. A local `docker compose build` succeeded for the Python
+Core pipeline implemented and tested (`pytest tests` — unit tests for the engine, integration
+tests against Postgres + in-memory Qdrant): event schema, ingestion API, embedding worker,
+taste engine (`shared/muse_taste`, see `docs/recommender.md`), recommendation API, curator
+(300GB budget + Soon Gone), and the SearxNG/Jellyfin/arr adapters. A local `docker compose build` succeeded for the Python
 services; a full `up` wasn't completed in the dev sandbox (Docker Hub rate-limited image
 pulls there) — verify on your actual host. The Jellyfin plugin (C#/.NET) is written but not
 yet compiled/tested against a real Jellyfin instance. Still not started: Open WebUI,
@@ -45,14 +61,17 @@ per-component status and known gaps.
 
 ```
 shared/muse_schema/     the Event model — the one contract every adapter and service agrees on
+shared/muse_taste/      the taste engine: signals, profiles, retrieval, ranking, reranking, questions, eval
 db/migrations/           Postgres/TimescaleDB schema
 services/ingestion-api/  write-only endpoint all adapters POST events to
 services/recommendation-api/  the 3-stage recommendation funnel
 services/embedding-worker/    content + taste embedding computation
 services/curator/             autonomous storage-budget manager
-adapters/                one subdirectory per source, each a small standalone service
+services/mcp-server/          optional MCP server: questions, answers, recommendations, profile, evolution
+adapters/                one subdirectory per source, each a small standalone service (+ importer CLI)
+tests/                   engine unit tests + integration tests (Postgres, in-memory Qdrant)
 jellyfin-plugin/          C#/.NET plugin, IHomeScreenSection-scoped
-docs/                     architecture.md + installation.md + one setup guide per adapter
+docs/                     architecture.md + recommender.md + installation.md + one guide per adapter
 ```
 
 ## Getting started

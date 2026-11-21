@@ -4,7 +4,7 @@ WORKDIR /app
 COPY shared /shared
 COPY services/recommendation-api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir /shared
+    && pip install --no-cache-dir "/shared[taste]"
 COPY services/recommendation-api/app ./app
 
 EXPOSE 8001

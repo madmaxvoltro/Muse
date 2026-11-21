@@ -2,6 +2,28 @@
 # to the host except via Tailscale/reverse-proxy — see docs/installation.md for the
 # network isolation this assumes (dedicated VLAN segment).
 
+# Embedding settings shared by everything that embeds text: the worker (catalog), the curator
+# (trending candidates) and the recommendation API (?mood= queries). They MUST match, or
+# vectors aren't comparable. See docs/recommender.md "Models and hardware".
+x-embedding-env: &embedding-env
+  MUSE_EMBED_PROVIDER: ${MUSE_EMBED_PROVIDER:-local}
+  MUSE_EMBEDDING_MODEL: ${MUSE_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+  MUSE_EMBED_DEVICE: ${MUSE_EMBED_DEVICE:-auto}
+  MUSE_EMBED_DIM: ${MUSE_EMBED_DIM:-}
+  MUSE_EMBED_BASE_URL: ${MUSE_EMBED_BASE_URL:-}
+  MUSE_EMBED_API_KEY: ${MUSE_EMBED_API_KEY:-}
+  MUSE_EMBED_ALLOW_EXTERNAL: ${MUSE_EMBED_ALLOW_EXTERNAL:-false}
+  HF_TOKEN: ${HF_TOKEN:-}
+
+# Optional LLM (item tone/themes, interest names, taste summary). Off by default.
+x-llm-env: &llm-env
+  MUSE_LLM_PROVIDER: ${MUSE_LLM_PROVIDER:-none}
+  MUSE_LLM_BASE_URL: ${MUSE_LLM_BASE_URL:-}
+  MUSE_LLM_API_KEY: ${MUSE_LLM_API_KEY:-}
+  MUSE_LLM_MODEL: ${MUSE_LLM_MODEL:-}
+  MUSE_LLM_ALLOW_EXTERNAL: ${MUSE_LLM_ALLOW_EXTERNAL:-false}
+  MUSE_LLM_PERSONAL_TASKS: ${MUSE_LLM_PERSONAL_TASKS:-true}
+
 services:
   postgres:
     image: timescale/timescaledb:latest-pg16
@@ -39,6 +61,7 @@ services:
       dockerfile: services/recommendation-api/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *embedding-env
       MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
       MUSE_QDRANT_URL: http://qdrant:6333
     depends_on: [postgres, qdrant]
@@ -50,8 +73,13 @@ services:
       dockerfile: services/embedding-worker/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*embedding-env, *llm-env]
       MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
       MUSE_QDRANT_URL: http://qdrant:6333
+      TMDB_API_KEY: ${TMDB_API_KEY}
+      MUSE_TMDB_LANGUAGE: ${MUSE_TMDB_LANGUAGE:-en-US}
+      MUSE_TIMEZONE: ${MUSE_TIMEZONE:-UTC}
+    volumes: [hf_cache:/root/.cache/huggingface]
     depends_on: [postgres, qdrant]
     networks: [muse-net]
 
@@ -74,10 +102,13 @@ services:
       dockerfile: services/curator/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *embedding-env
       MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
       MUSE_QDRANT_URL: http://qdrant:6333
       TMDB_API_KEY: ${TMDB_API_KEY}
       TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID}
+      MUSE_CURATOR_ADD_SCORE: ${MUSE_CURATOR_ADD_SCORE:-0.55}
+      MUSE_CURATOR_REMOVE_SCORE: ${MUSE_CURATOR_REMOVE_SCORE:-0.10}
       RADARR_URL: ${RADARR_URL}
       RADARR_API_KEY: ${RADARR_API_KEY}
       SONARR_URL: ${SONARR_URL}
@@ -86,6 +117,7 @@ services:
       RADARR_ROOT_FOLDER: ${RADARR_ROOT_FOLDER}
       SONARR_QUALITY_PROFILE_NAME: ${SONARR_QUALITY_PROFILE_NAME}
       SONARR_ROOT_FOLDER: ${SONARR_ROOT_FOLDER}
+    volumes: [hf_cache:/root/.cache/huggingface]
     depends_on: [postgres, qdrant]
     networks: [muse-net]
 
@@ -118,6 +150,25 @@ services:
     depends_on: [ingestion-api]
     networks: [muse-net]
 
+  # Optional: MCP server so an assistant (Open WebUI, Claude Desktop, ...) can ask you Muse's
+  # questions in conversation and fetch recommendations. Start with --profile mcp. Nothing
+  # else depends on it. Listens on localhost only; reach it over Tailscale/SSH if needed.
+  mcp-server:
+    build:
+      context: .
+      dockerfile: services/mcp-server/Dockerfile
+    profiles: [mcp]
+    restart: unless-stopped
+    environment:
+      MUSE_RECO_URL: http://recommendation-api:8001
+      MUSE_INGEST_URL: http://ingestion-api:8000
+      MUSE_READ_KEY: ${MUSE_MCP_READ_KEY:-}
+      MUSE_ANSWER_KEY: ${MUSE_MCP_ANSWER_KEY:-}
+      MUSE_MCP_USER_ID: ${MUSE_MCP_USER_ID:-}
+    ports: ["127.0.0.1:${MUSE_MCP_PORT:-8002}:8002"]
+    depends_on: [recommendation-api, ingestion-api]
+    networks: [muse-net]
+
 networks:
   muse-net:
     internal: false  # adapters need outbound access to their upstream services; still no published ports
@@ -125,3 +176,4 @@ networks:
 volumes:
   postgres_data:
   qdrant_data:
+  hf_cache:

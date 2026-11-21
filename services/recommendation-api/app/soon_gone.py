@@ -8,7 +8,6 @@ going through the rate-limited ingestion API — see docs/architecture.md Securi
 for why that distinction is safe (adapters are the untrusted write path, this isn't one).
 """
 
-import json
 import uuid
 from datetime import datetime, timezone
 
@@ -51,6 +50,6 @@ async def whitelist(pool: asyncpg.Pool, source_item_id: str, user_id: str) -> bo
                 source_item_id,
                 row["item_type"],
                 datetime.now(timezone.utc),
-                json.dumps({"via": "soon_gone_whitelist"}),
+                {"via": "soon_gone_whitelist"},
             )
     return True

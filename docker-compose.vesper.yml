@@ -16,15 +16,9 @@ services:
     environment:
       MUSE_READ_KEYS: ${MUSE_READ_KEYS:-}
 
-  embedding-worker:
-    volumes: [hf_cache:/root/.cache/huggingface]
-
   jellyfin-adapter:
     network_mode: host
     networks: !reset []
     environment:
       MUSE_INGESTION_URL: http://127.0.0.1:${MUSE_INGEST_PORT:-8771}
       MUSE_WATCH_POLL_INTERVAL_SECONDS: ${MUSE_WATCH_POLL_INTERVAL_SECONDS:-120}
-
-volumes:
-  hf_cache:

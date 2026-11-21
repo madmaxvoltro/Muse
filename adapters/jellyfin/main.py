@@ -76,7 +76,9 @@ async def list_items(client: httpx.AsyncClient, user_id: str) -> list[dict]:
         params={
             "Recursive": "true",
             "IncludeItemTypes": ",".join(JELLYFIN_TYPE_MAP),
-            "Fields": "Genres,Overview,ProductionYear,RunTimeTicks",
+            # ProviderIds give canonical identity (TMDB/IMDb), People/Tags/Studios feed the
+            # taste engine's exact-match tags, SeriesId rolls episodes up to their show.
+            "Fields": "Genres,Overview,ProductionYear,RunTimeTicks,ProviderIds,People,Tags,Studios,Taglines,OfficialRating,CommunityRating,DateCreated",
         },
     )
     return data.get("Items", [])
@@ -95,12 +97,33 @@ async def post_event(client: httpx.AsyncClient, event: dict) -> bool:
 
 
 def item_metadata(item: dict) -> dict:
-    return {
+    md = {
         "title": item.get("Name", ""),
         "description": item.get("Overview", "") or "",
         "genres": item.get("Genres", []) or [],
         "year": item.get("ProductionYear"),
+        "provider_ids": {k: v for k, v in (item.get("ProviderIds") or {}).items() if v},
+        "people": [
+            {"name": p.get("Name"), "type": p.get("Type")}
+            for p in (item.get("People") or [])[:15]
+            if p.get("Name") and p.get("Type") in ("Actor", "Director", "Writer", "Producer")
+        ],
+        "tags": (item.get("Tags") or [])[:20],
+        "studios": [s.get("Name") for s in (item.get("Studios") or []) if s.get("Name")][:4],
+        "taglines": (item.get("Taglines") or [])[:1],
+        "official_rating": item.get("OfficialRating"),
+        "community_rating": item.get("CommunityRating"),
+        "runtime_min": round(item["RunTimeTicks"] / 600_000_000) if item.get("RunTimeTicks") else None,
     }
+    if item.get("Type") == "Episode":
+        md["series_id"] = item.get("SeriesId")
+        md["series_name"] = item.get("SeriesName")
+        md["season"] = item.get("ParentIndexNumber")
+        md["episode"] = item.get("IndexNumber")
+    if item.get("Type") == "Audio":
+        md["artist"] = (item.get("AlbumArtist") or (item.get("Artists") or [None])[0])
+        md["album"] = item.get("Album")
+    return {k: v for k, v in md.items() if v not in (None, "", [], {})} | {"title": md["title"]}
 
 
 async def sync_catalog(client: httpx.AsyncClient, users: list[dict]) -> bool:

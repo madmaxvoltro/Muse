@@ -1,229 +1,141 @@
-"""Embedding worker — computes content embeddings for items and time-decayed
-taste vectors for users, on a fixed interval. Runs as a standalone loop rather
-than a request-driven service; there's no reason for this to be a web service.
+"""Embedding worker: the background half of Muse's taste engine. One loop, every
+MUSE_EMBEDDING_INTERVAL_SECONDS:
 
-Design (see docs/architecture.md):
-- Content embedding: local sentence-transformers model on item metadata text.
-  Deliberately not calling any external embedding API — privacy requirement.
-- Taste vector: weighted average of the content vectors of everything a user
-  interacted with, weight = action_weight * exp(-age_days / DECAY_HALFLIFE_DAYS).
-  Computed per item_type plus one combined cross-domain vector, so e.g. music
-  taste never pollutes film recommendations.
+  1. catalog    new events -> item rows (canonical identity, episode -> series)
+  2. enrich     TMDB keywords/credits/recommendations (if TMDB_API_KEY), LLM descriptors (if configured)
+  3. canon      rebuild documents + tags for titles whose items changed
+  4. vectors    embed changed documents (local model on CPU/GPU, or an OpenAI-compatible endpoint)
+  5. profiles   multi-interest taste profiles for users with new events (+ everyone daily, for decay)
+  6. ranker     daily: re-fit ranker weights from logged impressions
+
+No web server; there's nothing to ask it. See docs/recommender.md.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import math
 import os
 import time
-import uuid
-from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
-from muse_schema import content_point_id, taste_point_id
+import httpx
+from muse_taste import embedder as embedder_mod
+from muse_taste import llm as llm_mod
+from muse_taste.tmdb import TMDBClient
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, PointStruct, VectorParams
-from sentence_transformers import SentenceTransformer
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("muse.embedding_worker")
+import catalog
+import embed
+import enrich
+import profiles
+import questions_producer
+import ranker_fit
 
-DATABASE_URL = os.environ["MUSE_DATABASE_URL"]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("muse.worker")
+
+DATABASE_URL = os.environ.get("MUSE_DATABASE_URL", "")
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
-MODEL_NAME = os.environ.get("MUSE_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 RUN_INTERVAL_SECONDS = int(os.environ.get("MUSE_EMBEDDING_INTERVAL_SECONDS", "300"))
-DECAY_HALFLIFE_DAYS = float(os.environ.get("MUSE_TASTE_DECAY_HALFLIFE_DAYS", "60"))
-TASTE_LOOKBACK_DAYS = int(os.environ.get("MUSE_TASTE_LOOKBACK_DAYS", "730"))
-
-CONTENT_COLLECTION = "content_items"
-TASTE_COLLECTION = "taste_vectors"
-VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dim
+FULL_PROFILE_HOURS = int(os.environ.get("MUSE_FULL_PROFILE_HOURS", "24"))
+RANKER_FIT_HOURS = int(os.environ.get("MUSE_RANKER_FIT_HOURS", "24"))
+TMDB_CREDENTIAL = os.environ.get("TMDB_API_KEY") or os.environ.get("TMDB_READ_TOKEN")
+TMDB_LANGUAGE = os.environ.get("MUSE_TMDB_LANGUAGE", "en-US")
 
 
-def item_text(metadata: dict) -> str:
-    """Builds the text blob to embed for an item. v1: metadata fields only.
-    TODO (see docs/architecture.md): incorporate transcripts/subtitles where available.
-    """
-    parts = [
-        metadata.get("title", ""),
-        metadata.get("description", ""),
-        " ".join(metadata.get("genres", []) or []),
-        metadata.get("query", ""),  # search_query items
-    ]
-    return " ".join(p for p in parts if p).strip()
-
-
-def ensure_collections(client: QdrantClient) -> None:
-    for name in (CONTENT_COLLECTION, TASTE_COLLECTION):
-        if not client.collection_exists(name):
-            client.create_collection(
-                collection_name=name,
-                vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
-            )
-            logger.info("created Qdrant collection %s", name)
-
-
-async def embed_new_content(
-    pool: asyncpg.Pool, qdrant: QdrantClient, model: SentenceTransformer
-) -> tuple[set[str], datetime, datetime]:
-    """Embeds items from events received since the last run. Returns the user_ids touched
-    (so their taste vectors can be recomputed) and the old and new watermark; run_once saves
-    the new one only after the taste vectors are done, so a failure retries the whole batch.
-    Progress is tracked by ingested_at, not "timestamp": imported history carries old
-    timestamps and would otherwise be skipped.
-    """
-    async with pool.acquire() as conn:
-        state = await conn.fetchrow("SELECT last_processed_at FROM embedding_worker_state")
-        since = state["last_processed_at"]
-
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT ON (source, source_item_id)
-                source, source_item_id, item_type, metadata, user_id, "timestamp"
-            FROM event
-            WHERE ingested_at > $1 AND source_item_id IS NOT NULL
-            ORDER BY source, source_item_id, "timestamp" DESC
-            """,
-            since,
-        )
-        # Every user with new events, not only the one whose row DISTINCT ON kept per item.
-        users = await conn.fetch(
-            "SELECT user_id, max(ingested_at) AS last FROM event WHERE ingested_at > $1 GROUP BY user_id", since
-        )
-        touched_users: set[str] = {str(u["user_id"]) for u in users}
-        max_ts = max([since, *(u["last"] for u in users)])
-        points: list[PointStruct] = []
-
-        for row in rows:
-
-            text = item_text(dict(row["metadata"]) if row["metadata"] else {})
-            if not text:
-                continue  # nothing to embed this item on yet
-
-            vector = model.encode(text, normalize_embeddings=True).tolist()
-            points.append(
-                PointStruct(
-                    id=content_point_id(row["source"], row["source_item_id"]),
-                    vector=vector,
-                    payload={
-                        "source": row["source"],
-                        "source_item_id": row["source_item_id"],
-                        "item_type": row["item_type"],
-                        "title": (row["metadata"] or {}).get("title", ""),
-                        "genres": (row["metadata"] or {}).get("genres", []) or [],
-                    },
-                )
-            )
-
-        if points:
-            qdrant.upsert(collection_name=CONTENT_COLLECTION, points=points)
-            logger.info("upserted %d content embeddings", len(points))
-
-        return touched_users, since, max_ts
-
-
-def decay_weight(event_ts: datetime, now: datetime) -> float:
-    age_days = max((now - event_ts).total_seconds() / 86400.0, 0.0)
-    return math.exp(-age_days / DECAY_HALFLIFE_DAYS)
-
-
-async def recompute_taste_vectors(
-    pool: asyncpg.Pool, qdrant: QdrantClient, user_ids: set[str]
-) -> None:
-    if not user_ids:
-        return
-
-    now = datetime.now(timezone.utc)
-    async with pool.acquire() as conn:
-        for user_id in user_ids:
-            rows = await conn.fetch(
-                """
-                SELECT source, source_item_id, item_type, action_weight, "timestamp"
-                FROM event
-                WHERE user_id = $1
-                  AND source_item_id IS NOT NULL
-                  AND "timestamp" > now() - make_interval(days => $2::int)
-                """,
-                uuid.UUID(user_id),
-                TASTE_LOOKBACK_DAYS,
-            )
-            if not rows:
-                continue
-
-            # Group weighted content-vector lookups per item_type, plus one combined bucket.
-            per_type: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
-            for row in rows:
-                w = row["action_weight"] * decay_weight(row["timestamp"], now)
-                if w == 0:
-                    continue
-                per_type[row["item_type"]].append((row["source"], row["source_item_id"], w))
-                per_type["_combined"].append((row["source"], row["source_item_id"], w))
-
-            for item_type, entries in per_type.items():
-                point_ids = [content_point_id(s, sid) for s, sid, _ in entries]
-                fetched = qdrant.retrieve(collection_name=CONTENT_COLLECTION, ids=point_ids, with_vectors=True)
-                vectors_by_id = {p.id: p.vector for p in fetched}
-
-                weighted_sum = [0.0] * VECTOR_SIZE
-                total_weight = 0.0
-                for (s, sid, w), pid in zip(entries, point_ids):
-                    vec = vectors_by_id.get(pid)
-                    if vec is None:
-                        continue  # content not embedded yet
-                    for i, v in enumerate(vec):
-                        weighted_sum[i] += v * w
-                    total_weight += abs(w)
-
-                if total_weight == 0:
-                    continue
-                taste_vector = [x / total_weight for x in weighted_sum]
-
-                qdrant.upsert(
-                    collection_name=TASTE_COLLECTION,
-                    points=[
-                        PointStruct(
-                            id=taste_point_id(user_id, item_type),
-                            vector=taste_vector,
-                            payload={"user_id": user_id, "item_type": item_type},
-                        )
-                    ],
-                )
-            logger.info("recomputed taste vectors for user=%s (%d item_types)", user_id, len(per_type))
-
-
-async def run_once(pool: asyncpg.Pool, qdrant: QdrantClient, model: SentenceTransformer) -> None:
-    touched_users, since, max_ts = await embed_new_content(pool, qdrant, model)
-    await recompute_taste_vectors(pool, qdrant, touched_users)
-    if max_ts > since:
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE embedding_worker_state SET last_processed_at = $1", max_ts)
-
-
-async def _json_codecs(conn: asyncpg.Connection) -> None:
-    # asyncpg returns json/jsonb as text by default; event.metadata is read as a dict.
+async def json_codecs(conn: asyncpg.Connection) -> None:
     for typ in ("json", "jsonb"):
         await conn.set_type_codec(typ, encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
+
+class Worker:
+    def __init__(self, pool: asyncpg.Pool, qdrant: QdrantClient, embedder, llm=None, tmdb: TMDBClient | None = None):
+        self.pool = pool
+        self.qdrant = qdrant
+        self.embedder = embedder
+        self.llm = llm
+        self.tmdb = tmdb
+
+    async def prepare(self) -> None:
+        """Collection + model bookkeeping. A model or dimension change re-embeds everything."""
+        recreated = embed.ensure_collection(self.qdrant, self.embedder.dim)
+        async with self.pool.acquire() as conn:
+            st = await conn.fetchrow("SELECT model_name, vector_dim FROM embedding_worker_state")
+            if recreated or st["model_name"] != self.embedder.name or st["vector_dim"] != self.embedder.dim:
+                if st["model_name"]:
+                    logger.warning("embedding model changed (%s/%s -> %s/%s): re-embedding the catalog",
+                                   st["model_name"], st["vector_dim"], self.embedder.name, self.embedder.dim)
+                await conn.execute("UPDATE item SET updated_at = now()")  # rebuild docs -> new doc_hash
+                await conn.execute("UPDATE canon_item SET embedded_hash = NULL, synced_payload_hash = NULL")
+                await conn.execute("UPDATE embedding_worker_state SET model_name = $1, vector_dim = $2", self.embedder.name, self.embedder.dim)
+
+    async def run_once(self) -> dict:
+        report: dict = {}
+        async with self.pool.acquire() as conn:
+            st = await conn.fetchrow("SELECT last_processed_at, last_full_profile_at, last_ranker_fit_at FROM embedding_worker_state")
+            touched, max_ts = await catalog.sync_items(conn, st["last_processed_at"])
+        report["touched_users"] = len(touched)
+        try:
+            report["questions_expired"] = await questions_producer.expire(self.pool)
+        except Exception:  # optional feature: a missing migration 009 must not stop the worker
+            logger.exception("question expiry failed (ignored)")
+
+        if self.tmdb is not None:
+            report["tmdb"] = await enrich.enrich_tmdb(self.pool, self.tmdb)
+        if self.llm is not None:
+            report["llm_items"] = await enrich.describe_items(self.pool, self.llm)
+
+        async with self.pool.acquire() as conn:
+            report["canon_rebuilt"] = await catalog.rebuild_canon(conn, self.embedder.name)
+            orphans = await catalog.orphaned_canon_keys(conn)
+        await embed.drop_orphans(self.pool, self.qdrant, orphans)
+        report["embedded"] = await embed.sync_vectors(self.pool, self.qdrant, self.embedder)
+
+        now = datetime.now(timezone.utc)
+        full = st["last_full_profile_at"] is None or now - st["last_full_profile_at"] > timedelta(hours=FULL_PROFILE_HOURS)
+        users = set(touched)
+        if full:
+            async with self.pool.acquire() as conn:
+                users |= {str(r["user_id"]) for r in await conn.fetch("SELECT DISTINCT user_id FROM event WHERE action <> 'cataloged'")}
+        report["profiles"] = await profiles.recompute_users(self.pool, self.qdrant, users, self.embedder, self.llm, self.embedder.name)
+
+        async with self.pool.acquire() as conn:
+            if max_ts > st["last_processed_at"]:
+                await conn.execute("UPDATE embedding_worker_state SET last_processed_at = $1", max_ts)
+            if full:
+                await conn.execute("UPDATE embedding_worker_state SET last_full_profile_at = now()")
+        if st["last_ranker_fit_at"] is None or now - st["last_ranker_fit_at"] > timedelta(hours=RANKER_FIT_HOURS):
+            report["ranker"] = await ranker_fit.fit(self.pool)
+            async with self.pool.acquire() as conn:
+                await conn.execute("UPDATE embedding_worker_state SET last_ranker_fit_at = now()")
+        return report
+
+
 async def main() -> None:
-    logger.info("loading embedding model %s", MODEL_NAME)
-    model = SentenceTransformer(MODEL_NAME)
-
+    embedder = embedder_mod.from_env()
+    llm = llm_mod.from_env()
+    if llm is not None:
+        logger.info("LLM enrichment on: %s (%s)", llm.name, "external" if llm.external else "local")
     qdrant = QdrantClient(url=QDRANT_URL)
-    ensure_collections(qdrant)
-
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=_json_codecs)
-
-    logger.info("embedding worker started, interval=%ds", RUN_INTERVAL_SECONDS)
+    pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5, init=json_codecs)
+    http = httpx.AsyncClient(timeout=20.0)
+    tmdb = TMDBClient(TMDB_CREDENTIAL, http, language=TMDB_LANGUAGE) if TMDB_CREDENTIAL else None
+    if tmdb is None:
+        logger.info("TMDB enrichment off (set TMDB_API_KEY): content understanding uses library metadata only")
+    worker = Worker(pool, qdrant, embedder, llm, tmdb)
+    await worker.prepare()
+    logger.info("embedding worker started: model=%s dim=%d interval=%ds", embedder.name, embedder.dim, RUN_INTERVAL_SECONDS)
     while True:
         start = time.monotonic()
         try:
-            await run_once(pool, qdrant, model)
+            report = await worker.run_once()
+            logger.info("cycle done in %.1fs: %s", time.monotonic() - start, report)
         except Exception:
             logger.exception("embedding worker cycle failed")
-        elapsed = time.monotonic() - start
-        await asyncio.sleep(max(RUN_INTERVAL_SECONDS - elapsed, 5))
+        await asyncio.sleep(max(RUN_INTERVAL_SECONDS - (time.monotonic() - start), 5))
 
 
 if __name__ == "__main__":
