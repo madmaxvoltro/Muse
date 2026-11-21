@@ -39,7 +39,8 @@ from .ranking import Scored
 CAL_LAMBDA = 0.35
 RED_LAMBDA = 0.30
 CAL_ALPHA = 0.02  # Steck's smoothing of q toward p
-OTHER_SHARE = 0.05  # target share for items outside every interest (exploit part of the list)
+OTHER_SHARE = 0.05
+STRETCH_EXPLORE_BONUS = 0.6  # in score units; see select()  # target share for items outside every interest (exploit part of the list)
 
 
 def _kl(p: np.ndarray, q: np.ndarray) -> float:
@@ -174,7 +175,9 @@ def select(
         floor = np.percentile(score_arr, 25)  # promising, not random
         uncertain = [s for s in uncertain if s.score >= floor] or uncertain
         for _ in range(min(n_explore, len(uncertain))):
-            s = pick(uncertain, lambda s: s.sampled - lam_red * redundancy(s))
+            # Directed exploration: uncertain candidates just beyond the edge of an interest
+            # (evolution.stretch) are preferred, so exploring also broadens taste gradually.
+            s = pick(uncertain, lambda s: s.sampled + STRETCH_EXPLORE_BONUS * s.features.get("stretch", 0.0) - lam_red * redundancy(s))
             if s is None:
                 break
             uncertain.remove(s)

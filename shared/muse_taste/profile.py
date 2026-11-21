@@ -67,6 +67,9 @@ class Interest:
     members: list[str]  # top member keys by weight
     top_tags: list[str] = field(default_factory=list)
     label: str | None = None
+    # Typical (25th percentile) normalised similarity of members to the centroid: where the
+    # interest's edge is. Titles just beyond it are "one step further" (evolution.stretch).
+    radius: float = 0.6
 
 
 @dataclass
@@ -107,6 +110,7 @@ class TasteProfile:
     household: list[dict] = field(default_factory=list)  # filled by the worker (other profiles)
     summary: str | None = None  # optional LLM natural-language summary
     model: str | None = None
+    evolution: dict = field(default_factory=dict)  # muse_taste.evolution.analyze() output
 
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
@@ -247,7 +251,11 @@ def build_profile(
         keys = [k for k, _, _ in pos_c]
         w = np.array([wt for _, wt, _ in pos_c], dtype=np.float64)
         v = unit(np.array([vectors[k] for k in keys], dtype=np.float64))
-        labels = cluster_items(v, baseline, weights=w)
+        # Structure from undecayed preference, importance from decayed weight: an interest you
+        # loved two years ago is still its own interest (dormant, small importance), not
+        # swallowed by whatever you watch now. evolution.py needs it to exist to bring it back.
+        pref_w = np.array([max(sig.preference, 0.05) for _, _, sig in pos_c], dtype=np.float64)
+        labels = cluster_items(v, baseline, weights=pref_w)
         total = float(w.sum())
         for c in np.unique(labels):
             idx = np.where(labels == c)[0]
@@ -256,6 +264,8 @@ def build_profile(
             cen = unit((cv * cw[:, None]).sum(0))
             mi = idx[_weighted_medoid(cv, cw)]
             order = idx[np.argsort(-cw)]
+            member_sims = normalise_sim(cv @ cen, baseline)
+            radius = float(np.clip(np.percentile(member_sims, 25), 0.2, 0.9)) if len(idx) >= 3 else 0.6
             interests.append(
                 Interest(
                     id=0,
@@ -267,6 +277,7 @@ def build_profile(
                     size=int(len(idx)),
                     members=[keys[i] for i in order[:12]],
                     top_tags=_top_tags([keys[i] for i in idx], cw, tags, tag_df, catalog_size),
+                    radius=radius,
                 )
             )
     if pinned:

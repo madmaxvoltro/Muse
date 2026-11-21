@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from .evolution import Adjustment, stretch_score
 from .profile import TasteProfile, normalise_sim, unit
 
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -36,6 +37,12 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "fatigue": -0.50,  # shown repeatedly, never picked
     "consensus": 0.15,  # surfaced by several independent generators
     "mood": 0.80,  # matches the mood text you asked for (only when given)
+    # taste evolution (muse_taste.evolution), all zero when there's no history to go on
+    "trend": 0.20,  # belongs to an interest you're watching more of lately
+    "satiation": -0.40,  # belongs to an interest you've had a lot of and are tiring of
+    "rediscovery": 0.30,  # belongs to a dormant interest you used to love
+    "context": 0.30,  # belongs to an interest you tend to watch at this time / day / season
+    "stretch": 0.15,  # just beyond the edge of one of your interests (broadening)
 }
 
 FEATURE_TEXT = {
@@ -106,6 +113,7 @@ def score_candidates(
     weights: dict[str, float] | None = None,
     mood_vector: np.ndarray | None = None,
     membership_temperature: float = 0.07,
+    evolution: Adjustment | None = None,
 ) -> list[Scored]:
     if not cands:
         return []
@@ -137,6 +145,20 @@ def score_candidates(
         best = np.full(n, -1)
         interest_feat = np.zeros(n)
         member = np.zeros((n, 0))
+        sims = np.zeros((n, 0))
+
+    # taste evolution: per-interest values, spread over each candidate's interest membership
+    evo = {f: np.zeros(n) for f in ("trend", "satiation", "rediscovery", "context", "stretch")}
+    stretch_k = np.full(n, -1)
+    if evolution is not None and member.size:
+        mn = member / np.maximum(member.sum(1, keepdims=True), 1e-9)
+        evo["trend"] = mn @ evolution.trend
+        evo["satiation"] = mn @ evolution.satiation
+        evo["rediscovery"] = mn @ evolution.rediscovery
+        evo["context"] = mn @ evolution.context
+        radii = np.array([i.radius for i in profile.interests])
+        evo["stretch"] = stretch_score(sims, radii, profile.importance_vector(), evolution.band)
+        stretch_k = (sims - radii[None, :]).argmax(1)
 
     short = normalise_sim(X @ np.asarray(profile.short_term, dtype=np.float32), b) if profile.short_term else np.zeros(n)
 
@@ -212,6 +234,10 @@ def score_candidates(
         }
         if mood is not None:
             feats["mood"] = float(np.clip(mood[i], -1, 1))
+        for f, arr in evo.items():
+            feats[f] = float(arr[i])
+        if feats["stretch"] and feats["negative"] > 0.3:
+            feats["stretch"] = 0.0  # never "broaden" toward something you dislike
         contrib = {k: w.get(k, 0.0) * v for k, v in feats.items()}
         score = float(sum(contrib.values()))
 
@@ -231,7 +257,9 @@ def score_candidates(
                 vector=X[i],
                 nearest_anchor=nearest[i],
                 top_tags=[t for t, v in hits[:3] if v > 0],
-                payload={**c.payload, "related_via": c.related_via, "generators": sorted(c.generators)},
+                payload={**c.payload, "related_via": c.related_via, "generators": sorted(c.generators),
+                         "stretch_interest": int(stretch_k[i]) if feats["stretch"] > 0 else None,
+                         "context_label": evolution.context_label if evolution is not None else None},
             )
         )
     return out
@@ -270,6 +298,14 @@ def explain(s: Scored, profile: TasteProfile, titles: dict[str, str], max_reason
             reasons.append((v, "In line with what you've been watching lately"))
         elif k == "mood":
             reasons.append((v, "Fits your mood"))
+        elif k == "trend" and s.interest_id is not None:
+            reasons.append((v, f"You've been watching more {_interest_name(profile, s.interest_id, titles)} lately"))
+        elif k == "rediscovery" and s.interest_id is not None:
+            reasons.append((v, f"It's been a while since your {_interest_name(profile, s.interest_id, titles)} phase"))
+        elif k == "context" and s.interest_id is not None and s.payload.get("context_label"):
+            reasons.append((v, f"You often pick {_interest_name(profile, s.interest_id, titles)} on {s.payload['context_label']}s"))
+        elif k == "stretch" and s.payload.get("stretch_interest") is not None:
+            reasons.append((v, f"One step beyond {_interest_name(profile, s.payload['stretch_interest'], titles)}"))
     if s.explore:
         reasons.append((0.0, "Something different, to learn your taste"))
     seen = set()
@@ -296,6 +332,13 @@ _TAG_PREFIX_TEXT = {
     "g": "{}",
     "c": "Continues a series you like",
 }
+
+
+def _interest_name(profile: TasteProfile, k: int, titles: dict[str, str]) -> str:
+    if k is None or k >= len(profile.interests):
+        return "this"
+    it = profile.interests[k]
+    return it.label or ", ".join(_pretty_tag(t) for t in it.top_tags[:2]) or titles.get(it.medoid_key, "this")
 
 
 def _pretty_tag(tag: str) -> str:

@@ -18,6 +18,7 @@ Strategies compared:
   multi         multi-interest profile, interest feature only
   full          every ranker feature (tags, negatives, item-to-item, related graph...)
   full+rerank   full, then calibrated/MMR list selection (exploration off)
+  full+evolution  full+rerank with taste evolution (trends, satiation, rediscovery, rhythms)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from .evolution import adjustment, analyze, apply_importance
 from .profile import TasteProfile, build_profile, mean_taste_vector, normalise_sim, unit
 from .ranking import CandidateInput, Scored, score_candidates
 from .rerank import intra_list_diversity, select
@@ -124,9 +126,9 @@ class EvalResult:
 
     def table(self) -> str:
         cols = ["recall@10", "ndcg@10", "mrr", "hit@10", "diversity", "calib_kl", "coverage"]
-        lines = ["strategy      " + "  ".join(f"{c:>9}" for c in cols)]
+        lines = ["strategy        " + "  ".join(f"{c:>9}" for c in cols)]
         for name, m in self.per_strategy.items():
-            lines.append(f"{name:<13} " + "  ".join(f"{m[c]:9.4f}" if c in m else f"{'-':>9}" for c in cols))
+            lines.append(f"{name:<15} " + "  ".join(f"{m[c]:9.4f}" if c in m else f"{'-':>9}" for c in cols))
         return "\n".join(lines)
 
 
@@ -140,7 +142,7 @@ def evaluate(
     titles: dict[str, str] | None = None,
     k: int = 10,
     holdout_frac: float = 0.2,
-    strategies: tuple[str, ...] = ("legacy", "mean", "multi", "full", "full+rerank"),
+    strategies: tuple[str, ...] = ("legacy", "mean", "multi", "full", "full+rerank", "full+evolution"),
 ) -> EvalResult:
     """`catalog`: key -> {"item_type", "domain", "vote_average", "vote_count", "collection_id", "year"}."""
     tags = tags or {}
@@ -197,10 +199,17 @@ def evaluate(
                         for i, key in enumerate(pool_keys)
                     ]
                     weights = {f: 0.0 for f in ("short_term", "item_sim", "tags", "negative", "related", "household", "intent", "quality", "freshness", "fatigue", "consensus")} if strat == "multi" else None
-                    scored = score_candidates(prof, cands, anchor_vectors=vectors, weights=weights)
+                    use_prof, adj = prof, None
+                    if strat == "full+evolution":
+                        use_prof = TasteProfile.from_json(prof.to_json())
+                        dev = [e for e in split.train if catalog.get(e.key, {}).get("domain") == domain]
+                        use_prof.evolution = analyze(use_prof, dev, vectors, now=now)
+                        adj = adjustment(use_prof, at=now)
+                        apply_importance(use_prof, adj)
+                    scored = score_candidates(use_prof, cands, anchor_vectors=vectors, weights=weights, evolution=adj)
                     scored.sort(key=lambda s: -s.score)
-                    if strat == "full+rerank":
-                        head = select(scored[: max(200, k * 10)], prof, limit=k, explore_ratio=0.0)
+                    if strat in ("full+rerank", "full+evolution"):
+                        head = select(scored[: max(200, k * 10)], use_prof, limit=k, explore_ratio=0.0)
                         head_keys = [s.key for s in head]
                         ranked = head_keys + [s.key for s in scored if s.key not in set(head_keys)]
                         items_for_list = head
@@ -214,7 +223,7 @@ def evaluate(
                 m["hit@10"] += float(bool(set(ranked[:k]) & rel)) * weight_share
                 if items_for_list is not None:
                     m["diversity"] += intra_list_diversity(items_for_list, prof.baseline) * weight_share
-                    m["calib_kl"] += calibration_kl(items_for_list, prof) * weight_share
+                    m["calib_kl"] += calibration_kl(items_for_list, prof) * weight_share  # vs. the unadjusted profile
                 else:
                     idx = [pool_keys.index(x) for x in ranked[:k]]
                     S = normalise_sim(P[idx] @ P[idx].T, prof.baseline)
