@@ -28,9 +28,10 @@ actually drives what gets suggested and, optionally, what gets downloaded.
   when you've had enough of something, learns your rhythms (weekday evenings vs Sunday
   mornings), and broadens your taste step by step beyond the edge of what you like. All subtle,
   explained, and adjustable per user; `GET /evolution/{user}` shows the timeline.
-- **Muse asks the right questions**: onboarding picks, "this or that?" where it is least sure,
-  and "why did you stop?" for abandoned titles, plus history import from YouTube, Spotify,
-  Letterboxd, IMDb, Netflix, Trakt and SoundCloud exports.
+- **Muse asks the right questions, optionally**: a background-filled queue (onboarding picks,
+  "this or that?" where it is least sure, "why did you stop?", and taste-evolution checks like
+  "more of that?") served by the API and an optional MCP server. Nothing depends on answers.
+  Plus history import from YouTube, Spotify, Letterboxd, IMDb, Netflix, Trakt and SoundCloud.
 - **Measurable**: an offline evaluator replays your own history and reports Recall/nDCG/
   diversity/calibration for every stage, so changes are judged by numbers.
 - **User control overlay**: sliders, pins, an explore-dial, and per-recommendation explainability
@@ -66,6 +67,7 @@ services/ingestion-api/  write-only endpoint all adapters POST events to
 services/recommendation-api/  the 3-stage recommendation funnel
 services/embedding-worker/    content + taste embedding computation
 services/curator/             autonomous storage-budget manager
+services/mcp-server/          optional MCP server: questions, answers, recommendations, profile, evolution
 adapters/                one subdirectory per source, each a small standalone service (+ importer CLI)
 tests/                   engine unit tests + integration tests (Postgres, in-memory Qdrant)
 jellyfin-plugin/          C#/.NET plugin, IHomeScreenSection-scoped

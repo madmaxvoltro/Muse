@@ -150,6 +150,25 @@ services:
     depends_on: [ingestion-api]
     networks: [muse-net]
 
+  # Optional: MCP server so an assistant (Open WebUI, Claude Desktop, ...) can ask you Muse's
+  # questions in conversation and fetch recommendations. Start with --profile mcp. Nothing
+  # else depends on it. Listens on localhost only; reach it over Tailscale/SSH if needed.
+  mcp-server:
+    build:
+      context: .
+      dockerfile: services/mcp-server/Dockerfile
+    profiles: [mcp]
+    restart: unless-stopped
+    environment:
+      MUSE_RECO_URL: http://recommendation-api:8001
+      MUSE_INGEST_URL: http://ingestion-api:8000
+      MUSE_READ_KEY: ${MUSE_MCP_READ_KEY:-}
+      MUSE_ANSWER_KEY: ${MUSE_MCP_ANSWER_KEY:-}
+      MUSE_MCP_USER_ID: ${MUSE_MCP_USER_ID:-}
+    ports: ["127.0.0.1:${MUSE_MCP_PORT:-8002}:8002"]
+    depends_on: [recommendation-api, ingestion-api]
+    networks: [muse-net]
+
 networks:
   muse-net:
     internal: false  # adapters need outbound access to their upstream services; still no published ports

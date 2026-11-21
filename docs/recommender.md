@@ -210,27 +210,52 @@ and hit@10 1.00 → 0.88 (one user's top 10 contained none of their held-out tit
 genre the synthetic titles are interchangeable). The evaluator's `full+evolution` strategy
 measures the same on your own data.
 
-## 8. Muse asks questions
+## 8. Muse asks questions (an optional queue)
 
-Read side: recommendation API. Answers: ingestion API (`muse` key).
+Muse never depends on answers. The worker fills a **question queue** in the background
+(`question_log`, migration 009); any client *may* fetch and answer from it, through the API or
+the optional MCP server, and there's no interface of its own. Unanswered questions expire and
+change nothing. Each entry has a priority (how much an answer would change recommendations),
+a time to live, a re-ask window (the same question isn't queued again for months) and a
+per-user cap of 12 pending (lowest priority expires first).
 
-| endpoint | what |
+| kind | queued when | answers | effect of an answer |
+|---|---|---|---|
+| `onboarding` | little evidence yet (or one interest only) | loved / liked / disliked titles | ratings |
+| `abandon` | a title stopped early, reason unknown | not_for_me, not_in_mood, too_slow, too_intense, will_finish_later, watched_elsewhere, bad_quality | "not in the mood" cancels the implicit negative, "not for me" makes it explicit |
+| `interest` (emerging) | an interest is clearly rising | more / keep / less | decaying steer (60-day half-life) on that interest |
+| `interest` (satiated) | satiation ≥ 0.5 | break / no_break | forces or suppresses satiation for ~2 weeks |
+| `interest` (dormant) | a dormant interest with rediscovery pull | bring_back / moved_on | boosts or blocks rediscovery |
+| `this_or_that` | always one, refreshed as answered/expired | a / b / both / neither / skip | small relative signals |
+
+Onboarding titles are chosen by popularity-weighted farthest-point sampling, so few taps cover
+the whole taste space (after Rashid et al., IUI 2002; Golbandi, Koren & Lempel, WSDM 2011).
+Pairs are plausible, uncertain and different from each other (uncertainty sampling;
+pairwise answers are easier and more consistent than ratings). Interest answers are matched to
+today's interests by their anchor title, because interests are re-clustered every cycle.
+
+| read (recommendation API) | |
 |---|---|
-| `GET /questions/{user}/next?item_type=movie` | the single most useful question now: onboarding while Muse knows little, then "why did you stop?", then this-or-that |
-| `GET /questions/{user}/onboarding?n=24` | well-known titles spread across the catalog (popularity-weighted farthest-point sampling): few taps cover the whole taste space. After Rashid et al. (IUI 2002) and Golbandi, Koren & Lempel (WSDM 2011) on cold-start elicitation |
-| `GET /questions/{user}/this-or-that` | a pair that is plausible, uncertain and different (uncertainty sampling from active learning; pairwise answers are easier and more consistent than ratings) |
-| `GET /questions/{user}/abandoned` | titles stopped early with no known reason |
+| `GET /questions/{user}/queue?limit=5&domain=video&kind=interest` | queued questions, most valuable first; each includes `answer_with.body`, the exact body to POST; returned pending entries are marked served |
+| `GET /questions/{user}/next` | top of the queue, or one generated on the spot if the queue is empty |
+| `GET /questions/{user}/onboarding` · `/this-or-that` · `/abandoned` | on-demand generators (not queued) |
 
 ```bash
-# answers (X-Muse-Api-Key: the `muse` key)
+# answers go to the ingestion API with the `muse` key
 curl -X POST $INGEST/answers -H "X-Muse-Api-Key: $MUSE_KEY" -H 'content-type: application/json' \
-  -d '{"kind":"onboarding","user_id":"<uuid>","question_id":"<id>","loved":["tmdb:movie:603"],"liked":[],"disliked":["tmdb:movie:13"]}'
-curl -X POST $INGEST/answers ... -d '{"kind":"this_or_that","user_id":"<uuid>","question_id":"<id>","a":"tmdb:movie:1","b":"tmdb:tv:2","answer":"a"}'   # a|b|both|neither|skip
+  -d '{"kind":"interest","user_id":"<uuid>","question_id":"<id>","response":"more"}'
+curl -X POST $INGEST/answers ... -d '{"kind":"this_or_that","user_id":"<uuid>","question_id":"<id>","a":"tmdb:movie:1","b":"tmdb:tv:2","answer":"a"}'
 curl -X POST $INGEST/answers ... -d '{"kind":"abandon","user_id":"<uuid>","question_id":"<id>","canon_key":"tmdb:movie:3","reason":"not_in_mood"}'
+curl -X POST $INGEST/answers ... -d '{"kind":"onboarding","user_id":"<uuid>","question_id":"<id>","loved":["tmdb:movie:603"],"disliked":["tmdb:movie:13"]}'
+curl -X POST $INGEST/answers ... -d '{"kind":"dismiss","user_id":"<uuid>","question_id":"<id>"}'   # no taste data written
 ```
 
-Abandon reasons: `not_for_me`, `not_in_mood`, `too_slow`, `too_intense`, `will_finish_later`,
-`watched_elsewhere`, `bad_quality`.
+**MCP server** (`services/mcp-server`, optional, `docker compose --profile mcp up -d mcp-server`):
+tools `muse_pending_questions`, `muse_answer_question`, `muse_dismiss_question`,
+`muse_recommendations`, `muse_taste_profile`, `muse_taste_evolution`. Point any MCP client at
+`http://127.0.0.1:8002/mcp` (streamable HTTP), or run `python server.py` with stdio. The
+server's instructions tell the assistant to ask at most one question now and then, in your
+language, and never insist. Without `MUSE_MCP_ANSWER_KEY` it is read-only.
 
 ## 9. Importing history on onboarding
 
@@ -315,6 +340,7 @@ Half-lives, abandon rules and default weights are named constants at the top of
 1. Apply the migrations on an existing database:
    `docker compose exec -T postgres psql -U muse -d muse < db/migrations/007_taste_engine.sql`
    `docker compose exec -T postgres psql -U muse -d muse < db/migrations/008_taste_evolution.sql`
+   `docker compose exec -T postgres psql -U muse -d muse < db/migrations/009_question_queue.sql`
 2. Rebuild and restart `embedding-worker`, `recommendation-api`, `ingestion-api`, `curator`,
    `jellyfin-adapter`. The first worker cycles download the embedding model, build the
    catalog from the whole event log, enrich it (if `TMDB_API_KEY` is set) and embed it. That
