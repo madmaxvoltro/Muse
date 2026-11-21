@@ -41,7 +41,7 @@ def test_tools_and_forwarding(monkeypatch):
         return tools, rec
 
     tools, rec = asyncio.run(go())
-    assert set(tools) == {"muse_pending_questions", "muse_answer_question", "muse_dismiss_question", "muse_recommendations", "muse_taste_profile", "muse_taste_evolution", "muse_correct_reason"}
+    assert set(tools) == {"muse_pending_questions", "muse_answer_question", "muse_dismiss_question", "muse_recommendations", "muse_taste_profile", "muse_taste_evolution", "muse_correct_reason", "muse_home_rows"}
     assert tools["muse_pending_questions"].annotations.read_only_hint and not tools["muse_answer_question"].annotations.read_only_hint
     assert calls[0] == ("GET", "/questions/u1/queue", {"limit": 10, "domain": None})  # limit clamped, default user
     assert calls[1] == ("POST", "/answers", {"kind": "interest", "response": "more", "user_id": "u1", "question_id": "q1"})

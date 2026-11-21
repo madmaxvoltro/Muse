@@ -43,6 +43,33 @@ def label_impression(shown_at: datetime, events: list) -> tuple[float, float]:
     return 0.0, 0.3
 
 
+POSITION_ETA = 0.7  # examination ~ (1 / (1 + position)) ^ eta: a power-law position-bias model
+
+
+def examination_propensity(position: int, eta: float = POSITION_ETA) -> float:
+    """Probability a title at this position (0 = first) was looked at at all."""
+    return (1.0 / (1.0 + max(position, 0))) ** eta
+
+
+def ips_sample_weight(label: float, base_weight: float, position: int, eta: float = POSITION_ETA, clip: float = 10.0) -> float:
+    """Position-bias correction (Joachims, Swaminathan & Schnabel, "Unbiased Learning-to-Rank
+    with Biased Feedback", WSDM 2017). Lists are scanned top-down, so a title low in a row is
+    often never seen. Without correction the ranker re-learns its own old ordering.
+
+    * engaged:   inverse-propensity weight, 1/p (clipped): a pick at position 15 is strong evidence;
+    * explicit no (thumbs down, "not for me"): the title was certainly seen, weight unchanged;
+    * ignored:   only counts in proportion to how likely it was seen, weight x p.
+
+    This is a propensity-weighted pointwise objective in the spirit of their estimator (which
+    weights clicks by 1/p in a pairwise ranking loss)."""
+    p = examination_propensity(position, eta)
+    if label > 0.5:
+        return base_weight * min(1.0 / p, clip)
+    if base_weight >= 1.0:
+        return base_weight
+    return base_weight * p
+
+
 @dataclass
 class FitResult:
     weights: dict[str, float]

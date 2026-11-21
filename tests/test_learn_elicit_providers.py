@@ -79,3 +79,30 @@ def test_tmdb_parse_movie():
     e = parse_details("movie", d, {18: "Drama"})
     assert e["directors"] == ["Denis Villeneuve"] and e["writers"] == ["Eric Heisserer"] and e["keywords"] == ["alien contact"]
     assert e["recommendations"][0]["genres"] == ["Drama"] and e["recommendations"][0]["year"] == 2014
+
+
+def test_ips_corrects_position_bias():
+    """The old ranker ordered by an irrelevant feature; people only look at the top. Naive
+    learning credits that feature; propensity weighting mostly removes the credit."""
+    from muse_taste.learn import _fit_logistic, examination_propensity, ips_sample_weight
+
+    rng = np.random.default_rng(0)
+    X, y, w_naive, w_ips = [], [], [], []
+    for _ in range(600):  # 600 lists of 10
+        rel = rng.standard_normal(10)
+        biased = rng.standard_normal(10)
+        order = np.argsort(-biased)  # shown in order of the irrelevant feature
+        for pos, i in enumerate(order):
+            seen = rng.random() < examination_propensity(pos)
+            click = seen and rng.random() < 1 / (1 + np.exp(-(2.0 * rel[i] - 1.0)))
+            label = 1.0 if click else 0.0
+            X.append([rel[i], biased[i]])
+            y.append(label)
+            w_naive.append(1.0 if click else 0.3)
+            w_ips.append(ips_sample_weight(label, 1.0 if click else 0.3, pos))
+    X, y = np.array(X), np.array(y)
+    naive, _ = _fit_logistic(X, y, np.array(w_naive), np.zeros(2), l2=0.1)
+    ips, _ = _fit_logistic(X, y, np.array(w_ips), np.zeros(2), l2=0.1)
+    # relative credit given to the irrelevant, position-driving feature
+    assert abs(ips[1] / ips[0]) < 0.5 * abs(naive[1] / naive[0])
+    assert examination_propensity(0) == 1.0 and examination_propensity(9) < 0.25

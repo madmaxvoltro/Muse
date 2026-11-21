@@ -7,7 +7,7 @@ import logging
 import uuid
 import asyncpg
 import numpy as np
-from muse_taste.learn import fit_weights, label_impression
+from muse_taste.learn import fit_weights, ips_sample_weight, label_impression
 from muse_taste.ranking import DEFAULT_WEIGHTS
 
 from profiles import EVENTS_SQL, to_signal_events
@@ -21,7 +21,7 @@ async def fit(pool: asyncpg.Pool) -> dict | None:
     async with pool.acquire() as conn:
         imps = await conn.fetch(
             """
-            SELECT DISTINCT ON (user_id, canon_key, date_trunc('day', shown_at)) user_id, canon_key, shown_at, features
+            SELECT DISTINCT ON (user_id, canon_key, date_trunc('day', shown_at)) user_id, canon_key, shown_at, features, position
             FROM impression
             WHERE shown_at > now() - interval '120 days' AND shown_at < now() - interval '2 days'
             ORDER BY user_id, canon_key, date_trunc('day', shown_at), shown_at
@@ -43,7 +43,8 @@ async def fit(pool: asyncpg.Pool) -> dict | None:
                 feats = r["features"] or {}
                 X.append([float(feats.get(f, 0.0)) for f in FEATURES])
                 y.append(lw[0])
-                w.append(lw[1])
+                # position-bias correction: see muse_taste.learn.ips_sample_weight
+                w.append(ips_sample_weight(lw[0], lw[1], int(r["position"] or 0)))
                 t.append(r["shown_at"].timestamp())
     if not X:
         return None

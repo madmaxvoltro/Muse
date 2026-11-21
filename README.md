@@ -32,6 +32,10 @@ actually drives what gets suggested and, optionally, what gets downloaded.
   "this or that?" where it is least sure, "why did you stop?", and taste-evolution checks like
   "more of that?") served by the API and an optional MCP server. Nothing depends on answers.
   Plus history import from YouTube, Spotify, Letterboxd, IMDb, Netflix, Trakt and SoundCloud.
+- **Explains itself, and you can correct it**: every reason names the part of your profile
+  behind it ("Similar to X", "Directed by Y"), and "not relevant" / "more" / "less" fixes the
+  profile itself. A home screen of themed rows ("Because you watched X", "Watch again",
+  "Something different") whose titles are their explanations.
 - **Measurable**: an offline evaluator replays your own history and reports Recall/nDCG/
   diversity/calibration for every stage, so changes are judged by numbers.
 - **User control overlay**: sliders, pins, an explore-dial, and per-recommendation explainability

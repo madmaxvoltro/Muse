@@ -2,6 +2,7 @@
 behind each stage.
 
   GET  /recommendations/{user_id}       ranked, explained, calibrated recommendations
+  GET  /rows/{user_id}                  a home screen of themed, explained rows (no duplicates)
   GET  /profile/{user_id}               the taste profile: interests, summary, what Muse learned
   GET  /evolution/{user_id}             how your taste is changing: timeline, lifecycle, rhythms
   GET  /questions/{user_id}/queue       background-filled question queue (optional to use)
@@ -26,7 +27,7 @@ from muse_schema.config import key_list, secret
 from muse_schema.crypto import get_vault
 from qdrant_client import QdrantClient
 
-from . import questions, status_page
+from . import questions, rows, status_page
 from . import soon_gone as soon_gone_repo
 from .db import close_pool, get_pool
 from .engine import TARGET_TYPES, Engine, Request as RecoRequest
@@ -144,6 +145,25 @@ async def recommendations(
         body["note"] = "cold-start: no taste profile yet, showing well-rated titles; ask /questions/{user_id}/next"
         body["onboarding_suggested"] = True
     return body
+
+
+@app.get("/rows/{user_id}")
+async def home_rows(
+    user_id: str,
+    item_type: str = Query(..., description=f"one of {ITEM_TYPES}"),
+    per_row: int = Query(12, ge=4, le=40),
+    max_rows: int = Query(8, ge=1, le=15),
+    at: datetime | None = Query(None, description="ISO time to use as 'now' for rhythms"),
+    log: bool = Query(True),
+) -> dict:
+    """A home screen: themed rows whose titles are their explanations (Top picks, Because you
+    watched X, More <interest>, For your weekend evenings, Watch again, From your watchlist,
+    New in your library, Something different). A title appears once per page."""
+    _check_type(item_type)
+    eng = await engine()
+    if not await asyncio.to_thread(eng.catalog_ready):
+        return {"user_id": user_id, "item_type": item_type, "rows": [], "note": "Muse is still building its catalog (first start)"}
+    return await rows.build(eng, user_id, item_type, per_row, max_rows, at, log)
 
 
 @app.get("/profile/{user_id}")

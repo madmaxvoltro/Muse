@@ -130,6 +130,16 @@ async def muse_recommendations(item_type: str = "movie", limit: int = 10, mood: 
 
 
 @mcp.tool(annotations=READ)
+async def muse_home_rows(item_type: str = "movie", per_row: int = 6, user_id: str | None = None) -> dict:
+    """A home screen of themed rows, each titled with its reason: Top picks, Because you watched
+    X, More <interest>, For your weekend evenings, Watch again, From your watchlist, New in your
+    library, Something different. Good for answering "what should I watch?" with a few options."""
+    body = await _get(f"/rows/{_user(user_id)}", {"item_type": item_type, "per_row": max(4, min(per_row, 12)), "log": "false"})
+    return {"rows": [{"title": r["title"], "items": [{k: i.get(k) for k in ("title", "year", "canon_key", "reasons")} for i in r["items"]]}
+                     for r in body.get("rows", [])]}
+
+
+@mcp.tool(annotations=READ)
 async def muse_taste_profile(domain: str = "video", user_id: str | None = None) -> dict:
     """What Muse thinks the user's taste is: interests with examples, loved and disliked titles,
     top tags and a summary. domain: video | youtube | music | books."""

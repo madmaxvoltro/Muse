@@ -398,17 +398,20 @@ class Engine:
 
         request_id = str(uuid.uuid4())
         if req.log and items:
-            async with self.pool.acquire() as conn:
-                await conn.executemany(
-                    "INSERT INTO impression (request_id, user_id, canon_key, surface, position, score, sigma, explore, features) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)",
-                    [
-                        (uuid.UUID(request_id), uuid.UUID(req.user_id), s.key, req.surface, pos, s.score, s.sigma, s.explore,
-                         {k: round(v, 5) for k, v in s.features.items()})
-                        for pos, s in enumerate(items)
-                    ],
-                )
+            await self.log_impressions(request_id, req.user_id, req.surface, items)
         timings["total"] = time.monotonic() - t0
         return Result(request_id, items, prof, titles, cold_start=cold, timings=timings, pool=scored)
+
+    async def log_impressions(self, request_id: str, user_id: str, surface: str, items: list[Scored]) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO impression (request_id, user_id, canon_key, surface, position, score, sigma, explore, features) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)",
+                [
+                    (uuid.UUID(request_id), uuid.UUID(user_id), s.key, surface, pos, s.score, s.sigma, s.explore,
+                     {k: round(v, 5) for k, v in s.features.items()})
+                    for pos, s in enumerate(items)
+                ],
+            )
 
     def describe(self, s: Scored, prof: TasteProfile, titles: dict[str, str]) -> dict:
         refs = s.payload.get("library_refs") or []

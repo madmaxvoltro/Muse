@@ -368,3 +368,31 @@ def test_tag_question_answer_changes_profile(db_dsn, monkeypatch):
     assert payload["prompt"].startswith("How do you feel") and payload["examples"]
     assert r.status_code == 202 and r.json()["events"] == 1 and status == "answered"
     assert prof["tag_weights"][payload["tag"]] < 0
+
+
+def test_home_rows(db_dsn):
+    use_service("recommendation-api")
+    from app import rows as rows_mod
+    from app.engine import Engine
+
+    async def go():
+        pool, qdrant, _ = await run_worker(db_dsn)
+        eng = Engine(pool, qdrant)
+        page = await rows_mod.build(eng, str(USER_A), "movie", per_row=6, max_rows=8)
+        async with pool.acquire() as conn:
+            surfaces = {r["surface"] for r in await conn.fetch("SELECT DISTINCT surface FROM impression WHERE user_id = $1", USER_A)}
+            prof = get_vault().open_json(await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A), P_PROFILE)
+        await pool.close()
+        return page, surfaces, prof
+
+    page, surfaces, prof = asyncio.run(go())
+    ids = [r["id"] for r in page["rows"]]
+    assert ids[0] == "top"
+    keys = [i["canon_key"] for r in page["rows"] for i in r["items"]]
+    assert len(keys) == len(set(keys))  # a title appears once per page
+    assert all(r["title"] and r["items"] for r in page["rows"])
+    assert "rows:top" in surfaces
+    # the 5-star Letterboxd film from 200 days ago is a rewatch candidate
+    assert any(c["key"] == B("tmdb:movie:104") for c in prof["reconsume"])
+    again = [r for r in page["rows"] if r["id"] == "again"]
+    assert again and again[0]["items"][0]["reasons"][0].startswith("You loved it")

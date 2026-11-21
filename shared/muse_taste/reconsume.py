@@ -55,7 +55,8 @@ def consumption_times(events: list[SignalEvent]) -> dict[str, list[datetime]]:
     seen: dict[str, set[str]] = defaultdict(set)
     out: dict[str, list[datetime]] = defaultdict(list)
     for e in events:
-        if e.action not in CONSUME_ACTIONS:
+        rated_watch = e.action == "rated" and e.action_weight > 0  # a rating (Letterboxd, IMDb...) means it was watched
+        if e.action not in CONSUME_ACTIONS and not rated_watch:
             continue
         if e.action == "played" and e.item_type != "track" and (e.progress_pct or 0) < 50:
             continue

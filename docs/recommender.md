@@ -152,6 +152,15 @@ human reasons (`reasons`: "Because you like Slow-burn Nordic crime", "Similar to
 and whether they agree. Lots of consistent evidence nearby means a confident match. A region
 you've never touched is a guess. `confidence` in the API is this, per candidate.
 
+**Position bias.** People scan rows top-down, so a title shown 15th and ignored was probably
+never seen. Impressions are weighted by examination propensity `(1/(1+position))^0.7`: picks
+by 1/p (clipped), ignored titles by p, explicit thumbs-downs unchanged. This follows Joachims,
+Swaminathan & Schnabel, ["Unbiased Learning-to-Rank with Biased Feedback"](https://arxiv.org/abs/1608.04468)
+(WSDM 2017). In a simulation where the old ranker ordered by an irrelevant feature
+(`tests/test_learn_elicit_providers.py`), naive learning gave that feature 52% of the weight of
+true relevance; with the correction it's 17% (and slightly negative, an overcorrection of the
+pointwise approximation).
+
 **Learning the weights** (`learn.py`, worker `ranker_fit.py`, daily): impressions are labelled
 with what happened in the next 7 days (played/finished/thumbs up = positive; thumbs down /
 "not for me" = strong negative; ignored = weak negative). It's logistic regression with a
@@ -210,6 +219,60 @@ and hit@10 1.00 → 0.88 (one user's top 10 contained none of their held-out tit
 genre the synthetic titles are interchangeable). The evaluator's `full+evolution` strategy
 measures the same on your own data.
 
+## 8a. Watch again, listen again
+
+`reconsume.py`. Everything else excludes what you've seen, but people rewatch comfort films
+and replay favourite songs. Muse uses ACT-R's base-level activation, `B = ln Σ (t_now − t_j)^−0.5`,
+which is high when an item was consumed recently and often. Recency and frequency were the
+strongest single predictors of music relistening in Reiter-Haas et al., ["Predicting Music
+Relistening Behavior Using the ACT-R Framework"](https://arxiv.org/abs/2108.02138) (RecSys 2021).
+The same two drivers explain repeat consumption generally (Anderson et al., WWW 2014; Benson,
+Kumar & Tomkins, WWW 2016).
+
+* **Music**: high activation means it's on your mind, so it's likely wanted again.
+* **Films/series**: the opposite. Only titles you clearly loved, at least 4 months since the last
+  watch, and the pull grows as the memory fades, with a bonus for past rewatches. A Letterboxd or
+  IMDb rating counts as a watch.
+
+Shown as the "Watch again" / "Listen again" row with a reason ("You loved it, 2 years ago").
+
+## 8b. Explanations you can correct
+
+Every reason in `reason_details` has an id naming the part of your profile behind it
+(`interest:<title>`, `anchor:<title>`, `tag:d:denis villeneuve`, `related:<title>`) and the
+corrections a client may offer. This follows Balog, Radlinski & Arakelyan, ["Transparent, Scrutable
+and Explainable User Models for Personalized
+Recommendation"](https://research.google/pubs/transparent-scrutable-and-explainable-user-models-for-personalized-recommendation/)
+(SIGIR 2019): users should be able to fix the *model*, not just one recommendation.
+
+```bash
+curl -X POST $INGEST/answers -H "X-Muse-Api-Key: $MUSE_KEY" -H 'content-type: application/json' \
+  -d '{"kind":"reason","user_id":"<uuid>","reason_id":"anchor:<key>","response":"not_relevant"}'
+```
+
+| reason | responses | effect |
+|---|---|---|
+| `anchor:<title>` ("Similar to X") | not_relevant, more | stop basing recommendations on X (still counts as seen), or more like it |
+| `related:<title>` ("Fans of X also liked") | not_relevant | same as above |
+| `interest:<title>` ("Because you like …") | more, less | decaying steer on that interest |
+| `tag:<tag>` ("Directed by …") | more, less | tag becomes a clear positive or negative |
+| any | restore | undo |
+
+Corrections apply on the very next request and are kept in the stored profile (`muted`, tag
+overrides). Explanations are faithful by construction: each one is an actual top contribution
+to the score. When Muse is unsure it says so ("Muse isn't sure about this one yet") rather than
+sounding confident; honest uncertainty helps trust (Tintarev & Masthoff, 2012).
+
+## 8c. Home screen rows
+
+`GET /rows/{user}?item_type=movie` returns a page of themed rows whose titles are their
+explanations: Top picks, Because you watched X (twice), For your weekend evenings (rhythms),
+More <interest> (your three biggest), Watch again, From your watchlist, New in your library, and
+Something different (the frontier of your taste plus uncertain picks). A title appears once per
+page, short rows are dropped, and every item is logged with its row as the surface. This is the
+page structure Netflix describes in Gomez-Uribe & Hunt, "The Netflix Recommender System"
+(ACM TMIS 2015).
+
 ## 8. Muse asks questions (an optional queue)
 
 Muse never depends on answers. The worker fills a **question queue** in the background
@@ -227,11 +290,19 @@ per-user cap of 12 pending (lowest priority expires first).
 | `interest` (satiated) | satiation ≥ 0.5 | break / no_break | forces or suppresses satiation for ~2 weeks |
 | `interest` (dormant) | a dormant interest with rediscovery pull | bring_back / moved_on | boosts or blocks rediscovery |
 | `this_or_that` | always one, refreshed as answered/expired | a / b / both / neither / skip | small relative signals |
+| `tag` (critiquing) | an attribute common among your best candidates that Muse knows little about | love / fine / not_for_me | tag override |
 
 Onboarding titles are chosen by popularity-weighted farthest-point sampling, so few taps cover
 the whole taste space (after Rashid et al., IUI 2002; Golbandi, Koren & Lempel, WSDM 2011).
-Pairs are plausible, uncertain and different from each other (uncertainty sampling;
-pairwise answers are easier and more consistent than ratings). Interest answers are matched to
+Pairs are plausible, uncertain, *influential* and different from each other. Influence means
+the answer informs many other plausible candidates (the active-learning criteria surveyed by
+Elahi, Ricci & Rubens, Computer Science Review 2016), so an uncertain title in a dense region
+is preferred over an isolated outlier. Pairwise questions with explore-exploit selection
+learned preferences fastest in Christakopoulou, Radlinski & Hofmann, ["Towards Conversational
+Recommender Systems"](https://www.microsoft.com/en-us/research/publication/towards-conversational-recommender-systems/)
+(KDD 2016). Tag questions are system-suggested critiques (Chen & Pu, "Critiquing-based
+recommenders: survey and emerging trends", UMUAI 2012): one tap on an attribute shifts many
+candidates at once. Interest answers are matched to
 today's interests by their anchor title, because interests are re-clustered every cycle.
 
 | read (recommendation API) | |
