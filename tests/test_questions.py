@@ -60,3 +60,58 @@ def test_moved_on_blocks_rediscovery():
     before = analyze(prof, evs, vectors, now=NOW)["interests"][str(docu.id)]["rediscovery"]
     after = analyze(prof, evs + [_feedback(docu.medoid_key, "moved_on", 2, docu.members)], vectors, now=NOW)["interests"][str(docu.id)]["rediscovery"]
     assert before > 0.3 and after < 0.05
+
+
+def _scored_world():
+    from muse_taste.ranking import CandidateInput, score_candidates
+    from muse_taste.signals import aggregate
+
+    vectors, genre_of, _, tags = world()
+    from synthetic import user_history
+
+    sig = aggregate(user_history(genre_of), now=NOW)
+    prof = _profile(vectors, tags, user_history(genre_of))
+    pool = score_candidates(prof, [CandidateInput(key=k, vector=vectors[k], tags=tags[k], payload={"tags": tags[k]}) for k in vectors if k not in sig],
+                            anchor_vectors=vectors)
+    return prof, pool, genre_of
+
+
+def test_influence_prefers_items_whose_answer_informs_many_others():
+    import numpy as np
+
+    from muse_taste.elicitation import influence
+
+    prof, pool, genre_of = _scored_world()
+    pool = sorted(pool, key=lambda s: -s.score)[:150]
+    # an isolated outlier: random direction, far from everything
+    import copy
+
+    lone = copy.copy(pool[0])
+    lone.key = "lone"
+    rng = np.random.default_rng(1)
+    v = rng.standard_normal(len(lone.vector)).astype(np.float32)
+    lone.vector = v / np.linalg.norm(v)
+    inf = influence(pool + [lone], prof.baseline)
+    assert inf[-1] < np.median(inf)
+
+
+def test_tag_question_asks_about_common_but_unknown_attributes():
+    from muse_taste.elicitation import tag_question
+
+    prof, pool, genre_of = _scored_world()
+    found = tag_question(pool, prof.tag_weights, prof.tag_scale)
+    assert found
+    tag, value, examples = found
+    assert value > 0 and examples
+    # a tag the user has strong, known feelings about is not worth asking
+    strong = max(prof.tag_weights, key=lambda t: abs(prof.tag_weights[t]))
+    assert tag != strong
+    again = tag_question(pool, prof.tag_weights, prof.tag_scale, asked={tag})
+    assert again is None or again[0] != tag
+
+
+def test_tag_overrides_shift_ranking():
+    from muse_taste.profile import apply_tag_overrides
+
+    w = apply_tag_overrides({"d:x": 0.1, "k:y": 0.5}, 1.0, {"d:x": "less", "k:z": "more"})
+    assert w["d:x"] < 0 and w["k:z"] > 0 and w["k:y"] == 0.5

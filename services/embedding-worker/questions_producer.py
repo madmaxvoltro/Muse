@@ -9,7 +9,7 @@ import uuid
 
 import asyncpg
 import numpy as np
-from muse_taste.elicitation import onboarding_spread, this_or_that
+from muse_taste.elicitation import onboarding_spread, tag_question, this_or_that
 from muse_taste.profile import TasteProfile
 from muse_taste.questions import (
     MAX_PENDING_PER_USER,
@@ -18,6 +18,7 @@ from muse_taste.questions import (
     interest_questions,
     onboarding_question,
     pair_question,
+    tag_question_spec,
 )
 from muse_taste.ranking import CandidateInput, score_candidates
 from muse_schema.crypto import P_QUESTION, get_vault
@@ -110,9 +111,9 @@ def _onboarding_items(qdrant: QdrantClient, prof: TasteProfile, n: int = 18) -> 
     return [_item(by_key[k]) for k in onboarding_spread(keys, V, pop, n=n, baseline=prof.baseline)]
 
 
-def _pair(qdrant: QdrantClient, prof: TasteProfile, anchor_vectors: dict[str, np.ndarray]) -> QuestionSpec | None:
+def _scored_pool(qdrant: QdrantClient, prof: TasteProfile, anchor_vectors: dict[str, np.ndarray]) -> list:
     if not prof.interests:
-        return None
+        return []
     flt = qm.Filter(must=[qm.FieldCondition(key="domain", match=qm.MatchValue(value=prof.domain)),
                           qm.FieldCondition(key="available", match=qm.MatchValue(value=True))])
     seen = set(prof.seen) | set(prof.in_progress)
@@ -124,15 +125,28 @@ def _pair(qdrant: QdrantClient, prof: TasteProfile, anchor_vectors: dict[str, np
             if k and k not in seen:
                 pool.setdefault(k, (np.asarray(p.vector, dtype=np.float32), pl))
     if len(pool) < 2:
-        return None
-    cands = [CandidateInput(key=k, vector=v, tags=pl.get("tags") or [], vote_average=pl.get("vote_average"), vote_count=pl.get("vote_count"), payload=pl)
+        return []
+    cands = [CandidateInput(key=k, vector=v, tags=pl.get("tags") or [], vote_average=pl.get("vote_average"), vote_count=pl.get("vote_count"),
+                            payload={**pl, "tags": pl.get("tags") or []})
              for k, (v, pl) in pool.items()]
-    scored = score_candidates(prof, cands, anchor_vectors=anchor_vectors)
-    pair = this_or_that(sorted(scored, key=lambda s: -s.score)[:200], prof.baseline)
+    return sorted(score_candidates(prof, cands, anchor_vectors=anchor_vectors), key=lambda s: -s.score)
+
+
+def _pair(scored: list, prof: TasteProfile) -> QuestionSpec | None:
+    pair = this_or_that(scored[:200], prof.baseline)
     if pair is None:
         return None
     a, b = pair
     return pair_question(prof.domain, _item(a.payload), _item(b.payload))
+
+
+def _tag(scored: list, prof: TasteProfile) -> QuestionSpec | None:
+    found = tag_question(scored, prof.tag_weights, prof.tag_scale)
+    if not found:
+        return None
+    tag, value, example_keys = found
+    by_key = {s.key: s for s in scored}
+    return tag_question_spec(prof.domain, tag, value, [_item(by_key[k].payload) for k in example_keys if k in by_key])
 
 
 async def produce(pool: asyncpg.Pool, qdrant: QdrantClient, prof: TasteProfile, titles: dict[str, str], anchor_vectors: dict[str, np.ndarray]) -> int:
@@ -147,9 +161,10 @@ async def produce(pool: asyncpg.Pool, qdrant: QdrantClient, prof: TasteProfile, 
     q = onboarding_question(prof.domain, _onboarding_items(qdrant, prof), cold) if cold or len(prof.interests) <= 1 else None
     if q:
         specs.append(q)
-    pq = _pair(qdrant, prof, anchor_vectors)
-    if pq:
-        specs.append(pq)
+    scored = _scored_pool(qdrant, prof, anchor_vectors)
+    for q in (_pair(scored, prof), _tag(scored, prof)):
+        if q:
+            specs.append(q)
     added = await enqueue(pool, prof.user_id, specs)
     if added:
         logger.info("questions: queued %d for user=%s domain=%s", added, prof.user_id, prof.domain)

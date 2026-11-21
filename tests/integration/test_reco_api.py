@@ -324,3 +324,47 @@ def test_scrutable_reasons_feedback_loop(db_dsn, monkeypatch):
     assert target["id"] not in after  # immediate, before any worker cycle
     assert anchor_key in prof["muted"] and anchor_key not in [a["key"] for a in prof["anchors"]]
     assert prof["reconsume"] is not None
+
+
+def test_tag_question_answer_changes_profile(db_dsn, monkeypatch):
+    import importlib
+
+    import httpx
+
+    async def go():
+        pool, qdrant, _ = await run_worker(db_dsn)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT id, payload FROM question_log WHERE user_id = $1 AND kind = 'tag'", USER_A)
+        assert rows, "no tag question queued"
+        qid, payload = rows[0]["id"], get_vault().open_json(rows[0]["payload"], P_QUESTION)
+
+        monkeypatch.setenv("MUSE_DATABASE_URL", db_dsn)
+        monkeypatch.setenv("MUSE_ADAPTER_KEYS", "muse:mk")
+        use_service("ingestion-api")
+        import app.auth
+        import app.db
+        import app.main as ing
+
+        importlib.reload(app.auth)
+        importlib.reload(app.db)
+        ing = importlib.reload(ing)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ing.app), base_url="http://t") as c:
+            r = await c.post("/answers", headers={"X-Muse-Api-Key": "mk"},
+                             json={"kind": "tag", "user_id": str(USER_A), "question_id": str(qid), "response": "not_for_me"})
+        await ing.close_pool()
+
+        import worker as worker_mod
+        from conftest import FakeEmbedder
+        from fixtures import FakeTMDB
+
+        await worker_mod.Worker(pool, qdrant, FakeEmbedder(), tmdb=FakeTMDB()).run_once()
+        async with pool.acquire() as conn:
+            prof = get_vault().open_json(await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A), P_PROFILE)
+            status = await conn.fetchval("SELECT status FROM question_log WHERE id = $1", qid)
+        await pool.close()
+        return payload, r, prof, status
+
+    payload, r, prof, status = asyncio.run(go())
+    assert payload["prompt"].startswith("How do you feel") and payload["examples"]
+    assert r.status_code == 202 and r.json()["events"] == 1 and status == "answered"
+    assert prof["tag_weights"][payload["tag"]] < 0

@@ -12,7 +12,9 @@ Kinds:
                     emerging   "You seem to be getting into X. More of that?"   more | keep | less
                     satiated   "You've watched a lot of X lately. Break?"       break | no_break
                     dormant    "You haven't watched X in a while. Bring it back?" bring_back | moved_on
-  this_or_that    two plausible, uncertain, different titles
+  this_or_that    two plausible, uncertain, influential, different titles
+  tag             critiquing: "How do you feel about films by X?" for an attribute common among your
+                  best candidates that Muse knows little about
 
 An answer to an interest question becomes an `interest_feedback` event; evolution.analyze turns
 it into a decaying steer on that interest. An answer to any other question becomes the same
@@ -151,10 +153,32 @@ def pair_question(domain: str, a: dict, b: dict) -> QuestionSpec:
     )
 
 
+def tag_question_spec(domain: str, tag: str, value: float, examples: list[dict]) -> QuestionSpec:
+    from .elicitation import TAG_PROMPTS, pretty_tag
+
+    ns = tag.split(":", 1)[0]
+    return QuestionSpec(
+        kind="tag",
+        domain=domain,
+        dedupe_key=f"tag:{tag}",
+        priority=round(0.35 + min(value, 1.0) * 0.3, 3),
+        ttl_days=21,
+        reask_days=365,
+        payload={
+            "tag": tag,
+            "prompt": TAG_PROMPTS.get(ns, "How do you feel about {x}?").format(x=pretty_tag(tag)),
+            "answers": [{"response": "love", "label": "Love it"}, {"response": "fine", "label": "It's fine"},
+                        {"response": "not_for_me", "label": "Not for me"}],
+            "examples": examples,  # a few titles with this tag, for context
+        },
+    )
+
+
 # How to answer, shown with every queue entry so a client (or an LLM over MCP) needs no docs.
 ANSWER_TEMPLATES = {
     "onboarding": {"kind": "onboarding", "loved": ["<canon_key>"], "liked": [], "disliked": []},
     "abandon": {"kind": "abandon", "canon_key": "<canon_key>", "reason": "<one of answers[].reason>"},
     "interest": {"kind": "interest", "response": "<one of answers[].response>"},
     "this_or_that": {"kind": "this_or_that", "a": "<a.canon_key>", "b": "<b.canon_key>", "answer": "a|b|both|neither|skip"},
+    "tag": {"kind": "tag", "response": "love|fine|not_for_me"},
 }
