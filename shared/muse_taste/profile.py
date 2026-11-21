@@ -111,6 +111,8 @@ class TasteProfile:
     summary: str | None = None  # optional LLM natural-language summary
     model: str | None = None
     evolution: dict = field(default_factory=dict)  # muse_taste.evolution.analyze() output
+    reconsume: list = field(default_factory=list)  # muse_taste.reconsume.candidates(): worth watching/hearing again
+    muted: list = field(default_factory=list)  # titles you said not to base recommendations on (scrutability)
 
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
@@ -224,6 +226,8 @@ def build_profile(
     now: datetime | None = None,
     pinned: list[tuple[str, np.ndarray]] | None = None,
     model: str | None = None,
+    muted: set[str] | None = None,
+    tag_overrides: dict[str, str] | None = None,
 ) -> TasteProfile:
     """Pure function: signals + item vectors in, profile out. No I/O, so the recommendation
     API, the offline evaluator and the tests all run exactly this code."""
@@ -231,11 +235,12 @@ def build_profile(
     tags = tags or {}
     tag_df = tag_df or {}
 
+    muted = muted or set()
     pos: list[tuple[str, float, ItemSignal]] = []
     neg: list[tuple[str, float, ItemSignal]] = []
     for key, s in signals.items():
         w = s.weight(now)
-        if key not in vectors or w == 0:
+        if key not in vectors or w == 0 or key in muted:  # "don't base recommendations on this"
             continue
         (pos if w > 0 else neg).append((key, w, s))
     pos.sort(key=lambda t: -t[1])
@@ -313,9 +318,10 @@ def build_profile(
         short_term = unit((unit(sv) * sw[:, None]).sum(0)).tolist()
 
     tag_weights, tag_scale = _tag_affinities(pos + neg, tags, tag_df, catalog_size)
+    tag_weights = apply_tag_overrides(tag_weights, tag_scale, tag_overrides or {})
 
     judged = sorted(
-        ((k, s) for k, s in signals.items() if k in vectors and s.weight(now) != 0),
+        ((k, s) for k, s in signals.items() if k in vectors and s.weight(now) != 0 and k not in muted),
         key=lambda t: -abs(t[1].weight(now)) * (1 + math.log1p(t[1].confidence)),
     )[:MAX_ANCHORS]
     anchors = [Anchor(key=k, preference=s.preference, confidence=s.confidence, weight=s.weight(now)) for k, s in judged]
@@ -339,7 +345,19 @@ def build_profile(
         n_negative=len(neg),
         total_confidence=float(sum(s.confidence for s in signals.values())),
         model=model,
+        muted=sorted(muted),
     )
+
+
+def apply_tag_overrides(weights: dict[str, float], scale: float, overrides: dict[str, str]) -> dict[str, float]:
+    """Your own word beats inference: 'more' makes a tag a clear positive, 'less' a clear negative."""
+    out = dict(weights)
+    for tag, response in overrides.items():
+        if response == "more":
+            out[tag] = max(out.get(tag, 0.0), 0.6 * scale)
+        elif response == "less":
+            out[tag] = min(out.get(tag, 0.0), -0.6 * scale)
+    return out
 
 
 def _idf(tag: str, tag_df: dict[str, int], n: int) -> float:

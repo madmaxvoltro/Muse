@@ -21,7 +21,8 @@ from muse_taste.evolution import analyze
 from muse_taste.learn import label_impression
 from muse_taste.profile import TasteProfile, build_profile, estimate_baseline
 from muse_taste.retrieval import household_support, related_support
-from muse_taste.signals import ItemSignal, SignalEvent, aggregate, from_rows
+from muse_taste.reconsume import candidates as reconsume_candidates
+from muse_taste.signals import ItemSignal, SignalEvent, aggregate, feedback_overrides, from_rows
 from muse_schema.crypto import P_OVERLAY, P_PROFILE, get_vault
 from muse_taste.store import ITEMS_COLLECTION, open_canon_data
 from qdrant_client import QdrantClient
@@ -178,12 +179,16 @@ async def recompute_users(
                     pinned.append((t, pinned_vecs[t]))
             if not vectors and not pinned:
                 continue
-            prof = build_profile(uid, domain, dsig, vectors, tags, tag_df, max(n_catalog, 1), baseline=baseline, now=now, pinned=pinned, model=model_name)
+            devents = [e for e in all_events.get(uid, []) if domain_of(e.item_type) == domain]
+            muted, tag_overrides = feedback_overrides(devents)  # your corrections to Muse's reasons
+            prof = build_profile(uid, domain, dsig, vectors, tags, tag_df, max(n_catalog, 1), baseline=baseline, now=now, pinned=pinned,
+                                 model=model_name, muted=muted, tag_overrides=tag_overrides)
+            prof.reconsume = reconsume_candidates(domain, dsig, devents, now=now)  # worth watching / hearing again
 
             top = [(a.key, a.weight, titles.get(a.key, "")) for a in prof.anchors if a.weight > 0][:30]
             rel = related_support(top, related_of)
             prof.related = [
-                {"key": k, "support": round(v[0], 4), "via": v[1]}
+                {"key": k, "support": round(v[0], 4), "via": v[1], "via_keys": v[2]}
                 for k, v in sorted(rel.items(), key=lambda kv: -kv[1][0])
                 if not (k in dsig and dsig[k].seen)
             ][:250]
@@ -197,7 +202,6 @@ async def recompute_users(
             prof.household = [{"key": k, "support": round(v, 4)} for k, v in sorted(hh.items(), key=lambda kv: -kv[1])[:150]]
 
             # taste evolution: lifecycle, satiation, rediscovery, rhythms, stretch, timeline
-            devents = [e for e in all_events.get(uid, []) if domain_of(e.item_type) == domain]
             async with pool.acquire() as conn:
                 st_stats = await stretch_stats(conn, uid, devents)
             prof.evolution = analyze(prof, devents, vectors, now=now, tz=TIMEZONE, stretch_stats=st_stats)

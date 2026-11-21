@@ -266,3 +266,61 @@ def test_fresh_install_without_catalog_is_graceful(db_dsn):
     r, q = asyncio.run(go())
     assert r.status_code == 200 and r.json()["recommendations"] == [] and "catalog" in r.json()["note"]
     assert q.status_code == 200 and q.json()["question_id"] is None
+
+
+def test_scrutable_reasons_feedback_loop(db_dsn, monkeypatch):
+    """A reason can be corrected; the correction applies on the next request and sticks."""
+    import importlib
+
+    import httpx
+
+    async def go():
+        pool, qdrant, _ = await run_worker(db_dsn)
+        use_service("recommendation-api")
+        from app.engine import Engine, Request
+
+        eng = Engine(pool, qdrant)
+        res = await eng.recommend(Request(str(USER_A), "movie", limit=10, explore_ratio=0.0, include_unavailable=True, log=False))
+        described = [eng.describe(s, res.profile, res.titles) for s in res.items]
+        anchor_reasons = [d for r in described for d in r["reason_details"] if d["type"] == "anchor"]
+        assert anchor_reasons, described
+        target = anchor_reasons[0]
+
+        monkeypatch.setenv("MUSE_DATABASE_URL", db_dsn)
+        monkeypatch.setenv("MUSE_ADAPTER_KEYS", "muse:mk")
+        use_service("ingestion-api")
+        import app.auth
+        import app.db
+        import app.main as ing
+
+        importlib.reload(app.auth)
+        importlib.reload(app.db)
+        ing = importlib.reload(ing)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ing.app), base_url="http://t") as c:
+            r = await c.post("/answers", headers={"X-Muse-Api-Key": "mk"},
+                             json={"kind": "reason", "user_id": str(USER_A), "reason_id": target["id"], "response": "not_relevant"})
+            bad = await c.post("/answers", headers={"X-Muse-Api-Key": "mk"},
+                               json={"kind": "reason", "user_id": str(USER_A), "reason_id": "quality", "response": "less"})
+        await ing.close_pool()
+
+        res2 = await eng.recommend(Request(str(USER_A), "movie", limit=10, explore_ratio=0.0, include_unavailable=True, log=False))
+        after = [d["id"] for s in res2.items for d in eng.describe(s, res2.profile, res2.titles)["reason_details"]]
+
+        import worker as worker_mod
+        from conftest import FakeEmbedder
+        from fixtures import FakeTMDB
+
+        await worker_mod.Worker(pool, qdrant, FakeEmbedder(), tmdb=FakeTMDB()).run_once()
+        async with pool.acquire() as conn:
+            prof = get_vault().open_json(await conn.fetchval("SELECT profile FROM taste_profile WHERE user_id = $1 AND domain = 'video'", USER_A), P_PROFILE)
+        await pool.close()
+        return target, r, bad, after, prof
+
+    target, r, bad, after, prof = asyncio.run(go())
+    anchor_key = target["id"].split(":", 1)[1]
+    assert target["responses"] == ["not_relevant", "more"]
+    assert r.status_code == 202 and r.json()["events"] == 1
+    assert bad.status_code == 422
+    assert target["id"] not in after  # immediate, before any worker cycle
+    assert anchor_key in prof["muted"] and anchor_key not in [a["key"] for a in prof["anchors"]]
+    assert prof["reconsume"] is not None

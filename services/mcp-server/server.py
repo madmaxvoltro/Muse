@@ -106,6 +106,15 @@ async def muse_dismiss_question(question_id: str, user_id: str | None = None) ->
     return await _post_answer({"kind": "dismiss", "user_id": _user(user_id), "question_id": question_id})
 
 
+@mcp.tool(annotations=WRITE)
+async def muse_correct_reason(reason_id: str, response: str, item_type: str = "movie", user_id: str | None = None) -> dict:
+    """Correct a reason Muse gave for a recommendation (reason_details[].id). response:
+    "not_relevant" (e.g. don't base recommendations on that title), "more" or "less" (an
+    interest or a tag such as a director), or "restore" to undo. Use when the user says
+    things like "I didn't even like that film" or "less of that director"."""
+    return await _post_answer({"kind": "reason", "user_id": _user(user_id), "reason_id": reason_id, "response": response, "item_type": item_type})
+
+
 @mcp.tool(annotations=READ)
 async def muse_recommendations(item_type: str = "movie", limit: int = 10, mood: str | None = None, user_id: str | None = None) -> dict:
     """Explained recommendations from the user's library. item_type: movie, series,
@@ -113,7 +122,7 @@ async def muse_recommendations(item_type: str = "movie", limit: int = 10, mood: 
     body = await _get(f"/recommendations/{_user(user_id)}", {"item_type": item_type, "limit": max(1, min(limit, 30)), "mood": mood, "surface": "mcp"})
     return {
         "recommendations": [
-            {k: r.get(k) for k in ("title", "year", "canon_key", "source", "source_item_id", "reasons", "interest", "explore", "confidence")}
+            {k: r.get(k) for k in ("title", "year", "canon_key", "source", "source_item_id", "reasons", "reason_details", "interest", "explore", "confidence")}
             for r in body.get("recommendations", [])
         ],
         **({"note": body["note"]} if body.get("note") else {}),

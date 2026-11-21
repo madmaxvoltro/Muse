@@ -23,11 +23,11 @@ import numpy as np
 from muse_schema import canon_point_id
 from muse_taste.canon import domain_of
 from muse_taste.evolution import Adjustment, adjustment, apply_importance, stretch_score
-from muse_taste.profile import Anchor, Prototype, TasteProfile, unit
-from muse_taste.ranking import DEFAULT_WEIGHTS, CandidateInput, Scored, explain, score_candidates
+from muse_taste.profile import Anchor, Prototype, TasteProfile, apply_tag_overrides, unit
+from muse_taste.ranking import DEFAULT_WEIGHTS, CandidateInput, Scored, explain_structured, score_candidates
 from muse_taste.rerank import daily_seed, select
 from muse_taste.retrieval import interest_quotas, rrf
-from muse_taste.signals import aggregate, from_rows
+from muse_taste.signals import aggregate, feedback_overrides, from_rows
 from muse_schema.crypto import P_PROFILE, get_vault
 from muse_taste.store import ITEMS_COLLECTION, open_canon_data, open_payload
 from qdrant_client import QdrantClient
@@ -159,7 +159,15 @@ class Engine:
             rows = await conn.fetch(RECENT_EVENTS_SQL, uuid.UUID(user_id), since)
         if not rows:
             return
-        sig = aggregate([e for e in from_rows(rows) if domain_of(e.item_type) == domain], disabled_sources=disabled)
+        recent = [e for e in from_rows(rows) if domain_of(e.item_type) == domain]
+        # corrections to reasons take effect immediately, not after the next worker cycle
+        muted, tag_over = feedback_overrides(recent)
+        if muted:
+            prof.anchors = [a for a in prof.anchors if a.key not in muted]
+            prof.muted = sorted(set(prof.muted) | muted)
+        if tag_over:
+            prof.tag_weights = apply_tag_overrides(prof.tag_weights, prof.tag_scale, tag_over)
+        sig = aggregate(recent, disabled_sources=disabled)
         seen = set(prof.seen)
         new_neg, new_pos = [], []
         for k, s in sig.items():
@@ -352,6 +360,7 @@ class Engine:
                     added_days_ago=(now_ts - added) / 86400.0 if isinstance(added, (int, float)) else None,
                     related_support=float(rel_map.get(k, {}).get("support", 0.0)),
                     related_via=list(rel_map.get(k, {}).get("via", [])),
+                    related_via_keys=list(rel_map.get(k, {}).get("via_keys", [])),
                     household_support=float(hh_map.get(k, 0.0)),
                     impressions_unengaged=fatigue.get(k, 0),
                     generators=sources.get(k, set()),
@@ -411,6 +420,7 @@ class Engine:
         else:
             source, sid = "muse", s.key
         interest = prof.interests[s.interest_id] if s.interest_id is not None and s.interest_id < len(prof.interests) else None
+        details = explain_structured(s, prof, titles)
         return {
             "source": source,
             "source_item_id": sid,
@@ -424,7 +434,9 @@ class Engine:
             "confidence": round(s.confidence, 4),
             "explore": s.explore,
             "interest": (interest.label or ", ".join(t.split(":", 1)[-1] for t in interest.top_tags[:2])) if interest else None,
-            "reasons": explain(s, prof, titles),
+            "reasons": [r["text"] for r in details],
+            # each reason with its id and the corrections a client may offer (POST /answers kind "reason")
+            "reason_details": details,
             # numeric per-feature contributions (kept as a flat map for the Jellyfin plugin)
             "explanation": {k: round(v, 4) for k, v in s.contributions.items() if abs(v) >= 1e-4},
             "generators": s.payload.get("generators", []),

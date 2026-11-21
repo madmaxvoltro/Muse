@@ -165,6 +165,28 @@ class InterestAnswer(BaseModel):
     response: Literal["more", "keep", "less", "break", "no_break", "bring_back", "moved_on"]
 
 
+class ReasonFeedback(BaseModel):
+    """Feedback on a reason Muse gave (each recommendation's reason_details[].id), e.g.
+    {"reason_id": "anchor:<key>", "response": "not_relevant"}: stop basing recommendations on
+    that title; {"reason_id": "tag:d:denis villeneuve", "response": "less"};
+    {"reason_id": "interest:<key>", "response": "more"}. "restore" undoes a correction."""
+
+    kind: Literal["reason"]
+    user_id: str
+    reason_id: str = Field(max_length=300)
+    response: Literal["not_relevant", "more", "less", "restore"]
+    item_type: str = "movie"
+
+
+class TagAnswer(BaseModel):
+    """Answer to a critiquing question about a tag (queued kind `tag`)."""
+
+    kind: Literal["tag"]
+    user_id: str
+    question_id: str
+    response: Literal["love", "fine", "not_for_me"]
+
+
 class Dismiss(BaseModel):
     """'Don't ask me this': closes the question, writes no taste data."""
 
@@ -185,20 +207,57 @@ def _answer_event(user_id: str, item_type: str, canon: str, action: str, qid: st
                  timestamp=datetime.now(timezone.utc), metadata=md)
 
 
+def _feedback_event(user_id: str, item_type: str, sid: str, md: dict, canon: str | None = None) -> Event:
+    return Event(user_id=user_id, source="muse", source_item_id=sid, item_type=item_type, action="reason_feedback",
+                 timestamp=datetime.now(timezone.utc), metadata={**md, **({"canon_key": canon} if canon else {})})
+
+
+def _reason_events(body: ReasonFeedback) -> list[Event]:
+    kind, _, target = body.reason_id.partition(":")
+    if not target:
+        raise HTTPException(status_code=422, detail="reason_id must look like interest:<key>, anchor:<key>, related:<key> or tag:<tag>")
+    if kind == "interest" or (kind == "anchor" and body.response == "more"):
+        # whole interests are steered by the taste-evolution machinery (decaying)
+        resp = {"more": "more", "less": "less", "not_relevant": "less"}.get(body.response)
+        if not resp:
+            return []
+        return [Event(user_id=body.user_id, source="muse", source_item_id=target, item_type=body.item_type, action="interest_feedback",
+                      timestamp=datetime.now(timezone.utc), metadata={"canon_key": target, "response": resp, "members": [], "via": "reason"})]
+    if kind in ("anchor", "related"):
+        return [_feedback_event(body.user_id, body.item_type, f"reason:anchor:{target}",
+                                {"target": "anchor", "response": "restore" if body.response == "restore" else "mute", "via": "reason"}, canon=target)]
+    if kind == "tag":
+        resp = {"more": "more", "less": "less", "not_relevant": "less", "restore": "restore"}[body.response]
+        return [_feedback_event(body.user_id, body.item_type, f"reason:tag:{target}", {"target": "tag", "tag": target, "response": resp, "via": "reason"})]
+    raise HTTPException(status_code=422, detail=f"reasons of type {kind!r} can't be corrected")
+
+
 @app.post("/answers", status_code=202)
-async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer | InterestAnswer | Dismiss, source: str = Depends(require_adapter_key)) -> dict:
+async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer | InterestAnswer | ReasonFeedback | TagAnswer | Dismiss,
+                  source: str = Depends(require_adapter_key)) -> dict:
     """Answers are optional: Muse works the same whether or not anyone answers its questions."""
     if source != "muse":
         raise HTTPException(status_code=403, detail="answers need the `muse` key")
     pool = await get_pool()
     question = None
-    if body.question_id:
+    if getattr(body, "question_id", None):
         async with pool.acquire() as conn:
             question = await conn.fetchrow("SELECT user_id::text AS user_id, kind, payload, domain, status FROM question_log WHERE id::text = $1", body.question_id)
         if question is not None and question["user_id"] != body.user_id:
             raise HTTPException(status_code=403, detail="question belongs to another user")
     evs: list[Event] = []
-    if isinstance(body, Dismiss):
+    if isinstance(body, ReasonFeedback):
+        evs += _reason_events(body)
+    elif isinstance(body, TagAnswer):
+        if question is None or question["kind"] != "tag":
+            raise HTTPException(status_code=404, detail="unknown tag question")
+        payload = get_vault().open_json(question["payload"], P_QUESTION) or {}
+        tag = payload.get("tag")
+        resp = {"love": "more", "not_for_me": "less"}.get(body.response)
+        if tag and resp:
+            item_type = DOMAIN_ITEM_TYPE.get(question["domain"] or "video", "movie")
+            evs.append(_feedback_event(body.user_id, item_type, f"reason:tag:{tag}", {"target": "tag", "tag": tag, "response": resp, "via": "tag_question"}))
+    elif isinstance(body, Dismiss):
         if question is None:
             raise HTTPException(status_code=404, detail="unknown question")
     elif isinstance(body, InterestAnswer):
@@ -227,7 +286,7 @@ async def answers(body: OnboardingAnswer | PairAnswer | AbandonAnswer | Interest
     check_rate_limit(source, max(len(evs), 1))
     if evs:
         await _insert(evs)
-    if question is not None:
+    if question is not None and getattr(body, "question_id", None):
         status = "dismissed" if isinstance(body, Dismiss) else "answered"
         async with pool.acquire() as conn:
             try:

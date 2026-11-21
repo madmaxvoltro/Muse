@@ -64,20 +64,21 @@ def interest_quotas(importances: list[float], total: int, min_each: int = 12, ma
     return quotas
 
 
-def related_support(top_items: list[tuple[str, float, str]], related_of: dict[str, list[str]]) -> dict[str, tuple[float, list[str]]]:
+def related_support(top_items: list[tuple[str, float, str]], related_of: dict[str, list[str]]) -> dict[str, tuple[float, list[str], list[str]]]:
     """Borrowed collaborative filtering: for each of your strongest titles (key, weight, title),
     TMDB's recommendation list for it votes for its members, discounted by rank.
-    Returns candidate -> (support, [titles that vouched for it])."""
+    Returns candidate -> (support, [titles that vouched for it], [their keys])."""
     out: dict[str, list] = {}
     for key, w, title in top_items:
         for rank, rel in enumerate(related_of.get(key, [])[:20]):
             if rel == key:
                 continue
-            e = out.setdefault(rel, [0.0, []])
+            e = out.setdefault(rel, [0.0, [], []])
             e[0] += max(w, 0.0) / (1.0 + rank / 5.0)
             if title and len(e[1]) < 3:
                 e[1].append(title)
-    return {k: (v[0], v[1]) for k, v in out.items()}
+                e[2].append(key)
+    return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
 
 def household_support(me: dict[str, float], others: dict[str, dict[str, float]], min_overlap: int = 3) -> dict[str, float]:

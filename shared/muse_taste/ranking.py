@@ -75,6 +75,7 @@ class CandidateInput:
     added_days_ago: float | None = None
     related_support: float = 0.0
     related_via: list[str] = field(default_factory=list)
+    related_via_keys: list[str] = field(default_factory=list)
     household_support: float = 0.0
     impressions_unengaged: int = 0
     generators: set[str] = field(default_factory=set)
@@ -260,7 +261,7 @@ def score_candidates(
                 vector=X[i],
                 nearest_anchor=nearest[i],
                 top_tags=[t for t, v in hits[:3] if v > 0],
-                payload={**c.payload, "related_via": c.related_via, "generators": sorted(c.generators),
+                payload={**c.payload, "related_via": c.related_via, "related_via_keys": c.related_via_keys, "generators": sorted(c.generators),
                          "stretch_interest": int(stretch_k[i]) if feats["stretch"] > 0 else None,
                          "context_label": evolution.context_label if evolution is not None else None},
             )
@@ -268,10 +269,29 @@ def score_candidates(
     return out
 
 
+# What you can say about each kind of reason (scrutability: Balog, Radlinski & Arakelyan,
+# "Transparent, Scrutable and Explainable User Models for Personalized Recommendation",
+# SIGIR 2019). A reason id names the part of your profile behind it, so feedback on the
+# reason corrects the profile, not just this one recommendation.
+REASON_RESPONSES = {
+    "interest": ["more", "less"],
+    "anchor": ["not_relevant", "more"],
+    "tag": ["more", "less"],
+    "related": ["not_relevant"],
+}
+
+
 def explain(s: Scored, profile: TasteProfile, titles: dict[str, str], max_reasons: int = 3) -> list[str]:
     """Human sentences for the strongest positive contributions, e.g.
     ["Because you like Slow-burn Nordic crime", "Similar to The Killing", "Directed by Denis Villeneuve"]."""
-    reasons: list[tuple[float, str]] = []
+    return [r["text"] for r in explain_structured(s, profile, titles, max_reasons)]
+
+
+def explain_structured(s: Scored, profile: TasteProfile, titles: dict[str, str], max_reasons: int = 3) -> list[dict]:
+    """Like explain(), with a reason id and the responses a client can offer for each:
+    [{"text": "Similar to Arrival", "type": "anchor", "id": "anchor:<key>", "responses": ["not_relevant", "more"]}, ...].
+    Faithful by construction: every reason is one of the score's actual top contributions."""
+    reasons: list[tuple[float, str, str, str]] = []
     for k, v in sorted(s.contributions.items(), key=lambda kv: -kv[1]):
         if v <= 0.04:
             continue
@@ -279,47 +299,60 @@ def explain(s: Scored, profile: TasteProfile, titles: dict[str, str], max_reason
             it = profile.interests[s.interest_id]
             label = it.label or ", ".join(_pretty_tag(t) for t in it.top_tags[:2]) or titles.get(it.medoid_key, "")
             if label:
-                reasons.append((v, f"Because you like {label}"))
+                reasons.append((v, f"Because you like {label}", "interest", f"interest:{it.medoid_key}"))
         elif k == "item_sim" and s.nearest_anchor:
             t = titles.get(s.nearest_anchor)
             if t:
-                reasons.append((v, f"Similar to {t}"))
+                reasons.append((v, f"Similar to {t}", "anchor", f"anchor:{s.nearest_anchor}"))
         elif k == "tags" and s.top_tags:
-            reasons.append((v, _tag_reason(s.top_tags[0])))
+            reasons.append((v, _tag_reason(s.top_tags[0]), "tag", f"tag:{s.top_tags[0]}"))
         elif k == "related" and s.payload.get("related_via"):
-            reasons.append((v, f"Fans of {s.payload['related_via'][0]} also liked this"))
+            via_keys = s.payload.get("related_via_keys") or []
+            reasons.append((v, f"Fans of {s.payload['related_via'][0]} also liked this", "related" if via_keys else "info", f"related:{via_keys[0]}" if via_keys else "related"))
         elif k == "intent":
-            reasons.append((v, "On your list"))
+            reasons.append((v, "On your list", "info", "intent"))
         elif k == "quality":
             r = s.payload.get("vote_average")
-            reasons.append((v, f"Highly rated ({r:.1f})" if r else "Highly rated"))
+            reasons.append((v, f"Highly rated ({r:.1f})" if r else "Highly rated", "info", "quality"))
         elif k == "freshness":
-            reasons.append((v, "New in your library"))
+            reasons.append((v, "New in your library", "info", "freshness"))
         elif k == "household":
-            reasons.append((v, "Liked by others in your household"))
+            reasons.append((v, "Liked by others in your household", "info", "household"))
         elif k == "short_term":
-            reasons.append((v, "In line with what you've been watching lately"))
+            reasons.append((v, "In line with what you've been watching lately", "info", "short_term"))
         elif k == "mood":
-            reasons.append((v, "Fits your mood"))
+            reasons.append((v, "Fits your mood", "info", "mood"))
         elif k == "trend" and s.interest_id is not None:
-            reasons.append((v, f"You've been watching more {_interest_name(profile, s.interest_id, titles)} lately"))
+            reasons.append((v, f"You've been watching more {_interest_name(profile, s.interest_id, titles)} lately", "interest", _iid(profile, s.interest_id)))
         elif k == "rediscovery" and s.interest_id is not None:
-            reasons.append((v, f"It's been a while since your {_interest_name(profile, s.interest_id, titles)} phase"))
+            reasons.append((v, f"It's been a while since your {_interest_name(profile, s.interest_id, titles)} phase", "interest", _iid(profile, s.interest_id)))
         elif k == "context" and s.interest_id is not None and s.payload.get("context_label"):
-            reasons.append((v, f"You often pick {_interest_name(profile, s.interest_id, titles)} on {s.payload['context_label']}s"))
+            reasons.append((v, f"You often pick {_interest_name(profile, s.interest_id, titles)} on {s.payload['context_label']}s", "interest", _iid(profile, s.interest_id)))
         elif k == "steer" and s.interest_id is not None:
-            reasons.append((v, f"You asked for more {_interest_name(profile, s.interest_id, titles)}"))
+            reasons.append((v, f"You asked for more {_interest_name(profile, s.interest_id, titles)}", "interest", _iid(profile, s.interest_id)))
         elif k == "stretch" and s.payload.get("stretch_interest") is not None:
-            reasons.append((v, f"One step beyond {_interest_name(profile, s.payload['stretch_interest'], titles)}"))
+            reasons.append((v, f"One step beyond {_interest_name(profile, s.payload['stretch_interest'], titles)}", "interest", _iid(profile, s.payload["stretch_interest"])))
+    out: list[dict] = []
+    seen_text: set[str] = set()
+    for _, text, kind, rid in reasons:
+        if text in seen_text:
+            continue
+        seen_text.add(text)
+        out.append({"text": text, "type": kind, "id": rid, "responses": REASON_RESPONSES.get(kind, [])})
+    out = out[:max_reasons]
+    # Honesty about uncertainty builds more trust than a confident-sounding guess (Tintarev &
+    # Masthoff, "Evaluating the effectiveness of explanations for recommender systems", 2012).
     if s.explore:
-        reasons.append((0.0, "Something different, to learn your taste"))
-    seen = set()
-    out = []
-    for _, r in reasons:
-        if r not in seen:
-            out.append(r)
-            seen.add(r)
-    return out[:max_reasons]
+        out.append({"text": "Something different, to learn your taste", "type": "explore", "id": "explore", "responses": []})
+    elif s.confidence < 0.3 and out:
+        out.append({"text": "Muse isn't sure about this one yet", "type": "uncertainty", "id": "uncertainty", "responses": []})
+    return out
+
+
+def _iid(profile: TasteProfile, k: int | None) -> str:
+    if k is None or k >= len(profile.interests):
+        return "interest"
+    return f"interest:{profile.interests[k].medoid_key}"
 
 
 _TAG_PREFIX_TEXT = {

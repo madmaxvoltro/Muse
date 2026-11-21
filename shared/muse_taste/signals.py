@@ -376,3 +376,21 @@ def from_rows(rows: Iterable[Any], vault: Any = None) -> list[SignalEvent]:
             )
         )
     return out
+
+
+def feedback_overrides(events: Iterable[SignalEvent]) -> tuple[set[str], dict[str, str]]:
+    """Corrections you made to Muse's reasons (scrutability), latest wins:
+    -> (titles not to base recommendations on, {tag: "more" | "less"})."""
+    muted: dict[str, bool] = {}
+    tags: dict[str, str] = {}
+    for e in sorted((e for e in events if e.action == "reason_feedback"), key=lambda e: e.timestamp):
+        target = e.metadata.get("target")
+        resp = e.metadata.get("response")
+        if target == "anchor":
+            muted[e.key] = resp != "restore"
+        elif target == "tag" and e.metadata.get("tag"):
+            if resp in ("more", "less"):
+                tags[str(e.metadata["tag"])] = resp
+            elif resp in ("restore", "neutral"):
+                tags.pop(str(e.metadata["tag"]), None)
+    return {k for k, v in muted.items() if v}, tags

@@ -68,6 +68,7 @@ class Action(str, Enum):
     PASSED_OVER = "passed_over"  # the other side of a this-or-that question
     ABANDON_REASON = "abandon_reason"  # why a title was stopped early; metadata.reason
     INTEREST_FEEDBACK = "interest_feedback"  # answer about a whole interest (more/less/bring back...); metadata.response
+    REASON_FEEDBACK = "reason_feedback"  # correction to a reason Muse gave (don't use this title / more or less of this tag)
 
 
 # Default action_weight per action — adapters may override, but this keeps
@@ -90,6 +91,7 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.PASSED_OVER: -0.1,  # relative, not a dislike: the other option was merely preferred
     Action.ABANDON_REASON: 0.0,  # interpreted by muse_taste.signals from metadata.reason
     Action.INTEREST_FEEDBACK: 0.0,  # interpreted by muse_taste.evolution, never a per-title signal
+    Action.REASON_FEEDBACK: 0.0,  # interpreted by muse_taste.signals.feedback_overrides
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.
