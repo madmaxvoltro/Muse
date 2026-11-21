@@ -214,3 +214,23 @@ def summarize_taste(llm: LLM, interest_labels: list[tuple[str, float]], loved: l
     out = llm.complete_json("You describe media taste profiles. Reply with one JSON object only.", user, max_tokens=250)
     s = (out or {}).get("summary")
     return str(s).strip()[:600] if s else None
+
+
+def narrate_evolution(llm: LLM, profile: Any, titles: dict[str, str]) -> str | None:
+    """2-3 sentences on how this person's taste has been changing (from evolution.analyze)."""
+    ev = profile.evolution or {}
+
+    def name(k: str) -> str:
+        it = profile.interests[int(k)]
+        return it.label or ", ".join(t.split(":", 1)[-1] for t in it.top_tags[:2]) or titles.get(it.medoid_key, "")
+
+    states = [f"- {name(k)}: {v.get('state')} (trend {v.get('trend', 0):+.2f}, since {v.get('first_seen')})" for k, v in ev.get("interests", {}).items()]
+    miles = [f"- {m['month']}: {m['text']}" for m in ev.get("milestones", [])][-12:]
+    user = (
+        "Interests and how they are moving:\n" + "\n".join(states) + "\n\nMilestones:\n" + "\n".join(miles) +
+        '\n\nIn 2-3 warm, specific sentences in second person, describe how this person\'s taste has been evolving '
+        'and where it seems to be heading. No lists. Return {"narrative": "..."}.'
+    )
+    out = llm.complete_json("You describe how someone's media taste changes over time. Reply with one JSON object only.", user, max_tokens=300)
+    n = (out or {}).get("narrative")
+    return str(n).strip()[:700] if n else None

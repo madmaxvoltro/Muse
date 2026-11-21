@@ -5,36 +5,16 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timedelta
-
 import asyncpg
 import numpy as np
-from muse_taste.learn import fit_weights
+from muse_taste.learn import fit_weights, label_impression
 from muse_taste.ranking import DEFAULT_WEIGHTS
 
 from profiles import EVENTS_SQL, to_signal_events
 
 logger = logging.getLogger("muse.worker.ranker")
 
-WINDOW = timedelta(days=7)
-POSITIVE = {"completed", "favorited", "chose", "added_watchlist", "requested"}
-STRONG_NEGATIVE_REASONS = {"not_for_me", "too_slow"}
 FEATURES = [f for f in DEFAULT_WEIGHTS if f != "mood"]
-
-
-def label(imp_time, events) -> tuple[float, float] | None:
-    """(label, weight) or None while still undecided."""
-    later = [e for e in events if imp_time <= e.timestamp <= imp_time + WINDOW]
-    for e in later:
-        if e.action == "rated":
-            v = e.metadata.get("value", 1 if e.action_weight > 0 else -1)
-            return (1.0, 1.0) if v and v > 0 else (0.0, 1.0)
-        if e.action == "rejected" or (e.action == "abandon_reason" and e.metadata.get("reason") in STRONG_NEGATIVE_REASONS):
-            return 0.0, 1.0
-    for e in later:
-        if e.action in POSITIVE or (e.action == "played" and (e.progress_pct or 0) >= 20):
-            return 1.0, 1.0
-    return 0.0, 0.3
 
 
 async def fit(pool: asyncpg.Pool) -> dict | None:
@@ -59,9 +39,7 @@ async def fit(pool: asyncpg.Pool) -> dict | None:
             for e in evs:
                 by_key.setdefault(e.key, []).append(e)
             for r in rows:
-                lw = label(r["shown_at"], by_key.get(r["canon_key"], []))
-                if lw is None:
-                    continue
+                lw = label_impression(r["shown_at"], by_key.get(r["canon_key"], []))
                 feats = r["features"] or {}
                 X.append([float(feats.get(f, 0.0)) for f in FEATURES])
                 y.append(lw[0])

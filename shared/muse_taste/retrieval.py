@@ -13,6 +13,7 @@ recall comes from several generators that each fail differently:
   backlog      watchlist / requested / trailer-watched but not yet seen
   mood         ANN on an embedded mood text, when asked
   quality      best-rated library items (cold start and safety net)
+  stretch      just beyond the edge of your strongest interests (taste evolution: broadening)
 
 RRF needs no score calibration between generators (cosine, support counts and ratings aren't
 comparable). An item ranked well by several generators rises, which the ranker also sees as
@@ -35,6 +36,7 @@ GENERATOR_WEIGHT = {
     "mood": 1.2,
     "quality": 0.3,
     "pinned": 0.9,
+    "stretch": 0.5,  # just beyond an interest's edge (evolution); mostly feeds explore slots
 }
 
 

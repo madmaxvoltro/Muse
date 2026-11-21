@@ -78,6 +78,7 @@ services:
       MUSE_QDRANT_URL: http://qdrant:6333
       TMDB_API_KEY: ${TMDB_API_KEY}
       MUSE_TMDB_LANGUAGE: ${MUSE_TMDB_LANGUAGE:-en-US}
+      MUSE_TIMEZONE: ${MUSE_TIMEZONE:-UTC}
     volumes: [hf_cache:/root/.cache/huggingface]
     depends_on: [postgres, qdrant]
     networks: [muse-net]

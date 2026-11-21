@@ -87,3 +87,35 @@ def test_http_routes(db_dsn):
     assert p.status_code == 200 and p.json()["interests"] and p.json()["stats"]["liked"] > 0
     assert q.status_code == 200 and q.json()["kind"] in ("onboarding", "abandon", "this_or_that")
     assert bad.status_code == 400
+
+
+def test_evolution_endpoint_and_strength(db_dsn):
+    use_service("recommendation-api")
+    import httpx
+    from app import main
+    from app.engine import Engine, Request
+
+    async def go():
+        pool, qdrant, _ = await run_worker(db_dsn)
+        eng = Engine(pool, qdrant)
+        main._engine = eng
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            evo = await c.get(f"/evolution/{USER_A}")
+        on = await eng.recommend(Request(str(USER_A), "movie", limit=10, explore_ratio=0.2, include_unavailable=True, log=False))
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO user_overlay (user_id, evolution_strength) VALUES ($1, 0)", USER_A)
+        off = await eng.recommend(Request(str(USER_A), "movie", limit=10, explore_ratio=0.2, include_unavailable=True, log=False))
+        main._engine = None
+        await pool.close()
+        return evo, on, off
+
+    evo, on, off = asyncio.run(go())
+    assert evo.status_code == 200, evo.text
+    body = evo.json()
+    assert body["interests"] and all(i["state"] in ("emerging", "growing", "stable", "fading", "dormant", "pinned") for i in body["interests"])
+    assert body["timeline"] and body["stretch"]["band"] > 0
+    feats_on = [s.features for s in on.pool]
+    feats_off = [s.features for s in off.pool]
+    assert any(abs(f["trend"]) > 0 for f in feats_on)
+    assert all(f["trend"] == 0 and f["stretch"] == 0 and f["context"] == 0 for f in feats_off)

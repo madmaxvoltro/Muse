@@ -24,6 +24,10 @@ actually drives what gets suggested and, optionally, what gets downloaded.
   ranker with per-candidate uncertainty, lists calibrated to your interest mix, and
   Thompson-sampled exploration. Weights re-fit from what you actually watch. Details and
   citations: [`docs/recommender.md`](docs/recommender.md).
+- **Taste evolution**: tracks how each interest emerges, grows, fades and comes back, notices
+  when you've had enough of something, learns your rhythms (weekday evenings vs Sunday
+  mornings), and broadens your taste step by step beyond the edge of what you like. All subtle,
+  explained, and adjustable per user; `GET /evolution/{user}` shows the timeline.
 - **Muse asks the right questions**: onboarding picks, "this or that?" where it is least sure,
   and "why did you stop?" for abandoned titles, plus history import from YouTube, Spotify,
   Letterboxd, IMDb, Netflix, Trakt and SoundCloud exports.

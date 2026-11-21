@@ -17,6 +17,8 @@ import numpy as np
 from muse_schema import canon_point_id
 from muse_taste import llm as llm_mod
 from muse_taste.canon import domain_of
+from muse_taste.evolution import analyze
+from muse_taste.learn import label_impression
 from muse_taste.profile import TasteProfile, build_profile, estimate_baseline
 from muse_taste.retrieval import household_support, related_support
 from muse_taste.signals import ItemSignal, SignalEvent, aggregate, from_rows
@@ -27,6 +29,7 @@ logger = logging.getLogger("muse.worker.profiles")
 
 LOOKBACK_DAYS = int(os.environ.get("MUSE_TASTE_LOOKBACK_DAYS", "3650"))
 PINNED_DOMAINS = ("video", "youtube")
+TIMEZONE = os.environ.get("MUSE_TIMEZONE", "UTC")  # for rhythms: "evening" means your evening
 
 EVENTS_SQL = """
 SELECT e.source, e.source_item_id, e.item_type, e.action, e.action_weight, e."timestamp", e.progress_pct, e.metadata,
@@ -77,11 +80,30 @@ async def load_overlay(conn: asyncpg.Connection, user_id: str) -> dict:
     return {k: (row[k] or ({} if k == "source_weights" else [])) for k in ("source_weights", "disabled_sources", "pinned_topics")}
 
 
-async def user_signals(conn: asyncpg.Connection, user_id: str, now: datetime) -> tuple[dict[str, ItemSignal], dict]:
+async def user_signals(conn: asyncpg.Connection, user_id: str, now: datetime) -> tuple[dict[str, ItemSignal], dict, list[SignalEvent]]:
     overlay = await load_overlay(conn, user_id)
     rows = await conn.fetch(EVENTS_SQL, uuid.UUID(user_id), LOOKBACK_DAYS)
-    sig = aggregate(to_signal_events(rows), now=now, source_weights=overlay["source_weights"], disabled_sources=overlay["disabled_sources"])
-    return sig, overlay
+    events = [e for e in to_signal_events(rows) if e.source not in set(overlay["disabled_sources"])]
+    sig = aggregate(events, now=now, source_weights=overlay["source_weights"])
+    return sig, overlay, events
+
+
+async def stretch_stats(conn: asyncpg.Connection, user_id: str, events: list[SignalEvent]) -> tuple[int, int]:
+    """How often 'one step beyond' suggestions were shown and taken (drives the stretch band)."""
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (canon_key) canon_key, shown_at FROM impression
+        WHERE user_id = $1 AND (features->>'stretch')::float > 0.2
+          AND shown_at > now() - interval '120 days' AND shown_at < now() - interval '2 days'
+        ORDER BY canon_key, shown_at
+        """,
+        uuid.UUID(user_id),
+    )
+    by_key: dict[str, list[SignalEvent]] = defaultdict(list)
+    for e in events:
+        by_key[e.key].append(e)
+    accepted = sum(1 for r in rows if label_impression(r["shown_at"], by_key.get(r["canon_key"], []))[0] > 0.5)
+    return len(rows), accepted
 
 
 async def recompute_users(
@@ -99,10 +121,11 @@ async def recompute_users(
     # Signals for everyone first: household CF needs the others' judgements.
     all_signals: dict[str, dict[str, ItemSignal]] = {}
     overlays: dict[str, dict] = {}
+    all_events: dict[str, list[SignalEvent]] = {}
     async with pool.acquire() as conn:
         everyone = [str(r["user_id"]) for r in await conn.fetch("SELECT DISTINCT user_id FROM event WHERE action <> 'cataloged'")]
         for uid in set(everyone) | user_ids:
-            all_signals[uid], overlays[uid] = await user_signals(conn, uid, now)
+            all_signals[uid], overlays[uid], all_events[uid] = await user_signals(conn, uid, now)
         old_profiles = {
             (str(r["user_id"]), r["domain"]): r["profile"]
             for r in await conn.fetch("SELECT user_id, domain, profile FROM taste_profile WHERE user_id = ANY($1::uuid[])", [uuid.UUID(u) for u in user_ids])
@@ -154,6 +177,12 @@ async def recompute_users(
             }
             hh = household_support(mine, others)
             prof.household = [{"key": k, "support": round(v, 4)} for k, v in sorted(hh.items(), key=lambda kv: -kv[1])[:150]]
+
+            # taste evolution: lifecycle, satiation, rediscovery, rhythms, stretch, timeline
+            devents = [e for e in all_events.get(uid, []) if domain_of(e.item_type) == domain]
+            async with pool.acquire() as conn:
+                st_stats = await stretch_stats(conn, uid, devents)
+            prof.evolution = analyze(prof, devents, vectors, now=now, tz=TIMEZONE, stretch_stats=st_stats)
 
             old = old_profiles.get((uid, domain))
             await _llm_touches(prof, old, llm, titles, pool)
@@ -207,6 +236,15 @@ async def _llm_touches(prof: TasteProfile, old: dict | None, llm, titles: dict[s
                 changed = True
             except Exception as exc:
                 logger.warning("interest label failed: %s", exc)
+    old_ev = (old or {}).get("evolution") or {}
+    milestones_now = [m["text"] for m in prof.evolution.get("milestones", [])]
+    if old_ev.get("narrative") and [m["text"] for m in old_ev.get("milestones", [])] == milestones_now:
+        prof.evolution["narrative"] = old_ev["narrative"]
+    elif personal_ok and milestones_now:
+        try:
+            prof.evolution["narrative"] = await asyncio.to_thread(llm_mod.narrate_evolution, llm, prof, titles)
+        except Exception as exc:
+            logger.warning("evolution narrative failed: %s", exc)
     if old and not changed and old.get("summary"):
         prof.summary = old["summary"]
     elif personal_ok and prof.interests:

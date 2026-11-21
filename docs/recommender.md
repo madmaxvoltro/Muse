@@ -12,9 +12,10 @@ API, the curator, the offline evaluator and the tests, so they all run the same 
           per-title signals ─▶ multi-interest profile (taste_profile) ◀────────────┘
           muse_taste.signals    muse_taste.profile
                                        │
- request ─▶ 8 generators ─▶ RRF ─▶ features + score + uncertainty ─▶ calibrated list + explore
+ request ─▶ 9 generators ─▶ RRF ─▶ features + score + uncertainty ─▶ calibrated list + explore
             muse_taste.retrieval     muse_taste.ranking                muse_taste.rerank
                                        │
+      evolution (muse_taste.evolution): trends, satiation, rediscovery, rhythms, stretch
                          impressions ─▶ weight learning (muse_taste.learn)
 ```
 
@@ -29,7 +30,7 @@ API, the curator, the offline evaluator and the tests, so they all run the same 
 | `exp(-age/60)` called a half-life | It decays to 1/e, not 1/2. | Real half-lives (120 days implicit, 540 days explicit, with a floor). |
 | Item text = title + overview + genres, all-MiniLM (English, short) | Thin content understanding. No people, keywords or tone. | TMDB keywords, credits, collection, language + optional LLM tone/themes; Qwen3-Embedding (multilingual); exact-match tags next to the embedding. |
 | Each source's IDs kept separate | A 5★ Letterboxd film and the same film in Jellyfin were unrelated; titles watched on Netflix were re-recommended. | Canonical identity (`tmdb:movie:603`...) across all sources. |
-| A single vector search | Recall limited to "near the average". | Eight generators fused with Reciprocal Rank Fusion, including TMDB's "fans also liked" (borrowed collaborative filtering). |
+| A single vector search | Recall limited to "near the average". | Nine generators fused with Reciprocal Rank Fusion, including TMDB's "fans also liked" (borrowed collaborative filtering). |
 | Confidence per genre; explore = `confidence < 0.5` | Explore slots never learned anything specific. | Per-candidate uncertainty from nearby evidence; Thompson sampling; impressions logged. |
 | Diversity = max 3 per genre | Crude, and blind to proportions. | Calibration to your interest mix (Steck) + redundancy penalty (MMR) + one entry per franchise. |
 | No evaluation | No way to tell whether a change helped. | Temporal offline evaluation on your own data (`evaluate.py`). |
@@ -126,6 +127,7 @@ recall far more than a single query:
 | backlog | watchlist / requested / trailer watched |
 | mood | ANN on `?mood=cosy+and+funny` (needs an embedder in the API) |
 | quality | best Bayesian-rated titles (cold start, safety net) |
+| stretch | just beyond the edge of your 3 strongest interests (taste evolution, section 7) |
 
 Fused with Reciprocal Rank Fusion (Cormack, Clarke & Büttcher, SIGIR 2009). It needs no
 score calibration between generators, and titles several generators agree on rise.
@@ -138,7 +140,8 @@ score calibration between generators, and titles several generators agree on ris
 `item_sim` (very close to a specific title you loved), `tags`, `negative` (repulsion),
 `related`, `household`, `intent`, `quality` (IMDb-style Bayesian rating), `freshness` (new in
 library), `fatigue` (shown on several days, never picked), `consensus` (several generators),
-`mood`.
+`mood`, and the taste-evolution features `trend`, `satiation`, `rediscovery`, `context` and
+`stretch` (section 7).
 
 Because the score is a sum of `weight × feature`, the explanation is exact. The API returns
 the per-feature contributions (`explanation`, numeric, as the Jellyfin plugin expects) and
@@ -180,7 +183,34 @@ later, held-out slice of time. Sign constraints keep `negative` and `fatigue` fr
 Feedback is immediate: events newer than the stored profile are folded in at request time,
 so a thumbs-down removes and repels similar titles on the very next request.
 
-## 7. Muse asks questions
+## 7. Taste evolution
+
+A profile is a snapshot; taste moves. `evolution.py` (computed by the worker with every
+profile, applied per request) tracks how each interest changes and responds *subtly and
+explainably*. One slider per user, `user_overlay.evolution_strength`: 0 = off, 1 = default,
+2 = strong.
+
+| what | how | effect on recommendations |
+|---|---|---|
+| **Lifecycle** per interest: emerging, growing, stable, fading, dormant | ratio of a short-memory (21 d) and long-memory (120 d) engagement rate, per interest. That's time-changing preferences after Koren, *Collaborative Filtering with Temporal Dynamics* (KDD 2009), at interest level; DIEN (Zhou et al., AAAI 2019) models interest evolution with a sequence model that needs far more data than a household | importance ±25%, `trend` feature, reason "You've been watching more X lately" |
+| **Satiation** | leaky bucket of recent consumption (10 d half-life) against *your own* steady pace for that interest, amplified by declining engagement (abandons, thumbs down). Boredom follows intense consumption and recovers (Kapoor et al., *Just in Time Recommendations: Modeling the Dynamics of Boredom*, WSDM 2015). A binge alone isn't boredom, and a brand-new interest never counts as saturated | importance up to −40%, `satiation` feature (negative) |
+| **Rediscovery** | interests that were once big (peak month share ≥10%) and dormant >120 days get a pull that grows with time away (Anderson et al., *The Dynamics of Repeat Consumption*, WWW 2014) | importance up to +60%, reason "It's been a while since your X phase" |
+| **Rhythms** | per interest, lift by daypart, weekday/weekend and season (season only with ≥300 days of history), Dirichlet-smoothed toward your overall pattern; local time via `MUSE_TIMEZONE` | importance ∝ √lift, reason "You often pick X on weekend mornings" |
+| **Stretch** (broadening) | each interest has a radius (where its members typically sit); the band just beyond it is the "adjacent possible". The band widens as you accept such suggestions (Beta(1,3) prior on acceptance) and narrows when you don't | a `stretch` generator, a small feature, and **explore slots prefer the frontier**, so exploration broadens your taste in small steps instead of being random (on serendipity vs accuracy: Ge et al., RecSys 2010; Kotkov et al., KBS 2016) |
+| **Timeline** | monthly interest shares, breadth (effective number of interests), drift (how far the month's centre moved), milestones (new interest, a phase's peak, went quiet, biggest shift); optional LLM narrative | `GET /evolution/{user}` |
+
+Profiles cluster on *undecayed* preference (structure) while importance uses decayed weight,
+so an interest you loved two years ago remains its own (dormant) interest that can come back,
+instead of being absorbed into whatever you watch now.
+
+Measured on a synthetic household that moved from crime to animation over two months
+(`tests/test_evolution.py`, 8 users): recall@10 0.175 → 0.238, nDCG@10 0.140 → 0.202, MRR 0.203 →
+0.284, with slightly lower list diversity (rows lean toward the emerging interest, by design)
+and hit@10 1.00 → 0.88 (one user's top 10 contained none of their held-out titles; within a
+genre the synthetic titles are interchangeable). The evaluator's `full+evolution` strategy
+measures the same on your own data.
+
+## 8. Muse asks questions
 
 Read side: recommendation API. Answers: ingestion API (`muse` key).
 
@@ -202,7 +232,7 @@ curl -X POST $INGEST/answers ... -d '{"kind":"abandon","user_id":"<uuid>","quest
 Abandon reasons: `not_for_me`, `not_in_mood`, `too_slow`, `too_intense`, `will_finish_later`,
 `watched_elsewhere`, `bad_quality`.
 
-## 8. Importing history on onboarding
+## 9. Importing history on onboarding
 
 `POST /import/{kind}?user_id=<uuid>&filename=<name>` on the ingestion API with the export file
 (or the whole .zip) as the body, using the `muse` or `import` key. Or use the CLI:
@@ -224,7 +254,7 @@ MUSE_IMPORT_KEY=... python adapters/importer/import_history.py --kind letterboxd
 5-star scales: ≥4.5 love, ≥3.5 up, ≤2 down, in between "watched". 10-point scales: ≥9 love,
 ≥7 up, ≤4 down. Every event carries a dedupe key, so re-importing is a no-op.
 
-## 9. Models and hardware
+## 10. Models and hardware
 
 All of this is configuration (`.env`, shared by worker, curator and API via `x-embedding-env`):
 
@@ -245,7 +275,7 @@ only send public metadata.
 Changing the model or dimension re-embeds the catalog automatically (the model is part of
 every document hash).
 
-## 10. Is it getting better? Evaluation
+## 11. Is it getting better? Evaluation
 
 ```bash
 docker compose exec embedding-worker python evaluate.py            # all domains
@@ -255,7 +285,7 @@ docker compose exec embedding-worker python evaluate.py --domain video --k 20
 Temporal leave-future-out per user (random splits leak the future; see Ji et al., *A
 Critical Study on Data Leakage in Recommender System Offline Evaluation*, TOIS 2023).
 Profiles are rebuilt from history before the cut and scored on what you went on to like.
-Strategies: `legacy` (v1), `mean`, `multi`, `full`, `full+rerank`, with Recall/nDCG/MRR/Hit@K,
+Strategies: `legacy` (v1), `mean`, `multi`, `full`, `full+rerank`, `full+evolution`, with Recall/nDCG/MRR/Hit@K,
 intra-list diversity, calibration KL and coverage. Run it before and after changing a
 weight, the model or a threshold. Each user needs ≥5 liked titles.
 
@@ -263,7 +293,7 @@ Live, `/profile/{user}` shows what Muse thinks your taste is (interests with exa
 names, loved and disliked titles, top tags, summary). If it looks wrong, the
 recommendations will too, so it's the first place to look.
 
-## 11. Tuning knobs
+## 12. Tuning knobs
 
 | env | default | effect |
 |---|---|---|
@@ -274,14 +304,17 @@ recommendations will too, so it's the first place to look.
 | `MUSE_RANKER_FIT_HOURS` | 24 | weight re-fit |
 | `MUSE_CURATOR_ADD_SCORE` / `_REMOVE_SCORE` | 0.55 / 0.10 | curator thresholds, in ranker score units; preview candidates with `/recommendations/{user}?include_unavailable=true` |
 | `user_overlay.explore_ratio` | 0.125 | explore share per user |
+| `user_overlay.evolution_strength` | 1.0 | taste evolution: 0 off, 1 subtle, 2 strong |
+| `MUSE_TIMEZONE` | UTC | local time for rhythms |
 
 Half-lives, abandon rules and default weights are named constants at the top of
 `signals.py` / `ranking.py` / `rerank.py`.
 
-## 12. Upgrading from v1
+## 13. Upgrading from v1
 
-1. Apply the migration on an existing database:
+1. Apply the migrations on an existing database:
    `docker compose exec -T postgres psql -U muse -d muse < db/migrations/007_taste_engine.sql`
+   `docker compose exec -T postgres psql -U muse -d muse < db/migrations/008_taste_evolution.sql`
 2. Rebuild and restart `embedding-worker`, `recommendation-api`, `ingestion-api`, `curator`,
    `jellyfin-adapter`. The first worker cycles download the embedding model, build the
    catalog from the whole event log, enrich it (if `TMDB_API_KEY` is set) and embed it. That

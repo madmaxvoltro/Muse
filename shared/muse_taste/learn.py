@@ -15,11 +15,32 @@ only if they beat the hand-set ones on a later, held-out slice of time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import numpy as np
 
 MIN_LABELS = 200
 MIN_PER_CLASS = 20
+LABEL_WINDOW = timedelta(days=7)
+_POSITIVE = {"completed", "favorited", "chose", "added_watchlist", "requested"}
+_STRONG_NEGATIVE_REASONS = {"not_for_me", "too_slow"}
+
+
+def label_impression(shown_at: datetime, events: list) -> tuple[float, float]:
+    """What happened to a shown title within a week -> (label, sample weight).
+    events: SignalEvents for that title. Thumbs and "not for me" are decisive; playing or
+    finishing it is positive; ignored is a weak negative."""
+    later = [e for e in events if shown_at <= e.timestamp <= shown_at + LABEL_WINDOW]
+    for e in later:
+        if e.action == "rated":
+            v = e.metadata.get("value", 1 if e.action_weight > 0 else -1)
+            return (1.0, 1.0) if v and v > 0 else (0.0, 1.0)
+        if e.action == "rejected" or (e.action == "abandon_reason" and e.metadata.get("reason") in _STRONG_NEGATIVE_REASONS):
+            return 0.0, 1.0
+    for e in later:
+        if e.action in _POSITIVE or (e.action == "played" and (e.progress_pct or 0) >= 20):
+            return 1.0, 1.0
+    return 0.0, 0.3
 
 
 @dataclass

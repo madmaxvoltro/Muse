@@ -3,6 +3,7 @@ behind each stage.
 
   GET  /recommendations/{user_id}       ranked, explained, calibrated recommendations
   GET  /profile/{user_id}               the taste profile: interests, summary, what Muse learned
+  GET  /evolution/{user_id}             how your taste is changing: timeline, lifecycle, rhythms
   GET  /questions/{user_id}/next        the single most useful question to ask right now
   GET  /questions/{user_id}/onboarding  diverse well-known titles to tap ("which do you love?")
   GET  /questions/{user_id}/this-or-that a pairwise question where Muse is least sure
@@ -15,6 +16,7 @@ taste data, only impressions and question bookkeeping.
 
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from qdrant_client import QdrantClient
@@ -85,11 +87,12 @@ async def recommendations(
     surface: str = Query("home", max_length=40, description="where the list is shown; separate rotation and impression stats per surface"),
     include_unavailable: bool = Query(False, description="also titles not in the library (discovery / curator)"),
     log: bool = Query(True, description="log impressions (turn off for previews)"),
+    at: datetime | None = Query(None, description="ISO time to use as 'now' for rhythms (default: now)"),
 ) -> dict:
     _check_type(item_type)
     eng = await engine()
     try:
-        res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log))
+        res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     body = {
@@ -135,6 +138,61 @@ async def profile(user_id: str, domain: str = Query("video", description="video 
         "top_tags": sorted(((t, w) for t, w in prof.tag_weights.items() if w > 0), key=lambda kv: -kv[1])[:20],
         "stats": {"liked": prof.n_positive, "disliked": prof.n_negative, "evidence": round(prof.total_confidence, 1),
                   "seen": len(prof.seen), "watchlist": len(prof.backlog), "model": prof.model},
+    }
+
+
+@app.get("/evolution/{user_id}")
+async def evolution(user_id: str, domain: str = Query("video", description="video | youtube | music | books")) -> dict:
+    """How your taste is changing (muse_taste.evolution): per interest its lifecycle state,
+    trend, satiation, rediscovery pull and rhythms; a monthly timeline with breadth and drift;
+    milestones; how far Muse currently stretches; and (with an LLM) a short narrative."""
+    eng = await engine()
+    prof = await eng.profile(user_id, domain)
+    if prof is None or not prof.evolution:
+        raise HTTPException(status_code=404, detail="no evolution report yet (needs a profile with some history)")
+    ev = prof.evolution
+    keys = list({i.medoid_key for i in prof.interests} | {m for i in prof.interests for m in i.members[:4]})
+    async with eng.pool.acquire() as conn:
+        titles = {r["canon_key"]: r["title"] for r in await conn.fetch("SELECT canon_key, title FROM canon_item WHERE canon_key = ANY($1::text[])", keys)}
+
+    def name(k: int) -> str:
+        it = prof.interests[k]
+        return it.label or ", ".join(t.split(":", 1)[-1] for t in it.top_tags[:2]) or titles.get(it.medoid_key, f"interest {k + 1}")
+
+    interests = []
+    for ks, info in ev.get("interests", {}).items():
+        k = int(ks)
+        if k >= len(prof.interests):
+            continue
+        ctx = info.get("context") or {}
+        peaks = [f"{b}" for part in ("daypart", "weekpart", "season") for b, lift in (ctx.get(part) or {}).items() if lift >= 1.3]
+        interests.append({
+            "id": k,
+            "name": name(k),
+            "state": info.get("state"),
+            "trend": info.get("trend"),
+            "satiation": info.get("satiation"),
+            "rediscovery": info.get("rediscovery"),
+            "first_seen": info.get("first_seen"),
+            "last_seen": info.get("last_seen"),
+            "share_now": round(prof.interests[k].importance, 4),
+            "lifetime_share": info.get("lifetime_share"),
+            "usually": peaks,  # e.g. ["evening", "weekend"]: when you tend to pick this
+            "rhythms": ctx,
+            "examples": [titles.get(m, m) for m in prof.interests[k].members[:4]],
+        })
+    names = {str(i["id"]): i["name"] for i in interests}
+    timeline = [{**row, "shares": {names.get(k, "other" if k == "-1" else k): v for k, v in row["shares"].items()}} for row in ev.get("timeline", [])]
+    return {
+        "user_id": user_id,
+        "domain": domain,
+        "computed_at": ev.get("computed_at"),
+        "timezone": ev.get("timezone"),
+        "narrative": ev.get("narrative"),
+        "interests": sorted(interests, key=lambda i: -(i["share_now"] or 0)),
+        "timeline": timeline,
+        "milestones": ev.get("milestones", []),
+        "stretch": ev.get("stretch", {}),
     }
 
 

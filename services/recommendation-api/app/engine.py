@@ -22,6 +22,7 @@ import asyncpg
 import numpy as np
 from muse_schema import canon_point_id
 from muse_taste.canon import domain_of
+from muse_taste.evolution import Adjustment, adjustment, apply_importance, stretch_score
 from muse_taste.profile import Anchor, Prototype, TasteProfile, unit
 from muse_taste.ranking import DEFAULT_WEIGHTS, CandidateInput, Scored, explain, score_candidates
 from muse_taste.rerank import daily_seed, select
@@ -64,6 +65,7 @@ class Request:
     surface: str = "home"
     include_unavailable: bool = False
     log: bool = True
+    at: datetime | None = None  # "now" for rhythms (testing, or a client in another timezone)
 
 
 @dataclass
@@ -105,7 +107,8 @@ class Engine:
 
     async def overlay(self, user_id: str) -> dict:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT explore_ratio, disabled_sources, source_weights FROM user_overlay WHERE user_id = $1", uuid.UUID(user_id))
+            # SELECT * so a database without migration 008 (evolution_strength) still works
+            row = await conn.fetchrow("SELECT * FROM user_overlay WHERE user_id = $1", uuid.UUID(user_id))
         return dict(row) if row else {}
 
     def embedder(self):
@@ -206,7 +209,8 @@ class Engine:
         return [k for k in keys if k in got]
 
     # ---- generation ---------------------------------------------------------------------
-    def generate(self, prof: TasteProfile | None, types: list[str], include_unavailable: bool, mood_vec: np.ndarray | None) -> tuple[dict[str, list[str]], dict]:
+    def generate(self, prof: TasteProfile | None, types: list[str], include_unavailable: bool, mood_vec: np.ndarray | None,
+                 adj: Adjustment | None = None) -> tuple[dict[str, list[str]], dict]:
         flt = self._filter(types, include_unavailable)
         pool: dict[str, tuple[np.ndarray, dict]] = {}
         lists: dict[str, list[str]] = {}
@@ -226,6 +230,8 @@ class Engine:
             lists["household"] = self._by_keys([h["key"] for h in prof.household[:120]], types, include_unavailable, pool)
             backlog = sorted(prof.backlog, key=lambda k: -prof.backlog[k])
             lists["backlog"] = self._by_keys(backlog[:100], types, include_unavailable, pool)
+            if adj is not None and prof.interests:
+                lists["stretch"] = self._stretch(prof, adj, flt, pool)
         if mood_vec is not None:
             lists["mood"] = self._query(mood_vec.tolist(), flt, 120, pool)
         try:
@@ -241,6 +247,21 @@ class Engine:
                 q_keys.append(k)
         lists["quality"] = q_keys
         return lists, pool
+
+    def _stretch(self, prof: TasteProfile, adj: Adjustment, flt: qm.Filter, pool: dict) -> list[str]:
+        """'One step beyond': titles in the band just outside the edge of your strongest
+        interests (evolution.stretch_score), best first."""
+        found: list[str] = []
+        for it in sorted(prof.interests, key=lambda i: -i.importance)[:3]:
+            found += self._query(it.centroid, flt, 150, pool)
+        keys = list(dict.fromkeys(found))
+        if not keys:
+            return []
+        X = unit(np.stack([pool[k][0] for k in keys]))
+        sims = (X @ prof.centroid_matrix().T - prof.baseline) / max(1.0 - prof.baseline, 1e-6)
+        radii = np.array([i.radius for i in prof.interests])
+        sc = stretch_score(sims, radii, prof.importance_vector(), adj.band)
+        return [keys[i] for i in np.argsort(-sc) if sc[i] > 0][:60]
 
     async def fatigue(self, user_id: str) -> dict[str, int]:
         """Distinct days a title was shown in the last 30 days without being touched since."""
@@ -263,15 +284,21 @@ class Engine:
         domain = domain_of(types[0])
         overlay = await self.overlay(req.user_id)
         prof = await self.profile(req.user_id, domain)
+        adj: Adjustment | None = None
         if prof is not None:
             await self.apply_recent(prof, req.user_id, domain, overlay.get("disabled_sources") or [])
+            # Taste evolution: trends, satiation, rediscovery and rhythms shift interest
+            # importance for this request (retrieval slots + calibration targets), in memory only.
+            strength = float(overlay.get("evolution_strength", 1.0) if overlay.get("evolution_strength") is not None else 1.0)
+            adj = adjustment(prof, at=req.at, strength=strength)
+            apply_importance(prof, adj)
         timings["profile"] = time.monotonic() - t0
 
         mood_vec = None
         if req.mood:
             mood_vec = await asyncio.to_thread(lambda: self.embedder().embed_query(req.mood))
 
-        lists, pool = await asyncio.to_thread(self.generate, prof, types, req.include_unavailable, mood_vec)
+        lists, pool = await asyncio.to_thread(self.generate, prof, types, req.include_unavailable, mood_vec, adj)
         timings["generate"] = time.monotonic() - t0
         exclude = set(prof.seen) | set(prof.in_progress) if prof else set()
         fused, sources = rrf(lists)
@@ -315,7 +342,7 @@ class Engine:
             )
         anchors = await asyncio.to_thread(self.anchor_vectors, prof) if prof.anchors else {}
         weights = await self.weights()
-        scored = score_candidates(prof, cands, anchor_vectors=anchors, weights=weights, mood_vector=mood_vec)
+        scored = score_candidates(prof, cands, anchor_vectors=anchors, weights=weights, mood_vector=mood_vec, evolution=adj)
         timings["score"] = time.monotonic() - t0
         scored.sort(key=lambda s: -s.score)
         explore = req.explore_ratio if req.explore_ratio is not None else float(overlay.get("explore_ratio") or 0.125)
