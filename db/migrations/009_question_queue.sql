@@ -1,8 +1,7 @@
 -- Question queue (docs/recommender.md, "Muse asks questions"). question_log becomes a queue
 -- the worker fills in the background; clients fetch from it through the API or MCP server
 -- if they want to. Nothing depends on answers: unanswered questions simply expire.
--- Safe to re-run; apply by hand on existing databases:
---   docker compose exec -T postgres psql -U muse -d muse < db/migrations/009_question_queue.sql
+-- Safe to re-run; applied automatically by the admin migrate step (./muse up).
 
 -- Rows that existed before this migration were asked on demand: mark them served.
 ALTER TABLE question_log ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'served';

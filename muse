@@ -13,7 +13,7 @@
   ./muse export-user ID [--out FILE]
   ./muse forget-user ID
   ./muse backup [--out FILE]
-  ./muse restore FILE
+  ./muse restore FILE      (into a scratch database first; your data is untouched if it fails)
   ./muse rotate-keys
   ./muse rebuild
 
@@ -112,7 +112,8 @@ def compose(*args: str, check: bool = True, capture: bool = False, input_bytes: 
 
 
 def admin(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
-    return compose("run", "--rm", "--no-deps", "-T", "admin", *args, check=False, capture=capture)
+    return subprocess.run(["docker", "compose", "--progress", "quiet", "run", "--rm", "--no-deps", "-T", "admin", *args],
+                          cwd=ROOT, check=False, capture_output=capture)
 
 
 def env_values() -> dict[str, str]:
@@ -710,7 +711,7 @@ def cmd_backup(a) -> None:
     )
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
-        enc = subprocess.run(["docker", "compose", "run", "--rm", "--no-deps", "-T", "admin", "encrypt-stream"],
+        enc = subprocess.run(["docker", "compose", "--progress", "quiet", "run", "--rm", "--no-deps", "-T", "admin", "encrypt-stream"],
                              cwd=ROOT, stdin=dump.stdout, stdout=f)
     dump.wait()
     if dump.returncode or enc.returncode:
@@ -719,24 +720,69 @@ def cmd_backup(a) -> None:
     ok(f"encrypted backup: {out} ({out.stat().st_size / 1e6:.1f} MB). Restoring needs secrets/muse_master_key.")
 
 
+def _psql(sql: str, db: str = "postgres") -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["docker", "compose", "exec", "-T", "postgres", "sh", "-c",
+         f'PGPASSWORD="$(cat /run/secrets/postgres_password)" psql -v ON_ERROR_STOP=1 -q -h 127.0.0.1 -U muse -d {db}'],
+        cwd=ROOT, input=sql.encode(), capture_output=True,
+    )
+
+
 def cmd_restore(a) -> None:
+    """Restores into a scratch database first and only swaps it in when that fully succeeded,
+    so a bad or wrong backup never damages the running data. TimescaleDB needs
+    timescaledb_pre_restore()/post_restore() around pg_restore into a fresh database."""
     need_setup()
     if not a.yes and not yes(f"replace the current database with {a.file}?", default=False):
         return
-    src = open(a.file, "rb")
-    dec = subprocess.Popen(["docker", "compose", "run", "--rm", "--no-deps", "-T", "admin", "decrypt-stream"], cwd=ROOT, stdin=src, stdout=subprocess.PIPE)
-    restore = subprocess.run(
-        ["docker", "compose", "exec", "-T", "postgres", "sh", "-c",
-         'PGPASSWORD="$(cat /run/secrets/postgres_password)" pg_restore -h 127.0.0.1 -U muse -d muse --clean --if-exists --no-owner'],
-        cwd=ROOT, stdin=dec.stdout,
-    )
-    dec.wait()
+    step("Restoring into a scratch database")
+    r = _psql("DROP DATABASE IF EXISTS muse_restore WITH (FORCE); CREATE DATABASE muse_restore;")
+    if r.returncode:
+        die(r.stderr.decode())
+    r = _psql("CREATE EXTENSION IF NOT EXISTS timescaledb; SELECT timescaledb_pre_restore();", db="muse_restore")
+    if r.returncode:
+        die(r.stderr.decode())
+    with open(a.file, "rb") as src:
+        dec = subprocess.Popen(["docker", "compose", "--progress", "quiet", "run", "--rm", "--no-deps", "-T", "admin", "decrypt-stream"],
+                               cwd=ROOT, stdin=src, stdout=subprocess.PIPE)
+        restore = subprocess.run(
+            ["docker", "compose", "exec", "-T", "postgres", "sh", "-c",
+             'PGPASSWORD="$(cat /run/secrets/postgres_password)" pg_restore -h 127.0.0.1 -U muse -d muse_restore --no-owner --exit-on-error'],
+            cwd=ROOT, stdin=dec.stdout, capture_output=True,
+        )
+        dec.wait()
+    _psql("SELECT timescaledb_post_restore();", db="muse_restore")
     if dec.returncode:
-        die("could not decrypt the backup (wrong key file?)")
+        _psql("DROP DATABASE IF EXISTS muse_restore WITH (FORCE);")
+        die("could not decrypt the backup (wrong key file, or not a Muse backup). Current data untouched.")
+    if restore.returncode:
+        _psql("DROP DATABASE IF EXISTS muse_restore WITH (FORCE);")
+        die("restore failed; current data untouched:\n" + restore.stderr.decode()[-1500:])
+    n = _psql("SELECT count(*) FROM event;", db="muse_restore")
+    ok(f"backup restored into scratch database ({n.stdout.decode().split()[2] if n.returncode == 0 and len(n.stdout.split()) > 2 else '?'} events)")
+    step("Swapping it in")
+    users_of_db = [s for s, st in service_states().items() if st.get("State") == "running" and s not in ("postgres", "qdrant", "admin", "tls-proxy")]
+    compose("stop", *users_of_db, check=False)
+    keep = time.strftime("muse_before_restore_%Y%m%d_%H%M%S")
+    r = _psql(f"ALTER DATABASE muse RENAME TO {keep}; ALTER DATABASE muse_restore RENAME TO muse;")
+    if r.returncode:
+        compose("start", *users_of_db, check=False)
+        die("swap failed, nothing changed: " + r.stderr.decode())
+    ok(f"previous database kept as {keep} (drop it with: ./muse drop-old-db {keep})")
     admin("migrate", capture=False)
     admin("rebuild", "--yes", capture=False)
-    compose("restart", "embedding-worker", "recommendation-api", check=False)
-    (ok if restore.returncode == 0 else warn)("restored; the worker rebuilds vectors and profiles over the next cycles")
+    compose("start", *users_of_db, check=False)  # exactly what was running before
+    ok("restored; the worker rebuilds vectors and profiles over the next cycles")
+
+
+def cmd_drop_old_db(a) -> None:
+    need_setup()
+    if not re.fullmatch(r"muse_before_restore_\d{8}_\d{6}", a.name):
+        die("only databases named muse_before_restore_YYYYMMDD_HHMMSS can be dropped this way")
+    if not a.yes and not yes(f"permanently drop {a.name}?", default=False):
+        return
+    r = _psql(f"DROP DATABASE IF EXISTS {a.name} WITH (FORCE);")
+    (ok if r.returncode == 0 else fail)(f"dropped {a.name}" if r.returncode == 0 else r.stderr.decode())
 
 
 def cmd_rotate_keys(a) -> None:
@@ -753,7 +799,8 @@ def cmd_rotate_keys(a) -> None:
     os.chmod(SECRETS / f"muse_master_key.before-{new_kid}", 0o600)
     _write_secret("muse_master_key", "\n".join(comments + idx + [new] + rest) + "\n", overwrite=True)
     ok(f"new encryption key {new_kid}; old keys stay in the file so old backups remain readable")
-    compose("up", "-d", "--force-recreate", check=False)
+    running = [s for s, st in service_states().items() if st.get("State") == "running" and s not in ("postgres", "qdrant", "tls-proxy")]
+    compose("up", "-d", "--no-build", "--force-recreate", *running, check=False)  # pick up the new key file
     r = admin("reseal", capture=False)
     (ok if r.returncode == 0 else fail)("all stored data re-encrypted with the new key" if r.returncode == 0 else "reseal failed: ./muse logs admin")
 
@@ -812,6 +859,10 @@ def main() -> None:
     p = sub.add_parser("rebuild")
     p.add_argument("--yes", action="store_true")
     p.set_defaults(fn=cmd_rebuild)
+    p = sub.add_parser("drop-old-db", help="drop a database kept by restore")
+    p.add_argument("name")
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(fn=cmd_drop_old_db)
     a = ap.parse_args()
     try:
         a.fn(a)

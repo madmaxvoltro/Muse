@@ -305,6 +305,7 @@ every document hash).
 ```bash
 docker compose exec embedding-worker python evaluate.py            # all domains
 docker compose exec embedding-worker python evaluate.py --domain video --k 20
+# (prints aggregate metrics only; nothing personal)
 ```
 
 Temporal leave-future-out per user (random splits leak the future; see Ji et al., *A
@@ -337,18 +338,16 @@ Half-lives, abandon rules and default weights are named constants at the top of
 
 ## 13. Upgrading from v1
 
-1. Apply the migrations on an existing database:
-   `docker compose exec -T postgres psql -U muse -d muse < db/migrations/007_taste_engine.sql`
-   `docker compose exec -T postgres psql -U muse -d muse < db/migrations/008_taste_evolution.sql`
-   `docker compose exec -T postgres psql -U muse -d muse < db/migrations/009_question_queue.sql`
+1. Migrations apply themselves (the `admin` step runs on every start), and rows written before
+   encryption are encrypted automatically.
 2. Rebuild and restart `embedding-worker`, `recommendation-api`, `ingestion-api`, `curator`,
    `jellyfin-adapter`. The first worker cycles download the embedding model, build the
    catalog from the whole event log, enrich it (if `TMDB_API_KEY` is set) and embed it. That
    takes a while for a large library; progress is in the worker log.
 3. The old Qdrant collections `content_items` and `taste_vectors` are no longer used and can
    be deleted.
-4. Add a `muse:` key (for the client showing questions) and optionally an `import:` key to
-   `MUSE_ADAPTER_KEYS`.
+4. `./muse setup` creates the `muse:` (answers) and `import:` keys in `secrets/adapter_keys`;
+   `./muse keys` shows them.
 
 ## Known limits
 

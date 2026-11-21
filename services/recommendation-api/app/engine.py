@@ -112,6 +112,15 @@ class Engine:
             row = await conn.fetchrow("SELECT * FROM user_overlay WHERE user_id = $1", uuid.UUID(user_id))
         return dict(row) if row else {}
 
+    def catalog_ready(self) -> bool:
+        """False on a fresh install until the worker has created the vector collection."""
+        if not getattr(self, "_ready", False):
+            try:
+                self._ready = bool(self.qdrant.collection_exists(ITEMS_COLLECTION))
+            except Exception:
+                self._ready = False
+        return self._ready
+
     async def titles_for(self, keys: list[str]) -> dict[str, str]:
         """Titles for blind canonical keys (canon_item data is sealed)."""
         if not keys:

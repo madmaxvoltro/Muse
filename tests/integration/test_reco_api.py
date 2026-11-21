@@ -240,3 +240,29 @@ def test_status_page_and_secure_defaults(db_dsn, monkeypatch):
     assert status_code == 200 and "Muse" in text
     assert not any(s in text for s in ("Crime Film", "jf100", "tmdb:", "status-secret"))  # counts only
     assert out["json"]["catalog"]["titles"] > 0 and out["json"]["profiles"] >= 1
+
+
+def test_fresh_install_without_catalog_is_graceful(db_dsn):
+    """Before the worker's first cycle there is no vector collection: answer, don't 500."""
+    use_service("recommendation-api")
+    import asyncpg
+    import httpx
+    from app import main
+    from app.engine import Engine
+    from qdrant_client import QdrantClient
+
+    from conftest import _json_codecs
+
+    async def go():
+        pool = await asyncpg.create_pool(db_dsn, min_size=1, max_size=2, init=_json_codecs)
+        main._engine = Engine(pool, QdrantClient(":memory:"))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://t") as c:
+            r = await c.get(f"/recommendations/{USER_A}", params={"item_type": "movie"})
+            q = await c.get(f"/questions/{USER_A}/next")
+        main._engine = None
+        await pool.close()
+        return r, q
+
+    r, q = asyncio.run(go())
+    assert r.status_code == 200 and r.json()["recommendations"] == [] and "catalog" in r.json()["note"]
+    assert q.status_code == 200 and q.json()["question_id"] is None

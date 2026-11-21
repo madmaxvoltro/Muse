@@ -15,6 +15,7 @@ Answers to questions go to the ingestion API (POST /answers): this service never
 taste data, only impressions and question bookkeeping.
 """
 
+import asyncio
 import hmac
 import os
 from contextlib import asynccontextmanager
@@ -126,6 +127,9 @@ async def recommendations(
 ) -> dict:
     _check_type(item_type)
     eng = await engine()
+    if not await asyncio.to_thread(eng.catalog_ready):
+        return {"user_id": user_id, "item_type": item_type, "recommendations": [],
+                "note": "Muse is still building its catalog (first start); see ./muse status"}
     try:
         res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at))
     except RuntimeError as exc:
@@ -246,19 +250,28 @@ async def question_queue(
 @app.get("/questions/{user_id}/next")
 async def question_next(user_id: str, item_type: str = Query("movie")) -> dict:
     _check_type(item_type)
-    return await questions.next_question(await engine(), user_id, item_type)
+    eng = await engine()
+    if not await asyncio.to_thread(eng.catalog_ready):
+        return {"question_id": None, "kind": None, "note": "catalog not built yet"}
+    return await questions.next_question(eng, user_id, item_type)
 
 
 @app.get("/questions/{user_id}/onboarding")
 async def question_onboarding(user_id: str, item_type: str = Query("movie"), n: int = Query(24, ge=4, le=60)) -> dict:
     _check_type(item_type)
-    return await questions.onboarding(await engine(), user_id, item_type, n)
+    eng = await engine()
+    if not await asyncio.to_thread(eng.catalog_ready):
+        return {"question_id": None, "kind": "onboarding", "items": [], "note": "catalog not built yet"}
+    return await questions.onboarding(eng, user_id, item_type, n)
 
 
 @app.get("/questions/{user_id}/this-or-that")
 async def question_pair(user_id: str, item_type: str = Query("movie")) -> dict:
     _check_type(item_type)
-    return await questions.pairwise(await engine(), user_id, item_type)
+    eng = await engine()
+    if not await asyncio.to_thread(eng.catalog_ready):
+        return {"question_id": None, "kind": "this_or_that", "note": "catalog not built yet"}
+    return await questions.pairwise(eng, user_id, item_type)
 
 
 @app.get("/questions/{user_id}/abandoned")

@@ -72,18 +72,30 @@ adapters/                one subdirectory per source, each a small standalone se
 tests/                   engine unit tests + integration tests (Postgres, in-memory Qdrant)
 jellyfin-plugin/          C#/.NET plugin, IHomeScreenSection-scoped
 docs/                     architecture.md + recommender.md + installation.md + one guide per adapter
+services/admin/           migrations, database roles, status, backups, forget/export, key rotation
+muse                      the setup and operations tool (./muse setup, status, doctor, backup...)
+SECURITY.md               what is encrypted, how access is limited, and what isn't covered
 ```
 
 ## Getting started
 
-See [`docs/installation.md`](docs/installation.md) for network-isolation prerequisites and setup.
+```bash
+git clone <this repository> muse && cd muse
+./muse setup      # checks, Jellyfin, hardware, secrets, start, verify
+./muse status
+```
+
+Everything else (modes for local / LAN / Tailscale, importing history, backups, optional parts):
+[`docs/installation.md`](docs/installation.md).
 
 ## Security
 
-Muse's event store aggregates a behavioral profile across nearly all of your personal data — treat
-it as your highest-value target, not a toy. Deployment assumes a dedicated, network-isolated host
-(own VLAN, no direct external exposure, Tailscale-only access) and encryption at rest. See the
-"Security model" section of [`docs/architecture.md`](docs/architecture.md) before deploying.
+Muse aggregates a behavioural profile of your household, so it treats its own storage as hostile:
+everything personal is encrypted by Muse itself (AES-256-GCM, with blind indexes for anything that
+must stay searchable). A database dump, backup or copied volume reveals no titles, searches,
+profiles or even library contents without the key file. Services run with least-privilege
+database roles on segmented internal networks, as non-root read-only containers, with secrets
+as files and no personal data in logs. Details and the honest limits: [`SECURITY.md`](SECURITY.md).
 
 ## License
 

@@ -1,7 +1,6 @@
 -- Taste engine v2 (see docs/recommender.md): item catalog with canonical identity and
 -- enrichment, stored multi-interest profiles, impression log, learned ranker weights.
--- Safe to re-run. On databases created before this file existed apply by hand:
---   docker compose exec -T postgres psql -U muse -d muse < db/migrations/007_taste_engine.sql
+-- Safe to re-run; applied automatically by the admin migrate step (./muse up).
 
 -- One row per (source, source_item_id) the event log has mentioned, plus TMDB items Muse
 -- discovered through enrichment (source = 'tmdb'). canon_key ties rows that are the same

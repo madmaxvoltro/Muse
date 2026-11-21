@@ -163,16 +163,11 @@ Anime separation is already native to Jellyfin (library views) — no custom top
 
 ## Security model
 
-Threat model: the main risk is **lateral movement within the home network**, not external
-attackers (Tailscale/VLAN already covers that). Principles:
-
-- Muse runs on its own VLAN segment, isolated from the rest of the homelab.
-- Encryption at rest (LUKS) on the Muse DB volume.
-- No direct external exposure — Tailscale-only access, no ports published to the host.
-- Adapters are write-only with minimal, per-adapter credentials (see `services/ingestion-api/app/auth.py`)
-  — a compromised adapter can inject rate-limited bad events, but can never read the event store back.
-- The vector store (Qdrant) is secured at the same level as raw data — embeddings can leak/reconstruct
-  sensitive signal, they are not "safe just because they're numbers."
-- Backups (Proxmox Backup Server) must carry the same encryption requirement as the live DB.
-- Anomaly detection on the event store itself (unusual query volume/time) is a candidate future
-  feature — an IDS-like layer on top of the append-only log.
+Threat model and implementation: [`../SECURITY.md`](../SECURITY.md). In short: Muse encrypts
+every personal field itself (AES-256-GCM; blind HMAC indexes for searchable identifiers), so
+dumps, backups and copied volumes are unreadable without the key file; adapters are write-only
+with per-adapter keys; every service has its own least-privilege database role; data stores sit
+on an internal network with no internet; the APIs listen on localhost (HTTPS proxy for other
+machines); secrets are Docker secret files; containers run non-root and read-only; logs carry no
+personal data. Remaining exposure (activity timestamps, catalog vectors, a compromised running
+host) is documented there.
