@@ -115,6 +115,19 @@ class Worker:
         return report
 
 
+async def heartbeat(pool: asyncpg.Pool, report: dict, ok: bool) -> None:
+    """For `muse status` and the status page (counts only, never names)."""
+    try:
+        async with pool.acquire() as conn:
+            if ok:
+                await conn.execute("UPDATE embedding_worker_state SET last_cycle_at = now(), last_cycle_report = $1::jsonb",
+                                   {k: v for k, v in report.items() if isinstance(v, (int, float, str, bool)) or v is None})
+            else:
+                await conn.execute("UPDATE embedding_worker_state SET last_error_at = now()")
+    except Exception:  # pre-010 database
+        pass
+
+
 async def main() -> None:
     embedder = embedder_mod.from_env()
     llm = llm_mod.from_env()
@@ -134,9 +147,12 @@ async def main() -> None:
         start = time.monotonic()
         try:
             report = await worker.run_once()
-            logger.info("cycle done in %.1fs: %s", time.monotonic() - start, report)
+            report["seconds"] = round(time.monotonic() - start, 1)
+            logger.info("cycle done in %.1fs: %s", report["seconds"], report)
+            await heartbeat(pool, report, ok=True)
         except Exception:
             logger.exception("embedding worker cycle failed")
+            await heartbeat(pool, {}, ok=False)
         await asyncio.sleep(max(RUN_INTERVAL_SECONDS - (time.monotonic() - start), 5))
 
 

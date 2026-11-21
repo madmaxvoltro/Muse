@@ -154,6 +154,62 @@ class Vault:
         return BLIND_PREFIX + base64.b32encode(mac[:20]).decode().lower().rstrip("=")
 
 
+    # ---- streams (backups) -----------------------------------------------------------------
+    STREAM_MAGIC = b"MUSEBK1\n"
+    _CHUNK = 1 << 20
+
+    def encrypt_stream(self, fin: Any, fout: Any) -> int:
+        """Chunked AES-256-GCM. Each chunk's AAD binds its index and whether it is the last
+        one, so chunks can't be reordered, dropped or the stream truncated undetected."""
+        import struct
+
+        aes = self._enc[self.active_kid]
+        fout.write(self.STREAM_MAGIC + self.active_kid.encode() + b"\n")
+        idx, total = 0, 0
+        buf = fin.read(self._CHUNK)
+        while True:
+            nxt = fin.read(self._CHUNK) if buf else b""
+            last = not nxt
+            nonce = secrets.token_bytes(12)
+            ct = aes.encrypt(nonce, buf, b"muse.backup:%d:%d" % (idx, last))
+            fout.write(struct.pack(">I", len(ct)) + nonce + ct)
+            total += len(buf)
+            idx += 1
+            if last:
+                return total
+            buf = nxt
+
+    def decrypt_stream(self, fin: Any, fout: Any) -> int:
+        import struct
+
+        if fin.read(len(self.STREAM_MAGIC)) != self.STREAM_MAGIC:
+            raise DecryptionError("not a Muse backup")
+        kid = fin.readline().strip().decode()
+        if kid not in self._enc:
+            raise DecryptionError(f"backup was made with key {kid!r}, which is not in the key file")
+        aes = self._enc[kid]
+        idx, total = 0, 0
+        while True:
+            head = fin.read(4)
+            if len(head) < 4:
+                raise DecryptionError("backup is truncated")
+            (n,) = struct.unpack(">I", head)
+            nonce, ct = fin.read(12), fin.read(n)
+            for last in (0, 1):
+                try:
+                    pt = aes.decrypt(nonce, ct, b"muse.backup:%d:%d" % (idx, last))
+                    break
+                except Exception:
+                    pt = None
+            if pt is None:
+                raise DecryptionError("backup is corrupt or was tampered with")
+            fout.write(pt)
+            total += len(pt)
+            idx += 1
+            if last:
+                return total
+
+
 class NullVault:
     """MUSE_ENCRYPTION=off: plaintext, for development and tests only."""
 
