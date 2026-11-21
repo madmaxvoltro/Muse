@@ -20,7 +20,7 @@ from muse_taste import llm as llm_mod
 from muse_taste.canon import domain_of
 from muse_taste.profile import TasteProfile, build_profile, estimate_baseline
 from muse_taste.retrieval import household_support, related_support
-from muse_taste.signals import ItemSignal, SignalEvent, aggregate
+from muse_taste.signals import ItemSignal, SignalEvent, aggregate, from_rows
 from muse_taste.store import ITEMS_COLLECTION
 from qdrant_client import QdrantClient
 
@@ -41,29 +41,7 @@ WHERE e.user_id = $1 AND e.source_item_id IS NOT NULL AND e.action <> 'cataloged
 
 
 def to_signal_events(rows: list) -> list[SignalEvent]:
-    out = []
-    for r in rows:
-        md = r["metadata"] or {}
-        if r["item_type"] == "series_episode":
-            key = r["parent_canon"] or r["parent_key"] or (r["canon_key"] or f"{r['source']}:{r['source_item_id']}")
-            sub = r["canon_key"] or f"{r['source']}:{r['source_item_id']}"
-        else:
-            key = md.get("canon_key") or r["canon_key"] or f"{r['source']}:{r['source_item_id']}"
-            sub = None
-        out.append(
-            SignalEvent(
-                key=key,
-                item_type=r["item_type"],
-                action=r["action"],
-                action_weight=float(r["action_weight"] or 0.0),
-                timestamp=r["timestamp"],
-                source=r["source"],
-                progress_pct=r["progress_pct"],
-                metadata=md,
-                sub_key=sub,
-            )
-        )
-    return out
+    return from_rows(rows)
 
 
 def fetch_vectors(qdrant: QdrantClient, keys: list[str]) -> dict[str, np.ndarray]:

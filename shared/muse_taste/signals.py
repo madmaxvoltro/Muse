@@ -341,3 +341,34 @@ def _aggregate_item(key: str, evs: list[SignalEvent], now: datetime) -> ItemSign
 
 def total_confidence(signals: dict[str, ItemSignal]) -> float:
     return sum(s.confidence for s in signals.values())
+
+
+def from_rows(rows: Iterable[Any]) -> list[SignalEvent]:
+    """Event rows joined with their catalog item (columns: source, source_item_id, item_type,
+    action, action_weight, timestamp, progress_pct, metadata, canon_key, parent_key,
+    parent_canon) -> SignalEvents keyed by canonical title, episodes rolled up to their series.
+    Shared by the worker and the recommendation API so both see the same keys."""
+    out = []
+    for r in rows:
+        md = r["metadata"] or {}
+        own = r["canon_key"] or f"{r['source']}:{r['source_item_id']}"
+        if r["item_type"] == "series_episode":
+            key = r["parent_canon"] or r["parent_key"] or own
+            sub = own
+        else:
+            key = md.get("canon_key") or own
+            sub = None
+        out.append(
+            SignalEvent(
+                key=key,
+                item_type=r["item_type"],
+                action=r["action"],
+                action_weight=float(r["action_weight"] or 0.0),
+                timestamp=r["timestamp"],
+                source=r["source"],
+                progress_pct=r["progress_pct"],
+                metadata=md,
+                sub_key=sub,
+            )
+        )
+    return out

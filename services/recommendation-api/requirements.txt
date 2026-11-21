@@ -1,4 +1,10 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 asyncpg>=0.29
-qdrant-client>=1.9
+qdrant-client>=1.10
+numpy>=1.26
+scipy>=1.11
+httpx>=0.27
+# Only for ?mood= queries with a local embedder. Leave out to keep the image small; with
+# MUSE_EMBED_PROVIDER=openai the API calls your embedding server instead.
+# sentence-transformers>=3.3
