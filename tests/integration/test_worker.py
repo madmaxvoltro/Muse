@@ -1,9 +1,7 @@
 import asyncio
 import sys
-from pathlib import Path
 
 import asyncpg
-import pytest
 from qdrant_client import QdrantClient
 
 from conftest import ROOT, FakeEmbedder, _json_codecs

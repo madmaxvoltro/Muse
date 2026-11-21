@@ -1,8 +1,6 @@
 import asyncio
-import sys
 import uuid
 
-import pytest
 
 from conftest import use_service
 from fixtures import EXTERNAL_REC, USER_A, insert

@@ -1,7 +1,6 @@
 import asyncio
 import importlib
 import json
-import sys
 import uuid
 
 from conftest import use_service
