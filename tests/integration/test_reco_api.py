@@ -196,3 +196,47 @@ def test_question_queue_end_to_end(db_dsn, monkeypatch):
     assert statuses[qid] == "answered" and statuses[stale] == "expired"
     assert any(v.get("steer", 0) > 0.5 for v in prof2["evolution"]["interests"].values())
     assert dupes == 0  # a second worker cycle doesn't re-queue the same questions
+
+
+def test_status_page_and_secure_defaults(db_dsn, monkeypatch):
+    use_service("recommendation-api")
+    import httpx
+    from app import main
+    from app.engine import Engine
+
+    monkeypatch.setenv("MUSE_ALLOW_OPEN_READ", "false")
+    monkeypatch.setenv("MUSE_STATUS_TOKEN", "status-secret")
+    monkeypatch.setattr(main, "_READ_KEYS", {"read-secret": "vesper"})
+
+    async def go():
+        pool, qdrant, _ = await run_worker(db_dsn)
+        main._engine = Engine(pool, qdrant)
+        monkeypatch.setattr(main, "get_pool", lambda: _ret(pool))
+        out = {}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://t") as c:
+            out["no_key"] = (await c.get(f"/profile/{USER_A}")).status_code
+            out["bad_key"] = (await c.get(f"/profile/{USER_A}", headers={"X-Muse-Read-Key": "nope"})).status_code
+            out["good_key"] = (await c.get(f"/profile/{USER_A}", headers={"X-Muse-Read-Key": "read-secret"})).status_code
+            out["status_no_token"] = (await c.get("/status")).status_code
+            r = await c.get("/status?token=status-secret")
+            out["redirect"] = (r.status_code, r.headers.get("location"), r.headers.get("set-cookie", ""))
+            page = await c.get("/status", cookies={"muse_status": "status-secret"})
+            out["page"] = (page.status_code, page.text)
+            out["json"] = (await c.get("/status.json", cookies={"muse_status": "status-secret"})).json()
+            out["health"] = (await c.get("/healthz")).status_code
+        main._engine = None
+        await pool.close()
+        return out
+
+    async def _ret(v):
+        return v
+
+    out = asyncio.run(go())
+    assert out["no_key"] == 401 and out["bad_key"] == 401 and out["good_key"] == 200 and out["health"] == 200
+    assert out["status_no_token"] == 401
+    code, loc, cookie = out["redirect"]
+    assert code == 303 and "token" not in loc and "HttpOnly" in cookie
+    status_code, text = out["page"]
+    assert status_code == 200 and "Muse" in text
+    assert not any(s in text for s in ("Crime Film", "jf100", "tmdb:", "status-secret"))  # counts only
+    assert out["json"]["catalog"]["titles"] > 0 and out["json"]["profiles"] >= 1

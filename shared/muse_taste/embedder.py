@@ -132,6 +132,18 @@ def _auto_device() -> str:
     return "cpu"
 
 
+def _secret_from(env: dict[str, str], name: str) -> str | None:
+    """NAME_FILE (a Docker secret) wins over NAME."""
+    path = env.get(f"{name}_FILE")
+    if path:
+        try:
+            with open(path) as f:
+                return f.read().strip() or None
+        except FileNotFoundError:
+            return None
+    return env.get(name) or None
+
+
 def from_env(env: dict[str, str] | None = None) -> Embedder:
     env = dict(os.environ) if env is None else env
     provider = env.get("MUSE_EMBED_PROVIDER", "local").lower()
@@ -140,7 +152,7 @@ def from_env(env: dict[str, str] | None = None) -> Embedder:
     if provider in ("openai", "ollama", "vllm", "tei", "remote"):
         base = env.get("MUSE_EMBED_BASE_URL") or "http://ollama:11434/v1"
         require_private_or_allowed(base, env.get("MUSE_EMBED_ALLOW_EXTERNAL", "false"), what="embedding endpoint")
-        return OpenAICompatibleEmbedder(base, model, env.get("MUSE_EMBED_API_KEY"), dim, int(env.get("MUSE_EMBED_BATCH_SIZE", "64")))
+        return OpenAICompatibleEmbedder(base, model, (_secret_from(env, "MUSE_EMBED_API_KEY")), dim, int(env.get("MUSE_EMBED_BATCH_SIZE", "64")))
     return LocalEmbedder(
         model,
         device=env.get("MUSE_EMBED_DEVICE", "auto"),

@@ -27,8 +27,19 @@ from mcp_types import ToolAnnotations
 
 RECO_URL = os.environ.get("MUSE_RECO_URL", "http://recommendation-api:8001").rstrip("/")
 INGEST_URL = os.environ.get("MUSE_INGEST_URL", "http://ingestion-api:8000").rstrip("/")
-READ_KEY = os.environ.get("MUSE_READ_KEY", "")
-ANSWER_KEY = os.environ.get("MUSE_ANSWER_KEY", "")
+def _secret(name: str) -> str:
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return ""
+    return os.environ.get(name, "")
+
+
+READ_KEY = _secret("MUSE_READ_KEY")
+ANSWER_KEY = _secret("MUSE_ANSWER_KEY")
 DEFAULT_USER = os.environ.get("MUSE_MCP_USER_ID", "")
 
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)

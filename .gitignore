@@ -11,3 +11,8 @@ venv/
 .vscode/
 *.db
 build/
+
+# Muse secrets and backups: never commit
+secrets/
+*.muse-backup
+exports/

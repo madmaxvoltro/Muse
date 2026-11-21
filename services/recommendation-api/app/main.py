@@ -25,7 +25,7 @@ from muse_schema.config import key_list, secret
 from muse_schema.crypto import get_vault
 from qdrant_client import QdrantClient
 
-from . import questions
+from . import questions, status_page
 from . import soon_gone as soon_gone_repo
 from .db import close_pool, get_pool
 from .engine import TARGET_TYPES, Engine, Request as RecoRequest
@@ -94,6 +94,17 @@ app = FastAPI(title="Muse Recommendation API", version="0.2.0", dependencies=[De
 def _check_type(item_type: str) -> None:
     if item_type not in TARGET_TYPES:
         raise HTTPException(status_code=400, detail=f"item_type must be one of {ITEM_TYPES}")
+
+
+@app.get("/status", include_in_schema=False)
+async def status(request: Request):
+    """Read-only status page (counts only). ./muse status --url prints the link."""
+    return await status_page.page(request, await get_pool())
+
+
+@app.get("/status.json", include_in_schema=False)
+async def status_json():
+    return await status_page.page_json(await get_pool())
 
 
 @app.get("/healthz")

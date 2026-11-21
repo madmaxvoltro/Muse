@@ -43,7 +43,7 @@ QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 RUN_INTERVAL_SECONDS = int(os.environ.get("MUSE_EMBEDDING_INTERVAL_SECONDS", "300"))
 FULL_PROFILE_HOURS = int(os.environ.get("MUSE_FULL_PROFILE_HOURS", "24"))
 RANKER_FIT_HOURS = int(os.environ.get("MUSE_RANKER_FIT_HOURS", "24"))
-TMDB_CREDENTIAL = os.environ.get("TMDB_API_KEY") or os.environ.get("TMDB_READ_TOKEN")
+TMDB_CREDENTIAL = None  # read in main() from the TMDB_API_KEY(_FILE) secret
 TMDB_LANGUAGE = os.environ.get("MUSE_TMDB_LANGUAGE", "en-US")
 
 
@@ -137,7 +137,8 @@ async def main() -> None:
     qdrant = QdrantClient(url=QDRANT_URL, api_key=secret("MUSE_QDRANT_API_KEY") or None)
     pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=5, init=json_codecs)
     http = httpx.AsyncClient(timeout=20.0)
-    tmdb = TMDBClient(TMDB_CREDENTIAL, http, language=TMDB_LANGUAGE) if TMDB_CREDENTIAL else None
+    credential = secret("TMDB_API_KEY") or secret("TMDB_READ_TOKEN")
+    tmdb = TMDBClient(credential, http, language=TMDB_LANGUAGE) if credential else None
     if tmdb is None:
         logger.info("TMDB enrichment off (set TMDB_API_KEY): content understanding uses library metadata only")
     worker = Worker(pool, qdrant, embedder, llm, tmdb)

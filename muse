@@ -1,0 +1,828 @@
+#!/usr/bin/env python3
+"""muse: set up and run Muse. Needs only Python 3.9+ and Docker Compose v2 on the host.
+
+  ./muse setup            guided setup: checks, Jellyfin, hardware, secrets, start, verify
+  ./muse up | down | restart | logs [service]
+  ./muse status [--json] [--url]
+  ./muse doctor           find and explain problems
+  ./muse upgrade          pull, rebuild, restart (migrations run automatically)
+  ./muse keys             show the keys clients need (Vesper, Jellyfin plugin, MCP)
+  ./muse ca               print the TLS root certificate (lan/tailscale mode)
+  ./muse import KIND FILE --user ID [--profile NAME]
+  ./muse users
+  ./muse export-user ID [--out FILE]
+  ./muse forget-user ID
+  ./muse backup [--out FILE]
+  ./muse restore FILE
+  ./muse rotate-keys
+  ./muse rebuild
+
+Everything personal Muse stores is encrypted with the key in secrets/muse_master_key.
+Keep a copy of that file somewhere safe and separate from your backups.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import getpass
+import json
+import os
+import re
+import secrets
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SECRETS = ROOT / "secrets"
+ENV = ROOT / ".env"
+TTY = sys.stdout.isatty()
+
+SECRET_FILES = [
+    "muse_master_key", "postgres_password", "db_muse_ingest", "db_muse_reco", "db_muse_worker", "db_muse_curator",
+    "qdrant_api_key", "qdrant_read_key", "adapter_keys", "adapter_key_jellyfin", "adapter_key_arr", "adapter_key_searxng",
+    "read_keys", "status_token", "mcp_read_key", "mcp_answer_key", "tmdb_api_key", "jellyfin_api_key",
+    "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key",
+]
+
+
+# ---- output -------------------------------------------------------------------------------
+
+def _c(code: str, s: str) -> str:
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+def ok(msg: str) -> None:
+    print(f"  {_c('32', 'OK  ')} {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"  {_c('33', 'WARN')} {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"  {_c('31', 'FAIL')} {msg}")
+
+
+def step(msg: str) -> None:
+    print(f"\n{_c('1', msg)}")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(_c("31", f"error: {msg}"), file=sys.stderr)
+    sys.exit(code)
+
+
+def ask(prompt: str, default: str | None = None, secret: bool = False, choices: list[str] | None = None) -> str:
+    if not sys.stdin.isatty():
+        if default is None:
+            die(f"'{prompt}' needs an answer (run interactively or pass it as an option)")
+        return default
+    suffix = f" [{default}]" if default and not secret else ""
+    while True:
+        val = getpass.getpass(f"  {prompt}: ") if secret else input(f"  {prompt}{suffix}: ")
+        val = val.strip() or (default or "")
+        if choices and val not in choices:
+            print(f"    choose one of: {', '.join(choices)}")
+            continue
+        return val
+
+
+def yes(prompt: str, default: bool = True) -> bool:
+    d = "Y/n" if default else "y/N"
+    if not sys.stdin.isatty():
+        return default
+    v = input(f"  {prompt} [{d}]: ").strip().lower()
+    return default if not v else v.startswith("y")
+
+
+# ---- docker -------------------------------------------------------------------------------
+
+def compose(*args: str, check: bool = True, capture: bool = False, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+    cmd = ["docker", "compose", *args]
+    return subprocess.run(cmd, cwd=ROOT, check=check, capture_output=capture, input=input_bytes)
+
+
+def admin(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
+    return compose("run", "--rm", "--no-deps", "-T", "admin", *args, check=False, capture=capture)
+
+
+def env_values() -> dict[str, str]:
+    out: dict[str, str] = {}
+    if ENV.exists():
+        for line in ENV.read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.split(" #", 1)[0].strip()
+    return out
+
+
+def read_secret(name: str) -> str:
+    p = SECRETS / name
+    return p.read_text().strip() if p.exists() else ""
+
+
+def first_key(name: str, client: str) -> str:
+    for line in read_secret(name).splitlines():
+        if line.startswith(f"{client}:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+# ---- secrets ------------------------------------------------------------------------------
+
+def _token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _key_file() -> str:
+    return (
+        "# Muse master key file. Keep it secret and back it up separately from your data:\n"
+        "# without it the stored data cannot be read, by anyone, including you.\n"
+        f"idx:{base64.b64encode(secrets.token_bytes(32)).decode()}\n"
+        f"k1:{base64.b64encode(secrets.token_bytes(32)).decode()}\n"
+    )
+
+
+def _write_secret(name: str, value: str, overwrite: bool = False) -> bool:
+    p = SECRETS / name
+    if p.exists() and not overwrite:
+        return False
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(value if value.endswith("\n") or not value else value + "\n")
+    # The directory is 0700 (nobody else on the host can reach these files); the files are
+    # world-readable *inside* it because containers run as an unprivileged uid that must read
+    # its bind-mounted secret.
+    os.chmod(tmp, 0o644)
+    tmp.replace(p)
+    return True
+
+
+def ensure_secrets(provided: dict[str, str]) -> list[str]:
+    """Creates every missing secret; never overwrites an existing one (above all the master
+    key: a new key would make all stored data unreadable). `provided` = credentials you typed."""
+    SECRETS.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(SECRETS, 0o700)
+    created = []
+    gen = {
+        "muse_master_key": _key_file(),
+        "postgres_password": _token(),
+        "db_muse_ingest": _token(),
+        "db_muse_reco": _token(),
+        "db_muse_worker": _token(),
+        "db_muse_curator": _token(),
+        "qdrant_api_key": _token(),
+        "qdrant_read_key": _token(),
+        "adapter_key_jellyfin": _token(),
+        "adapter_key_arr": _token(),
+        "adapter_key_searxng": _token(),
+        "status_token": _token(),
+        "mcp_read_key": _token(),
+        "mcp_answer_key": _token(),
+    }
+    for name, value in gen.items():
+        if _write_secret(name, value):
+            created.append(name)
+    for name in ("tmdb_api_key", "jellyfin_api_key", "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key"):
+        if name in provided:
+            _write_secret(name, provided[name], overwrite=True)
+        elif not (SECRETS / name).exists():
+            _write_secret(name, "")
+    if not (SECRETS / "adapter_keys").exists():
+        keys = (f"jellyfin:{read_secret('adapter_key_jellyfin')}\narr:{read_secret('adapter_key_arr')}\n"
+                f"searxng:{read_secret('adapter_key_searxng')}\nmuse:{_token()}\nmuse:{read_secret('mcp_answer_key')}\nimport:{_token()}\n")
+        _write_secret("adapter_keys", keys)
+        created.append("adapter_keys")
+    if not (SECRETS / "read_keys").exists():
+        _write_secret("read_keys", f"vesper:{_token()}\njellyfin-plugin:{_token()}\nmcp:{read_secret('mcp_read_key')}\n")
+        created.append("read_keys")
+    if not (SECRETS / "qdrant.yaml").exists():
+        _write_secret("qdrant.yaml", (
+            "service:\n"
+            f"  api_key: \"{read_secret('qdrant_api_key')}\"\n"
+            f"  read_only_api_key: \"{read_secret('qdrant_read_key')}\"\n"
+            "telemetry_disabled: true\n"
+        ))
+        created.append("qdrant.yaml")
+    return created
+
+
+# ---- detection ----------------------------------------------------------------------------
+
+def mem_gb() -> float:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) / 1024 / 1024
+    except OSError:
+        pass
+    return 0.0
+
+
+def has_nvidia() -> bool:
+    return shutil.which("nvidia-smi") is not None and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
+
+
+def local_timezone() -> str:
+    if os.environ.get("TZ"):
+        return os.environ["TZ"]
+    for cmd in (["timedatectl", "show", "-p", "Timezone", "--value"],):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout.strip()
+            if out:
+                return out
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        return Path("/etc/timezone").read_text().strip() or "UTC"
+    except OSError:
+        pass
+    try:
+        link = os.readlink("/etc/localtime")
+        return link.split("zoneinfo/", 1)[1]
+    except (OSError, IndexError):
+        return "UTC"
+
+
+def lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))  # no packet is sent
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def tailscale_identity() -> tuple[str, str] | None:
+    if not shutil.which("tailscale"):
+        return None
+    try:
+        st = json.loads(subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5).stdout)
+        ip = (st.get("Self", {}).get("TailscaleIPs") or [None])[0]
+        name = (st.get("Self", {}).get("DNSName") or "").rstrip(".")
+        return (ip, name or ip) if ip else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def _private_host(host: str) -> bool:
+    """LAN, loopback, Tailscale, single-label (docker service) names. Mirrors muse_taste.privacy."""
+    import ipaddress
+
+    if not host or host == "localhost" or "." not in host or host.endswith((".local", ".lan", ".home", ".internal", ".ts.net")):
+        return bool(host)
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return False
+
+
+def http_json(url: str, headers: dict | None = None, timeout: float = 8.0) -> tuple[int, object]:
+    req = urllib.request.Request(url, headers={"Accept": "application/json", **(headers or {})})
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            body = r.read()
+            return r.status, json.loads(body) if body else None
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, None
+
+
+def check_jellyfin(url: str, key: str) -> tuple[bool, str]:
+    code, info = http_json(f"{url.rstrip('/')}/System/Info", {"X-Emby-Token": key})
+    if code == 200 and isinstance(info, dict):
+        code_u, users = http_json(f"{url.rstrip('/')}/Users", {"X-Emby-Token": key})
+        n = len(users) if isinstance(users, list) else "?"
+        return True, f"{info.get('ServerName', 'Jellyfin')} {info.get('Version', '')}, {n} users"
+    if code in (401, 403):
+        return False, "Jellyfin rejected the API key (Dashboard > API Keys > +)"
+    return False, f"can't reach Jellyfin at {url} (is the URL right, and reachable from this machine?)"
+
+
+def check_tmdb(key: str) -> bool:
+    if key.startswith("eyJ"):
+        code, _ = http_json("https://api.themoviedb.org/3/configuration", {"Authorization": f"Bearer {key}"})
+    else:
+        code, _ = http_json(f"https://api.themoviedb.org/3/configuration?api_key={urllib.parse.quote(key)}")
+    return code == 200
+
+
+# ---- setup --------------------------------------------------------------------------------
+
+def preflight() -> None:
+    step("1/7  Checking this machine")
+    if not shutil.which("docker"):
+        die("Docker is not installed: https://docs.docker.com/engine/install/")
+    r = subprocess.run(["docker", "compose", "version", "--short"], capture_output=True, text=True)
+    if r.returncode != 0:
+        die("Docker Compose v2 is missing (the `docker compose` plugin)")
+    ok(f"Docker Compose {r.stdout.strip()}")
+    gb = mem_gb()
+    (ok if gb >= 8 else warn)(f"{gb:.0f} GB RAM" + ("" if gb >= 8 else " (8+ GB recommended)"))
+    free = shutil.disk_usage(ROOT).free / 1e9
+    (ok if free >= 15 else warn)(f"{free:.0f} GB free disk" + ("" if free >= 15 else " (15+ GB recommended for images and models)"))
+    if has_nvidia():
+        ok("NVIDIA GPU found")
+
+
+def cmd_setup(a: argparse.Namespace) -> None:
+    print(_c("1", "Muse setup") + "  (Enter accepts the default; you can re-run this any time, existing keys are kept)")
+    preflight()
+    env = env_values()
+    provided: dict[str, str] = {}
+
+    step("2/7  How will Muse be reached?")
+    print("    local      Jellyfin/Vesper run on this same machine (most private: nothing on the network can reach Muse)")
+    print("    lan        other machines on your network connect (HTTPS with Muse's own certificate)")
+    print("    tailscale  other machines connect over Tailscale (HTTPS on your tailnet address)")
+    mode = a.mode or ask("mode", env.get("MUSE_MODE", "local"), choices=["local", "lan", "tailscale"])
+    tls_host = tls_bind = ""
+    if mode == "lan":
+        tls_bind = tls_host = ask("address other machines use for this host", env.get("MUSE_TLS_HOST") or lan_ip())
+    elif mode == "tailscale":
+        ident = tailscale_identity()
+        if not ident:
+            warn("Tailscale isn't running here; install it or pick another mode")
+        ip, name = ident or ("", "")
+        tls_bind = ask("Tailscale IP to listen on", env.get("MUSE_TLS_BIND") or ip)
+        tls_host = ask("name clients use", env.get("MUSE_TLS_HOST") or name or ip)
+    ok(f"mode: {mode}")
+
+    step("3/7  Jellyfin")
+    jf_url = a.jellyfin_url or ask("Jellyfin URL", env.get("JELLYFIN_URL", "http://127.0.0.1:8096"))
+    jf_key = a.jellyfin_key or read_secret("jellyfin_api_key") or ask("Jellyfin API key (Dashboard > API Keys > +)", secret=True)
+    good, msg = check_jellyfin(jf_url, jf_key)
+    (ok if good else warn)(msg)
+    if not good and sys.stdin.isatty() and not yes("continue anyway?", default=False):
+        die("fix the Jellyfin URL/key and run ./muse setup again")
+    provided["jellyfin_api_key"] = jf_key
+    jf_local = urllib.parse.urlparse(jf_url).hostname in ("127.0.0.1", "localhost", "::1")
+
+    step("4/7  Content understanding (TMDB, optional but recommended)")
+    print("    A free TMDB key adds keywords, cast and 'fans also liked' to every title. TMDB only sees which")
+    print("    titles are looked up, never who watched what. https://www.themoviedb.org/settings/api")
+    tmdb = a.tmdb_key if a.tmdb_key is not None else (read_secret("tmdb_api_key") or ask("TMDB API key or read token (Enter to skip)", "", secret=True))
+    if tmdb:
+        works = check_tmdb(tmdb)
+        (ok if works else warn)("TMDB key works" if works else "TMDB rejected the key (saved anyway; fix later with ./muse setup)")
+    else:
+        warn("no TMDB key: recommendations use library metadata only")
+    provided["tmdb_api_key"] = tmdb
+
+    step("5/7  Models")
+    gpu, gb = has_nvidia(), mem_gb()
+    ollama = env.get("MUSE_EMBED_BASE_URL", "")
+    if gpu:
+        model, device, note = "Qwen/Qwen3-Embedding-0.6B", "cuda", "GPU"
+    elif gb >= 12:
+        model, device, note = "Qwen/Qwen3-Embedding-0.6B", "cpu", "CPU, strong multilingual model"
+    else:
+        model, device, note = "intfloat/multilingual-e5-small", "cpu", "CPU, light multilingual model for low memory"
+    ok(f"embeddings: {model} ({note})")
+    use_llm = env.get("MUSE_LLM_PROVIDER", "none")
+    if sys.stdin.isatty() and not a.yes:
+        print("    Optional LLM for tone descriptors, interest names and a taste summary:")
+        print("    none | ollama | vllm | openai (any OpenAI-compatible server) | anthropic (Claude; leaves your network)")
+        use_llm = ask("LLM provider", use_llm, choices=["none", "ollama", "vllm", "lmstudio", "openai", "openrouter", "anthropic"])
+    llm_base = env.get("MUSE_LLM_BASE_URL", "")
+    llm_model = env.get("MUSE_LLM_MODEL", "")
+    llm_external = "false"
+    if use_llm not in ("none", ""):
+        if use_llm in ("ollama", "vllm", "lmstudio", "openai", "openrouter"):
+            llm_base = ask("LLM base URL", llm_base or {"ollama": "http://ollama:11434/v1", "vllm": "http://vllm:8000/v1"}.get(use_llm, ""))
+        llm_model = ask("model", llm_model or ("qwen3:8b" if use_llm == "ollama" else "claude-opus-5-5" if use_llm == "anthropic" else ""))
+        if use_llm in ("anthropic", "openrouter") or not _private_host(urllib.parse.urlparse(llm_base).hostname or ""):
+            warn("this LLM is outside your network: titles (and, unless you disable personal tasks, your taste) are sent to it")
+            llm_external = "true" if yes("allow that?", default=False) else "false"
+        key = ask("LLM API key (Enter if none)", "", secret=True) if use_llm != "ollama" else ""
+        if key:
+            provided["llm_api_key"] = key
+    tz = env.get("MUSE_TIMEZONE") or local_timezone()
+    ok(f"timezone for taste rhythms: {tz}")
+
+    step("6/7  Secrets and configuration")
+    created = ensure_secrets(provided)
+    ok(f"secrets in {SECRETS} ({len(created)} created, existing ones kept)")
+    compose_files = ["docker-compose.yml"]
+    if mode == "local" and jf_local:
+        compose_files.append("docker-compose.vesper.yml")
+    if gpu:
+        compose_files.append("docker-compose.gpu.yml")
+    profiles = ["tls"] if mode in ("lan", "tailscale") else []
+    values = {
+        "MUSE_MODE": mode,
+        "COMPOSE_FILE": ":".join(compose_files),
+        "COMPOSE_PROFILES": ",".join(profiles),
+        "MUSE_BIND": "127.0.0.1",
+        "MUSE_RECO_PORT": env.get("MUSE_RECO_PORT", "8770"),
+        "MUSE_INGEST_PORT": env.get("MUSE_INGEST_PORT", "8771"),
+        "MUSE_TLS_HOST": tls_host,
+        "MUSE_TLS_BIND": tls_bind or "127.0.0.1",
+        "MUSE_TLS_PORT": env.get("MUSE_TLS_PORT", "8443"),
+        "JELLYFIN_URL": jf_url,
+        "MUSE_EMBED_PROVIDER": "openai" if ollama else "local",
+        "MUSE_EMBEDDING_MODEL": env.get("MUSE_EMBEDDING_MODEL", model),
+        "MUSE_EMBED_DEVICE": device,
+        "MUSE_EMBED_BASE_URL": ollama,
+        "MUSE_LLM_PROVIDER": use_llm or "none",
+        "MUSE_LLM_BASE_URL": llm_base,
+        "MUSE_LLM_MODEL": llm_model,
+        "MUSE_LLM_ALLOW_EXTERNAL": llm_external,
+        "MUSE_TIMEZONE": tz,
+        "MUSE_TMDB_LANGUAGE": env.get("MUSE_TMDB_LANGUAGE", "en-US"),
+    }
+    keep = {k: v for k, v in env.items() if k not in values}
+    if ENV.exists():
+        shutil.copy(ENV, ENV.with_name(".env.bak"))
+    ENV.write_text("# Written by ./muse setup (secrets live in ./secrets, not here)\n" +
+                   "".join(f"{k}={v}\n" for k, v in {**values, **keep}.items()))
+    os.chmod(ENV, 0o600)
+    ok(f"configuration in {ENV}")
+
+    step("7/7  Starting Muse")
+    if a.no_start:
+        ok("skipped (--no-start); run ./muse up")
+    else:
+        build_args = ["--build-arg", "TORCH_INDEX=https://download.pytorch.org/whl/cu124"] if gpu else []
+        print("    building images (the first time takes a while: Python packages and PyTorch)...")
+        compose("build", *build_args)
+        compose("up", "-d")
+        wait_healthy()
+    summary(mode, tls_host)
+
+
+def wait_healthy(timeout: int = 600) -> None:
+    deadline = time.time() + timeout
+    want = {"ingestion-api", "recommendation-api"}
+    while time.time() < deadline:
+        states = service_states()
+        healthy = {s for s, st in states.items() if st.get("Health") == "healthy" or (st.get("State") == "running" and not st.get("Health"))}
+        if want <= healthy:
+            ok("APIs are up")
+            r = admin("status")
+            if r.returncode == 0:
+                ok("database migrated and reachable")
+            return
+        bad = [s for s, st in states.items() if st.get("State") in ("exited", "dead") and s != "admin"]
+        if bad:
+            fail(f"stopped: {', '.join(bad)}. See: ./muse logs {bad[0]}")
+            return
+        time.sleep(3)
+    warn("still starting; check ./muse status in a minute")
+
+
+def service_states() -> dict[str, dict]:
+    r = compose("ps", "--all", "--format", "json", check=False, capture=True)
+    out: dict[str, dict] = {}
+    text = (r.stdout or b"").decode().strip()
+    if not text:
+        return out
+    items = json.loads(text) if text.startswith("[") else [json.loads(l) for l in text.splitlines() if l.strip()]
+    for it in items:
+        out[it.get("Service")] = it
+    return out
+
+
+def base_url() -> str:
+    env = env_values()
+    if env.get("MUSE_MODE") in ("lan", "tailscale") and env.get("MUSE_TLS_HOST"):
+        return f"https://{env['MUSE_TLS_HOST']}:{env.get('MUSE_TLS_PORT', '8443')}"
+    return ""
+
+
+def summary(mode: str, tls_host: str) -> None:
+    env = env_values()
+    if mode in ("lan", "tailscale"):
+        reco = f"{base_url()}/reco"
+        ingest = f"{base_url()}/ingest"
+    else:
+        reco = f"http://127.0.0.1:{env.get('MUSE_RECO_PORT', '8770')}"
+        ingest = f"http://127.0.0.1:{env.get('MUSE_INGEST_PORT', '8771')}"
+    step("Done. Connect your clients:")
+    print(f"    Recommendation API   {reco}")
+    print(f"    Ingestion API        {ingest}")
+    print(f"    Vesper               read key: {first_key('read_keys', 'vesper')}")
+    print(f"                         answer key: {first_key('adapter_keys', 'muse')}")
+    print(f"    Jellyfin plugin      read key: {first_key('read_keys', 'jellyfin-plugin')}")
+    print(f"    Status page          {reco}/status?token={read_secret('status_token')}")
+    if mode in ("lan", "tailscale"):
+        print("    TLS                  clients must trust Muse's certificate: ./muse ca > muse-ca.crt")
+    print("\n    Next: import history (./muse import letterboxd export.zip --user <id>), watch ./muse status.")
+    print(_c("33", "    Back up secrets/muse_master_key somewhere safe (password manager, USB stick). Without it,"))
+    print(_c("33", "    nobody can read Muse's data, including you."))
+
+
+# ---- day-2 commands --------------------------------------------------------------------------
+
+def need_setup() -> None:
+    if not (SECRETS / "muse_master_key").exists() or not ENV.exists():
+        die("Muse isn't set up yet: run ./muse setup")
+
+
+def cmd_up(a) -> None:
+    need_setup()
+    compose("up", "-d", "--build")
+    wait_healthy()
+
+
+def cmd_down(a) -> None:
+    compose("down")
+
+
+def cmd_restart(a) -> None:
+    compose("restart", *a.services)
+
+
+def cmd_logs(a) -> None:
+    compose("logs", "--tail", "200", "-f", *a.services, check=False)
+
+
+def cmd_status(a) -> None:
+    need_setup()
+    if a.url:
+        env = env_values()
+        root = f"{base_url()}/reco" if base_url() else f"http://127.0.0.1:{env.get('MUSE_RECO_PORT', '8770')}"
+        print(f"{root}/status?token={read_secret('status_token')}")
+        return
+    if not a.json:
+        step("Services")
+        for svc, st in sorted(service_states().items()):
+            health = st.get("Health") or st.get("State")
+            (ok if health in ("healthy", "running") or (svc == "admin" and st.get("ExitCode") == 0) else fail)(f"{svc:<20} {st.get('Status', health)}")
+        step("Muse")
+    r = admin("status", *(["--json"] if a.json else []), capture=False)
+    sys.exit(r.returncode)
+
+
+def cmd_doctor(a) -> None:
+    problems = 0
+
+    def bad(msg: str) -> None:
+        nonlocal problems
+        problems += 1
+        fail(msg)
+
+    step("Setup")
+    if not SECRETS.exists():
+        bad("no secrets: run ./muse setup")
+    else:
+        mode = SECRETS.stat().st_mode & 0o777
+        (ok if mode == 0o700 else bad)(f"secrets directory permissions {oct(mode)}" + ("" if mode == 0o700 else " (run: chmod 700 secrets)"))
+        missing = [f for f in SECRET_FILES + ["qdrant.yaml"] if not (SECRETS / f).exists()]
+        (ok if not missing else bad)("all secret files present" if not missing else f"missing secrets: {', '.join(missing)} (./muse setup fills them in)")
+        mk = read_secret("muse_master_key")
+        (ok if "idx:" in mk and re.search(r"^k\d+:", mk, re.M) else bad)("master key file valid" if "idx:" in mk else "master key file malformed")
+    env = env_values()
+    (ok if env else bad)(".env present" if env else ".env missing: run ./muse setup")
+    if env.get("MUSE_BIND", "127.0.0.1") not in ("127.0.0.1", "::1", "localhost"):
+        bad(f"MUSE_BIND={env.get('MUSE_BIND')}: the APIs should only listen on localhost (use the tls profile for other machines)")
+
+    step("Containers")
+    states = service_states()
+    if not states:
+        bad("nothing running: ./muse up")
+    for svc, st in sorted(states.items()):
+        if svc == "admin":
+            (ok if st.get("ExitCode") == 0 else bad)(f"migrations {'done' if st.get('ExitCode') == 0 else 'failed: ./muse logs admin'}")
+            continue
+        health = st.get("Health") or st.get("State")
+        (ok if health in ("healthy", "running") else bad)(f"{svc}: {st.get('Status', health)}")
+        for pub in st.get("Publishers") or []:
+            if pub.get("PublishedPort") and pub.get("URL") in ("0.0.0.0", "::"):
+                bad(f"{svc} is published on all interfaces ({pub.get('URL')}:{pub.get('PublishedPort')})")
+
+    step("Muse")
+    r = admin("status", "--json")
+    if r.returncode == 0:
+        st = json.loads(r.stdout.decode())
+        mig = st.get("migrations") or []
+        (ok if "010_operations.sql" in mig else bad)(f"{len(mig)} migrations applied")
+        last = st["worker"].get("last_cycle_at")
+        (ok if last else warn)(f"worker last cycle: {last or 'not yet (first cycles download the model; give it a few minutes)'}")
+        cat = st["catalog"]
+        ok(f"catalog: {cat['titles']} titles, {cat['embedded']} embedded, {cat['waiting_for_embedding']} waiting")
+        if st["events"]["total"] == 0:
+            warn("no events yet: is the Jellyfin adapter running? ./muse logs jellyfin-adapter")
+    else:
+        bad("admin status failed: ./muse logs admin")
+
+    step("Connections")
+    if env.get("JELLYFIN_URL"):
+        good, msg = check_jellyfin(env["JELLYFIN_URL"], read_secret("jellyfin_api_key"))
+        (ok if good else bad)(msg)
+    if read_secret("tmdb_api_key"):
+        works = check_tmdb(read_secret("tmdb_api_key"))
+        (ok if works else bad)("TMDB key " + ("works" if works else "rejected"))
+    free = shutil.disk_usage(ROOT).free / 1e9
+    (ok if free > 5 else bad)(f"{free:.0f} GB free disk")
+    print()
+    print(_c("32", "No problems found.") if not problems else _c("31", f"{problems} problem(s) found."))
+    sys.exit(1 if problems else 0)
+
+
+def cmd_upgrade(a) -> None:
+    need_setup()
+    if (ROOT / ".git").exists():
+        subprocess.run(["git", "pull", "--ff-only"], cwd=ROOT, check=True)
+    compose("build", "--pull")
+    compose("up", "-d")
+    wait_healthy()
+
+
+def cmd_keys(a) -> None:
+    need_setup()
+    print(f"Vesper read key          {first_key('read_keys', 'vesper')}")
+    print(f"Vesper answer key        {first_key('adapter_keys', 'muse')}")
+    print(f"Jellyfin plugin read key {first_key('read_keys', 'jellyfin-plugin')}")
+    print(f"History import key       {first_key('adapter_keys', 'import')}")
+    print(f"MCP server               read: {read_secret('mcp_read_key')}  answer: {read_secret('mcp_answer_key')}")
+    print(f"Status token             {read_secret('status_token')}")
+
+
+def cmd_ca(a) -> None:
+    r = compose("exec", "-T", "tls-proxy", "cat", "/data/caddy/pki/authorities/local/root.crt", check=False, capture=True)
+    if r.returncode != 0:
+        die("no TLS proxy running (only in lan/tailscale mode, after the first HTTPS request)")
+    sys.stdout.write(r.stdout.decode())
+
+
+def cmd_import(a) -> None:
+    need_setup()
+    env = env_values()
+    url = f"{base_url()}/ingest" if base_url() else f"http://127.0.0.1:{env.get('MUSE_INGEST_PORT', '8771')}"
+    params = {"user_id": a.user, "filename": Path(a.file).name}
+    if a.profile:
+        params["profile"] = a.profile
+    data = Path(a.file).read_bytes()
+    req = urllib.request.Request(f"{url}/import/{a.kind}?{urllib.parse.urlencode(params)}", data=data, method="POST",
+                                 headers={"X-Muse-Api-Key": first_key("adapter_keys", "import"), "Content-Type": "application/octet-stream"})
+    try:
+        with urllib.request.urlopen(req, timeout=900, context=ssl.create_default_context()) as r:
+            print(json.dumps(json.loads(r.read()), indent=2))
+    except urllib.error.HTTPError as e:
+        die(f"{e.code}: {e.read().decode(errors='replace')}")
+
+
+def cmd_users(a) -> None:
+    need_setup()
+    sys.exit(admin("users", capture=False).returncode)
+
+
+def cmd_export_user(a) -> None:
+    need_setup()
+    r = admin("export-user", a.user_id)
+    if r.returncode != 0:
+        die(r.stderr.decode())
+    out = Path(a.out or f"muse-export-{a.user_id}.json")
+    out.touch(mode=0o600)
+    out.write_bytes(r.stdout)
+    os.chmod(out, 0o600)
+    ok(f"everything Muse holds about {a.user_id}, decrypted: {out} (keep it private)")
+
+
+def cmd_forget_user(a) -> None:
+    need_setup()
+    if not a.yes and not yes(f"permanently delete everything about {a.user_id}?", default=False):
+        return
+    sys.exit(admin("forget-user", a.user_id, "--yes", capture=False).returncode)
+
+
+def cmd_backup(a) -> None:
+    need_setup()
+    out = Path(a.out or time.strftime("muse-%Y%m%d-%H%M%S.muse-backup"))
+    dump = subprocess.Popen(
+        ["docker", "compose", "exec", "-T", "postgres", "sh", "-c",
+         'PGPASSWORD="$(cat /run/secrets/postgres_password)" pg_dump -h 127.0.0.1 -U muse -Fc muse'],
+        cwd=ROOT, stdout=subprocess.PIPE,
+    )
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        enc = subprocess.run(["docker", "compose", "run", "--rm", "--no-deps", "-T", "admin", "encrypt-stream"],
+                             cwd=ROOT, stdin=dump.stdout, stdout=f)
+    dump.wait()
+    if dump.returncode or enc.returncode:
+        out.unlink(missing_ok=True)
+        die("backup failed")
+    ok(f"encrypted backup: {out} ({out.stat().st_size / 1e6:.1f} MB). Restoring needs secrets/muse_master_key.")
+
+
+def cmd_restore(a) -> None:
+    need_setup()
+    if not a.yes and not yes(f"replace the current database with {a.file}?", default=False):
+        return
+    src = open(a.file, "rb")
+    dec = subprocess.Popen(["docker", "compose", "run", "--rm", "--no-deps", "-T", "admin", "decrypt-stream"], cwd=ROOT, stdin=src, stdout=subprocess.PIPE)
+    restore = subprocess.run(
+        ["docker", "compose", "exec", "-T", "postgres", "sh", "-c",
+         'PGPASSWORD="$(cat /run/secrets/postgres_password)" pg_restore -h 127.0.0.1 -U muse -d muse --clean --if-exists --no-owner'],
+        cwd=ROOT, stdin=dec.stdout,
+    )
+    dec.wait()
+    if dec.returncode:
+        die("could not decrypt the backup (wrong key file?)")
+    admin("migrate", capture=False)
+    admin("rebuild", "--yes", capture=False)
+    compose("restart", "embedding-worker", "recommendation-api", check=False)
+    (ok if restore.returncode == 0 else warn)("restored; the worker rebuilds vectors and profiles over the next cycles")
+
+
+def cmd_rotate_keys(a) -> None:
+    need_setup()
+    text = read_secret("muse_master_key")
+    lines = [l for l in text.splitlines() if l.strip()]
+    kids = [int(l.split(":", 1)[0][1:]) for l in lines if re.match(r"^k\d+:", l)]
+    new_kid = f"k{max(kids) + 1}"
+    new = f"{new_kid}:{base64.b64encode(secrets.token_bytes(32)).decode()}"
+    comments = [l for l in lines if l.startswith("#")]
+    idx = [l for l in lines if l.startswith("idx:")]
+    rest = [l for l in lines if re.match(r"^k\d+:", l)]
+    shutil.copy(SECRETS / "muse_master_key", SECRETS / f"muse_master_key.before-{new_kid}")
+    os.chmod(SECRETS / f"muse_master_key.before-{new_kid}", 0o600)
+    _write_secret("muse_master_key", "\n".join(comments + idx + [new] + rest) + "\n", overwrite=True)
+    ok(f"new encryption key {new_kid}; old keys stay in the file so old backups remain readable")
+    compose("up", "-d", "--force-recreate", check=False)
+    r = admin("reseal", capture=False)
+    (ok if r.returncode == 0 else fail)("all stored data re-encrypted with the new key" if r.returncode == 0 else "reseal failed: ./muse logs admin")
+
+
+def cmd_rebuild(a) -> None:
+    need_setup()
+    if not a.yes and not yes("drop the catalog, profiles and vectors and rebuild them from events?", default=False):
+        return
+    admin("rebuild", "--yes", capture=False)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="muse", description="Set up and run Muse.", formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("setup", help="guided setup")
+    s.add_argument("--mode", choices=["local", "lan", "tailscale"])
+    s.add_argument("--jellyfin-url")
+    s.add_argument("--jellyfin-key")
+    s.add_argument("--tmdb-key")
+    s.add_argument("--no-start", action="store_true")
+    s.add_argument("--yes", action="store_true", help="accept defaults")
+    s.set_defaults(fn=cmd_setup)
+    for name, fn in (("up", cmd_up), ("down", cmd_down), ("doctor", cmd_doctor), ("upgrade", cmd_upgrade), ("keys", cmd_keys),
+                     ("ca", cmd_ca), ("users", cmd_users), ("rotate-keys", cmd_rotate_keys)):
+        sub.add_parser(name).set_defaults(fn=fn)
+    for name, fn in (("restart", cmd_restart), ("logs", cmd_logs)):
+        p = sub.add_parser(name)
+        p.add_argument("services", nargs="*")
+        p.set_defaults(fn=fn)
+    p = sub.add_parser("status")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--url", action="store_true", help="print the status page URL")
+    p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("import")
+    p.add_argument("kind", choices=["youtube", "spotify", "soundcloud", "letterboxd", "imdb", "netflix", "trakt"])
+    p.add_argument("file")
+    p.add_argument("--user", required=True)
+    p.add_argument("--profile")
+    p.set_defaults(fn=cmd_import)
+    p = sub.add_parser("export-user")
+    p.add_argument("user_id")
+    p.add_argument("--out")
+    p.set_defaults(fn=cmd_export_user)
+    for name, fn in (("forget-user", cmd_forget_user),):
+        p = sub.add_parser(name)
+        p.add_argument("user_id")
+        p.add_argument("--yes", action="store_true")
+        p.set_defaults(fn=fn)
+    p = sub.add_parser("backup")
+    p.add_argument("--out")
+    p.set_defaults(fn=cmd_backup)
+    p = sub.add_parser("restore")
+    p.add_argument("file")
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(fn=cmd_restore)
+    p = sub.add_parser("rebuild")
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(fn=cmd_rebuild)
+    a = ap.parse_args()
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
+    except BrokenPipeError:  # e.g. ./muse keys | head
+        sys.exit(0)
+    except subprocess.CalledProcessError as e:
+        die(f"command failed: {' '.join(e.cmd)}")
+
+
+if __name__ == "__main__":
+    main()

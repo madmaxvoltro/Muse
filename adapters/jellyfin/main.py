@@ -40,9 +40,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("muse.jellyfin_adapter")
 
 JELLYFIN_URL = os.environ["JELLYFIN_URL"].rstrip("/")
-JELLYFIN_API_KEY = os.environ["JELLYFIN_API_KEY"]
+def _secret(name: str, default: str = "") -> str:
+    """NAME_FILE (a Docker secret) wins over NAME; secrets don't belong in environment variables."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        with open(path) as f:
+            return f.read().strip()
+    return os.environ.get(name, default)
+
+
+JELLYFIN_API_KEY = _secret("JELLYFIN_API_KEY")
 INGESTION_URL = os.environ["MUSE_INGESTION_URL"]
-ADAPTER_KEY = os.environ["MUSE_ADAPTER_KEY"]
+ADAPTER_KEY = _secret("MUSE_ADAPTER_KEY")
 
 CATALOG_SYNC_INTERVAL_SECONDS = int(os.environ.get("MUSE_CATALOG_SYNC_INTERVAL_SECONDS", "86400"))
 WATCH_POLL_INTERVAL_SECONDS = int(os.environ.get("MUSE_WATCH_POLL_INTERVAL_SECONDS", "300"))

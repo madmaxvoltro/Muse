@@ -30,7 +30,7 @@ services:
     profiles: [llm]
     restart: unless-stopped
     volumes: [ollama_data:/root/.ollama]
-    networks: [muse-net]
+    networks: [data, egress]  # worker reaches it on `data`; model pulls need egress
 
 volumes:
   ollama_data:

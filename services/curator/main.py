@@ -53,8 +53,8 @@ ADD_REMOVE_CYCLE_INTERVAL_SECONDS = int(os.environ.get("MUSE_CURATOR_CYCLE_INTER
 
 ITEM_TYPES = ["movie", "series_episode"]  # arr-side types: Radarr movies, Sonarr series
 
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY") or os.environ.get("TMDB_READ_TOKEN")
-TRAKT_CLIENT_ID = os.environ.get("TRAKT_CLIENT_ID")
+TMDB_API_KEY = secret("TMDB_API_KEY") or secret("TMDB_READ_TOKEN")
+TRAKT_CLIENT_ID = secret("TRAKT_CLIENT_ID")
 
 
 async def run_soon_gone_expiry(pool: asyncpg.Pool, arr_client: httpx.AsyncClient, arr_config: ArrConfig) -> None:

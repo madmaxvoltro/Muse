@@ -129,6 +129,18 @@ class AnthropicLLM:
         return parse_json_object(text)
 
 
+def _secret_from(env: dict[str, str], name: str) -> str | None:
+    """NAME_FILE (a Docker secret) wins over NAME."""
+    path = env.get(f"{name}_FILE")
+    if path:
+        try:
+            with open(path) as f:
+                return f.read().strip() or None
+        except FileNotFoundError:
+            return None
+    return env.get(name) or None
+
+
 def from_env(env: dict[str, str] | None = None) -> LLM | None:
     env = dict(os.environ) if env is None else env
     provider = env.get("MUSE_LLM_PROVIDER", "none").lower()
@@ -137,7 +149,7 @@ def from_env(env: dict[str, str] | None = None) -> LLM | None:
         return None
     if provider == "anthropic":
         require_private_or_allowed("https://api.anthropic.com", allow, what="LLM endpoint")
-        return AnthropicLLM(env.get("MUSE_LLM_MODEL") or DEFAULT_ANTHROPIC_MODEL, env.get("MUSE_LLM_API_KEY") or env.get("ANTHROPIC_API_KEY"))
+        return AnthropicLLM(env.get("MUSE_LLM_MODEL") or DEFAULT_ANTHROPIC_MODEL, _secret_from(env, "MUSE_LLM_API_KEY") or _secret_from(env, "ANTHROPIC_API_KEY"))
     if provider in ("openai", "ollama", "vllm", "lmstudio", "openrouter"):
         defaults = {"ollama": "http://ollama:11434/v1", "vllm": "http://vllm:8000/v1", "lmstudio": "http://lmstudio:1234/v1",
                     "openrouter": "https://openrouter.ai/api/v1", "openai": "https://api.openai.com/v1"}
@@ -149,7 +161,7 @@ def from_env(env: dict[str, str] | None = None) -> LLM | None:
         model = env.get("MUSE_LLM_MODEL") or ("qwen3:8b" if provider == "ollama" else "")
         if not model:
             raise ValueError("MUSE_LLM_MODEL is required for this provider")
-        return OpenAICompatibleLLM(base, model, env.get("MUSE_LLM_API_KEY"), external=not is_private_host(urlparse(base).hostname or ""))
+        return OpenAICompatibleLLM(base, model, (_secret_from(env, "MUSE_LLM_API_KEY")), external=not is_private_host(urlparse(base).hostname or ""))
     raise ValueError(f"unknown MUSE_LLM_PROVIDER={provider!r}")
 
 
