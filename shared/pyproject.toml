@@ -1,13 +1,19 @@
 [project]
 name = "muse-schema"
-version = "0.1.0"
-description = "Shared event schema used by every Muse adapter and service"
+version = "0.2.0"
+description = "Shared event schema and the muse_taste recommendation engine used by every Muse service"
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.6"]
+
+[project.optional-dependencies]
+# numpy/scipy for the engine (worker, recommendation API, curator); the ingestion API only
+# needs the stdlib importers and installs the bare package.
+taste = ["numpy>=1.26", "scipy>=1.11"]
+providers = ["httpx>=0.27", "anthropic>=1.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["muse_schema*"]
+include = ["muse_schema*", "muse_taste*"]

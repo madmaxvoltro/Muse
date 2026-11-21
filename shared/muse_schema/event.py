@@ -18,6 +18,21 @@ class Source(str, Enum):
     OPENWEBUI = "openwebui"
     NAVIDROME = "navidrome"
     AUDIOBOOKSHELF = "audiobookshelf"
+    MUSE = "muse"  # answers to Muse's own questions (onboarding, this-or-that, abandon reasons)
+    # History imports (see muse_taste.importers): written through the ingestion API by a key
+    # whose source is `import`, which may claim exactly these sources and nothing else.
+    YOUTUBE = "youtube"
+    SPOTIFY = "spotify"
+    SOUNDCLOUD = "soundcloud"
+    LETTERBOXD = "letterboxd"
+    IMDB = "imdb"
+    NETFLIX = "netflix"
+    TRAKT = "trakt"
+
+
+IMPORT_SOURCES: frozenset[str] = frozenset(
+    {Source.YOUTUBE, Source.SPOTIFY, Source.SOUNDCLOUD, Source.LETTERBOXD, Source.IMDB, Source.NETFLIX, Source.TRAKT}
+)
 
 
 class ItemType(str, Enum):
@@ -48,6 +63,10 @@ class Action(str, Enum):
     RATED = "rated"  # explicit thumbs (Vesper, via the Jellyfin user rating); metadata.value -1/1/2
     CATALOGED = "cataloged"  # item exists in a library, no user signal attached — for backfilling
     # content embeddings from a library the adapter didn't watch the user acquire (see jellyfin adapter).
+    # Elicitation answers (source=muse, see services/ingestion-api /answers):
+    CHOSE = "chose"  # picked this item in a this-or-that question
+    PASSED_OVER = "passed_over"  # the other side of a this-or-that question
+    ABANDON_REASON = "abandon_reason"  # why a title was stopped early; metadata.reason
 
 
 # Default action_weight per action — adapters may override, but this keeps
@@ -66,6 +85,9 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.TRAILER_PLAYED: 0.15,
     Action.REQUESTED: 0.6,
     Action.RATED: 1.0,  # adapters set the real weight from metadata.value, see RATED_WEIGHTS
+    Action.CHOSE: 0.5,
+    Action.PASSED_OVER: -0.1,  # relative, not a dislike: the other option was merely preferred
+    Action.ABANDON_REASON: 0.0,  # interpreted by muse_taste.signals from metadata.reason
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.

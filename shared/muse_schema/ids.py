@@ -14,3 +14,9 @@ def content_point_id(source: str, source_item_id: str) -> str:
 
 def taste_point_id(user_id: str, item_type: str) -> str:
     return str(uuid.uuid5(_NAMESPACE, f"taste:{user_id}:{item_type}"))
+
+
+def canon_point_id(canon_key: str) -> str:
+    """Qdrant point for a canonical item (see muse_taste.canon): one point per real-world title,
+    however many sources (Jellyfin, Letterboxd, Netflix, TMDB...) mention it."""
+    return str(uuid.uuid5(_NAMESPACE, f"canon:{canon_key}"))
