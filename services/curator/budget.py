@@ -16,7 +16,6 @@ STORAGE_BUDGET_BYTES = 300 * 1024**3  # 300GB, the decided global ceiling
 BASE_DAILY_CAP = 10  # decided: 10/day per user-profile, ceiling not a flat allowance
 ACTIVITY_WINDOW_DAYS = 14  # rolling window used to scale the cap down for inactive users
 SOON_GONE_GRACE_HOURS = 48
-ADD_SCORE_THRESHOLD = 0.3  # minimum average taste-similarity to even be considered
 PROTECT_PROGRESS_MIN = 10.0
 PROTECT_PROGRESS_MAX = 90.0
 

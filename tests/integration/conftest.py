@@ -80,3 +80,15 @@ def db_dsn():
         await admin.close()
 
     asyncio.run(teardown())
+
+
+def use_service(name: str):
+    """Both API services call their package `app`; make `import app` resolve to `name`'s."""
+    for m in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[m]
+    svc = str(ROOT / "services" / name)
+    for other in ("ingestion-api", "recommendation-api"):
+        p = str(ROOT / "services" / other)
+        while p in sys.path:
+            sys.path.remove(p)
+    sys.path.insert(0, svc)

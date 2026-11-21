@@ -112,7 +112,13 @@ class Engine:
         if self._embedder is None:
             if self._embedder_factory is None:
                 raise RuntimeError("no embedder configured")
-            self._embedder = self._embedder_factory()
+            try:
+                self._embedder = self._embedder_factory()
+            except Exception as exc:
+                raise RuntimeError(
+                    "mood queries need an embedder in the recommendation API: set MUSE_EMBED_PROVIDER=openai "
+                    f"(an embedding server) or install sentence-transformers in its image ({exc})"
+                ) from exc
         return self._embedder
 
     # ---- responsiveness ---------------------------------------------------------------------

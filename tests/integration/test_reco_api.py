@@ -4,14 +4,14 @@ import uuid
 
 import pytest
 
-from conftest import ROOT
+from conftest import use_service
 from fixtures import EXTERNAL_REC, USER_A, insert
 from test_worker import run_worker
 
-sys.path.insert(0, str(ROOT / "services" / "recommendation-api"))
 
 
 def test_recommendations_questions_and_feedback(db_dsn):
+    use_service("recommendation-api")
     from app import questions
     from app.engine import Engine, Request
 
@@ -65,6 +65,7 @@ def test_recommendations_questions_and_feedback(db_dsn):
 
 
 def test_http_routes(db_dsn):
+    use_service("recommendation-api")
     import httpx
     from app import main
     from app.engine import Engine

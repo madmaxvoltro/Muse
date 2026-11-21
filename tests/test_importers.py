@@ -41,6 +41,7 @@ def test_letterboxd_ratings_map_to_thumbs():
     evs = parse("letterboxd", "ratings.csv", csv.encode())
     vals = {e["metadata"]["title"]: e["metadata"]["value"] for e in evs if e["action"] == "rated"}
     assert vals == {"Arrival": 2, "Bad": -1}
+    assert [e["metadata"]["title"] for e in evs if e["action"] == "completed"] == ["Meh"]  # neutral = watched
 
 
 def test_imdb_ratings_carry_imdb_id():

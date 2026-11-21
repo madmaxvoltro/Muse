@@ -85,6 +85,7 @@ def parse_details(kind: str, d: dict[str, Any], genre_names: dict[int, str] | No
         "vote_count": d.get("vote_count"),
         "popularity": d.get("popularity"),
         "imdb_id": d.get("imdb_id") or (d.get("external_ids") or {}).get("imdb_id"),
+        "tvdb_id": (d.get("external_ids") or {}).get("tvdb_id"),  # Sonarr adds series by TVDB id
         "recommendations": rel_list(d.get("recommendations")),
         "similar": rel_list(d.get("similar"))[:10],
         "fetched_at": int(time.time()),

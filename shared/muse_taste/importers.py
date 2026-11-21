@@ -355,6 +355,9 @@ def _letterboxd(name: str, data: bytes, opts: dict) -> list[dict]:
                 thumbs = None
             if thumbs is not None:
                 out.append(_rated("letterboxd", "movie", date, sid, md, thumbs, f"lb:rated:{sid}"))
+            elif lname == "ratings.csv":
+                # 2.5-3.5 stars: watched, no strong opinion -> counts as watched, nothing more
+                out.append(_ev("letterboxd", "movie", "completed", date, sid, md, f"lb:rated-watched:{sid}"))
         if lname in ("watched.csv", "diary.csv"):
             out.append(_ev("letterboxd", "movie", "completed", date, sid, md, f"lb:watched:{sid}:{r.get('Watched Date') or r.get('Date')}"))
         elif lname == "watchlist.csv":
