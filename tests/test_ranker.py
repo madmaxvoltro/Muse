@@ -32,15 +32,15 @@ async def test_label_and_train(db, monkeypatch):
         rows.append((req, user, "track", "mono", f"t{i}", i % 20, 0.5, False, "taste", "recommendations", json.dumps(feats), shown))
         if positive:  # the alias (e.g. the Mono account) finished it two days later
             events.append((alias, "mono", f"t{i}", "track", "completed", 1.0, shown + timedelta(days=2)))
-    await conn.executemany("INSERT INTO impression (request_id, user_id, item_type, source, source_item_id, position, score, explore, generator, "
+    await conn.executemany("INSERT INTO engine_impression (request_id, user_id, item_type, source, source_item_id, position, score, explore, generator, "
                            "surface, features, shown_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)", rows)
     await conn.executemany("INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, \"timestamp\") "
                            "VALUES ($1,$2,$3,$4,$5,$6,$7)", events)
     assert await R.label_outcomes(conn) == 700
-    pos = await conn.fetchval("SELECT count(*) FROM impression WHERE outcome = 'positive'")
+    pos = await conn.fetchval("SELECT count(*) FROM engine_impression WHERE outcome = 'positive'")
     assert pos == len(events)
     out = await R.train(conn)
     assert out[0]["active"] and out[0]["learned_auc"] > out[0]["hand_auc"]
-    w = json.loads(await conn.fetchval("SELECT weights FROM ranker_model WHERE active"))
+    w = json.loads(await conn.fetchval("SELECT weights FROM engine_ranker_model WHERE active"))
     assert max(w, key=lambda k: abs(w[k])) == "audio_sim" and w["audio_sim"] > 0
     await conn.close()

@@ -199,7 +199,7 @@ async def export(user: str, p: Principal = Depends(current_principal)) -> dict:
             "imports": await rows("SELECT kind, stats, created_at FROM import_job WHERE user_id = $1", uid),
             "taste_facets": await rows("SELECT item_type, space, share, label, descriptors, features FROM taste_facet WHERE user_id = $1", uid),
             "taste_models": await rows("SELECT item_type, kind, model, metrics, trained_at FROM taste_model WHERE user_id = $1", uid),
-            "impressions_count": await conn.fetchval("SELECT count(*) FROM impression WHERE user_id = $1", uid),
+            "impressions_count": await conn.fetchval("SELECT count(*) FROM engine_impression WHERE user_id = $1", uid),
             "access_log": await rows("SELECT at, principal, method, path, status FROM access_log WHERE subject_user_id = $1 ORDER BY at DESC LIMIT 1000", uid),
         }
     return data
@@ -219,7 +219,7 @@ async def forget_events(user: str, confirm: bool = False, source: str | None = N
             "DELETE FROM event WHERE user_id = ANY($1::uuid[]) AND action <> 'cataloged' AND ($2::text IS NULL OR source = $2) "
             "AND ($3::timestamptz IS NULL OR \"timestamp\" >= $3) AND ($4::timestamptz IS NULL OR \"timestamp\" < $4) AND ($5::text IS NULL OR item_type = $5)",
             group, source, since, until, item_type)
-        await conn.execute("DELETE FROM impression WHERE user_id = $1 AND ($2::timestamptz IS NULL OR shown_at >= $2) AND ($3::timestamptz IS NULL OR shown_at < $3)",
+        await conn.execute("DELETE FROM engine_impression WHERE user_id = $1 AND ($2::timestamptz IS NULL OR shown_at >= $2) AND ($3::timestamptz IS NULL OR shown_at < $3)",
                            uid, since, until)
         await mark_dirty(conn, uid)
     return {"deleted_events": int(res.split()[-1]), "note": "taste vectors are recomputed on the next worker cycle"}

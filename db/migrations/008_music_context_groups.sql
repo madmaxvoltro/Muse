@@ -82,7 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_wanted_status ON wanted (status, score DESC);
 -- ---------------------------------------------------------------------------------------------
 -- Impressions: what Muse showed, to whom, and what came of it. The base for evaluation,
 -- "shown but ignored" demotion and the learned ranker.
-CREATE TABLE IF NOT EXISTS impression (
+CREATE TABLE IF NOT EXISTS engine_impression (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id      UUID NOT NULL,
     user_id         UUID NOT NULL,                   -- canonical
@@ -99,11 +99,11 @@ CREATE TABLE IF NOT EXISTS impression (
     outcome         TEXT,                            -- positive | negative | none (set by the trainer)
     outcome_at      TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_impression_user_item ON impression (user_id, source, source_item_id);
-CREATE INDEX IF NOT EXISTS idx_impression_shown ON impression (shown_at);
+CREATE INDEX IF NOT EXISTS idx_engine_impression_user_item ON engine_impression (user_id, source, source_item_id);
+CREATE INDEX IF NOT EXISTS idx_engine_impression_shown ON engine_impression (shown_at);
 
 -- Ranker weights learned from impressions (logistic regression over the scoring features).
-CREATE TABLE IF NOT EXISTS ranker_model (
+CREATE TABLE IF NOT EXISTS engine_ranker_model (
     id              SERIAL PRIMARY KEY,
     item_type       TEXT NOT NULL,                   -- or '_all'
     weights         JSONB NOT NULL,                  -- {"bias": b, "similarity": w, ...}

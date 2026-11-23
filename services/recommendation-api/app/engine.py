@@ -173,7 +173,7 @@ async def load_person(conn, qd, canonical: uuid.UUID, group: list[uuid.UUID], it
             p.pref_model = _j(row["model"])
             p.pref_summary = p.pref_model.get("summary", [])
         p.ignored = {f"{r['source']}:{r['source_item_id']}": r["n"] for r in await conn.fetch(
-            "SELECT source, source_item_id, count(*) AS n FROM impression WHERE user_id = $1 AND item_type = $2 "
+            "SELECT source, source_item_id, count(*) AS n FROM engine_impression WHERE user_id = $1 AND item_type = $2 "
             "AND shown_at > now() - interval '30 days' AND outcome IS DISTINCT FROM 'positive' GROUP BY 1, 2 HAVING count(*) >= 3",
             canonical, item_type)}
         p.goals = [dict(r, criteria=_j(r["criteria"])) for r in await conn.fetch(

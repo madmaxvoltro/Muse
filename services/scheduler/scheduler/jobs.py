@@ -271,7 +271,7 @@ async def retention(conn) -> dict:
     for p in await conn.fetch("SELECT source, keep_days FROM retention_policy"):
         res = await conn.execute("DELETE FROM event WHERE source = $1 AND \"timestamp\" < now() - make_interval(days => $2)", p["source"], p["keep_days"])
         out[p["source"]] = int(res.split()[-1])
-    res = await conn.execute("DELETE FROM impression WHERE shown_at < now() - make_interval(days => $1)", IMPRESSION_DAYS)
+    res = await conn.execute("DELETE FROM engine_impression WHERE shown_at < now() - make_interval(days => $1)", IMPRESSION_DAYS)
     out["impressions"] = int(res.split()[-1])
     res = await conn.execute("DELETE FROM access_log WHERE at < now() - make_interval(days => $1)", ACCESS_LOG_DAYS)
     out["access_log"] = int(res.split()[-1])

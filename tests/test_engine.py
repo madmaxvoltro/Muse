@@ -105,7 +105,7 @@ async def test_recommendations_cover_both_tastes(eng):
     assert {"audio_sim", "facet_fit", "similarity"} <= set(first["explanation"]) and first["why"]
     assert first["facet"] and first["audio"]["bpm"]
     conn = await asyncpg.connect(eng["db"])
-    assert await conn.fetchval("SELECT count(*) FROM impression WHERE request_id = $1", uuid.UUID(r["request_id"])) == len(styles)
+    assert await conn.fetchval("SELECT count(*) FROM engine_impression WHERE request_id = $1", uuid.UUID(r["request_id"])) == len(styles)
     await conn.close()
 
 

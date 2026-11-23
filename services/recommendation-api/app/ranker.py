@@ -19,7 +19,7 @@ async def weights_for(conn, item_type: str) -> tuple[dict[str, float], str]:
     learned = None
     try:
         row = await conn.fetchrow(
-            "SELECT weights FROM ranker_model WHERE active AND item_type IN ($1, '_all') ORDER BY (item_type = $1) DESC, trained_at DESC LIMIT 1",
+            "SELECT weights FROM engine_ranker_model WHERE active AND item_type IN ($1, '_all') ORDER BY (item_type = $1) DESC, trained_at DESC LIMIT 1",
             item_type)
         if row:
             w = row["weights"]
