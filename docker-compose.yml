@@ -44,6 +44,84 @@ services:
     depends_on: [postgres, qdrant]
     networks: [muse-net]
 
+  query-api:
+    build:
+      context: .
+      dockerfile: services/query-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
+      MUSE_ADMIN_TOKEN: ${MUSE_ADMIN_TOKEN}
+      MUSE_ADAPTER_KEYS: ${MUSE_ADAPTER_KEYS}
+      MUSE_AUDIO_URL: http://audio-analyzer:8004
+      MUSE_OUTBOUND_ALLOW_PRIVATE: ${MUSE_OUTBOUND_ALLOW_PRIVATE:-}
+    depends_on: [postgres, qdrant, recommendation-api]
+    networks: [muse-net]
+
+  # Music beyond the library: MusicBrainz / ListenBrainz / Deezer, new releases, wanted list.
+  # Needs outbound HTTPS to musicbrainz.org, api.listenbrainz.org, labs.api.listenbrainz.org, api.deezer.com.
+  catalog:
+    build:
+      context: .
+      dockerfile: services/catalog/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
+    depends_on: [postgres, recommendation-api]
+    networks: [muse-net]
+
+  # Listens to music: tempo, key, energy... and CLAP audio embeddings (what it sounds like).
+  # MUSE_MONO_URL + MUSE_MONO_STREAM_TOKEN let it stream Mono's files (only the parts it needs).
+  audio-analyzer:
+    build:
+      context: .
+      dockerfile: services/audio-analyzer/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_MONO_URL: ${MUSE_MONO_URL:-}
+      MUSE_MONO_STREAM_TOKEN: ${MUSE_MONO_STREAM_TOKEN:-}
+      MUSE_NAVIDROME_URL: ${NAVIDROME_URL:-}
+      MUSE_NAVIDROME_USER: ${NAVIDROME_USER:-}
+      MUSE_NAVIDROME_PASSWORD: ${NAVIDROME_PASSWORD:-}
+      MUSE_DEVICE: ${MUSE_DEVICE:-cpu}
+      MUSE_AUDIO_PER_CYCLE: ${MUSE_AUDIO_PER_CYCLE:-20}
+      MUSE_AUDIO_THREADS: ${MUSE_AUDIO_THREADS:-0}
+    volumes: [hf_cache_audio:/root/.cache/huggingface]
+    depends_on: [postgres, qdrant]
+    networks: [muse-net]
+
+  # Weather (Open-Meteo), calendars (ICS), webhook delivery, weekly digest, goals, retention.
+  scheduler:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY: ${MUSE_QUERY_READ_KEY:-}
+      MUSE_WEATHER_LAT: ${MUSE_WEATHER_LAT:-}
+      MUSE_WEATHER_LON: ${MUSE_WEATHER_LON:-}
+    depends_on: [postgres, recommendation-api]
+    networks: [muse-net]
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: services/mcp-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSE_QUERY_URL: http://query-api:8002
+    depends_on: [query-api]
+    networks: [muse-net]
+
   embedding-worker:
     build:
       context: .
@@ -118,6 +196,37 @@ services:
     depends_on: [ingestion-api]
     networks: [muse-net]
 
+  # Optional adapters: start with `docker compose --profile navidrome --profile audiobookshelf up -d`.
+  navidrome-adapter:
+    profiles: [navidrome]
+    build:
+      context: .
+      dockerfile: adapters/navidrome/Dockerfile
+    restart: unless-stopped
+    environment:
+      NAVIDROME_URL: ${NAVIDROME_URL:-}
+      NAVIDROME_USER: ${NAVIDROME_USER:-}
+      NAVIDROME_PASSWORD: ${NAVIDROME_PASSWORD:-}
+      NAVIDROME_USERS: ${NAVIDROME_USERS:-}
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY: ${MUSE_NAVIDROME_ADAPTER_KEY:-}
+    depends_on: [ingestion-api]
+    networks: [muse-net]
+
+  audiobookshelf-adapter:
+    profiles: [audiobookshelf]
+    build:
+      context: .
+      dockerfile: adapters/audiobookshelf/Dockerfile
+    restart: unless-stopped
+    environment:
+      AUDIOBOOKSHELF_URL: ${AUDIOBOOKSHELF_URL:-}
+      AUDIOBOOKSHELF_TOKEN: ${AUDIOBOOKSHELF_TOKEN:-}
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY: ${MUSE_AUDIOBOOKSHELF_ADAPTER_KEY:-}
+    depends_on: [ingestion-api]
+    networks: [muse-net]
+
 networks:
   muse-net:
     internal: false  # adapters need outbound access to their upstream services; still no published ports
@@ -125,3 +234,4 @@ networks:
 volumes:
   postgres_data:
   qdrant_data:
+  hf_cache_audio:

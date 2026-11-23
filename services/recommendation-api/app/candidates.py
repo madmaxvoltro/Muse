@@ -14,14 +14,31 @@ from typing import Any
 import asyncpg
 from muse_schema import content_point_id, taste_point_id
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+from qdrant_client.http.models import FieldCondition, Filter, MatchAny, MatchValue
 
 from .scoring import Candidate, confidence
+
+
+class _Conn:
+    """`async with _acq(x)`: a pool gives a connection, a connection is used as is."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _acq(x):
+    return x.acquire() if hasattr(x, "acquire") else _Conn(x)
 
 CANDIDATE_POOL_SIZE = 200
 
 
-async def get_owned_item_ids(pool: asyncpg.Pool, user_id: str) -> set[str]:
+async def get_owned_item_ids(pool: asyncpg.Pool, user_ids: list[uuid.UUID]) -> set[str]:
     """Items the user has already watched or judged — excluded from candidates,
     they belong in "continue watching", not "recommended for you".
 
@@ -30,40 +47,43 @@ async def get_owned_item_ids(pool: asyncpg.Pool, user_id: str) -> set[str]:
     searched, trailer_played, added_watchlist, requested) must not, or a
     library-backed client such as Vesper would see every title it owns excluded.
     """
-    async with pool.acquire() as conn:
+    async with _acq(pool) as conn:
         rows = await conn.fetch(
             """
             SELECT DISTINCT source, source_item_id FROM event
-            WHERE user_id = $1 AND source_item_id IS NOT NULL
-              AND action IN ('played', 'completed', 'skipped', 'rejected', 'removed', 'rated', 'favorited')
+            WHERE user_id = ANY($1::uuid[]) AND source_item_id IS NOT NULL
+              AND action IN ('played', 'completed', 'skipped', 'rejected', 'removed', 'rated', 'favorited',
+                             'unfavorited', 'added_to_playlist')
             """,
-            uuid.UUID(user_id),
+            user_ids,
         )
     return {f"{r['source']}:{r['source_item_id']}" for r in rows}
 
 
-async def get_user_genre_stats(pool: asyncpg.Pool, qdrant: QdrantClient, user_id: str) -> dict[str, dict[str, Any]]:
+async def get_user_genre_stats(
+    pool: asyncpg.Pool, qdrant: QdrantClient, user_ids: list[uuid.UUID]
+) -> dict[str, dict[str, Any]]:
     """Per-genre stats derived from the user's recent history, used as the feature
     basis for scoring candidates that share a genre. See Candidate.within_user_popularity
     / completion_rate / recency_of_similar / confidence in scoring.py.
     """
-    async with pool.acquire() as conn:
+    async with _acq(pool) as conn:
         rows = await conn.fetch(
             """
             SELECT source, source_item_id, action, action_weight, "timestamp"
             FROM event
-            WHERE user_id = $1 AND source_item_id IS NOT NULL
+            WHERE user_id = ANY($1::uuid[]) AND source_item_id IS NOT NULL AND action <> 'cataloged'
             ORDER BY "timestamp" DESC
             LIMIT 500
             """,
-            uuid.UUID(user_id),
+            user_ids,
         )
     if not rows:
         return {}
 
     point_ids = [content_point_id(r["source"], r["source_item_id"]) for r in rows]
     fetched = qdrant.retrieve(collection_name="content_items", ids=point_ids, with_payload=True)
-    genres_by_point = {p.id: (p.payload or {}).get("genres", []) for p in fetched}
+    genres_by_point = {str(p.id): (p.payload or {}).get("genres", []) for p in fetched}
 
     now = datetime.now(timezone.utc)
     stats: dict[str, dict[str, Any]] = {}
@@ -125,26 +145,78 @@ def _variance(values: list[float]) -> float:
     return sum((v - mean) ** 2 for v in values) / len(values)
 
 
-async def generate_candidates(
-    pool: asyncpg.Pool, qdrant: QdrantClient, user_id: str, item_type: str, total_sources: int = 7
-) -> list[Candidate]:
-    taste_id = taste_point_id(user_id, item_type)
-    taste_points = qdrant.retrieve(collection_name="taste_vectors", ids=[taste_id], with_vectors=True)
-    if not taste_points:
+def _norm(v: list[float]) -> float:
+    return sum(x * x for x in v) ** 0.5
+
+
+def blend_vectors(own: list[float] | None, other: list[float] | None, other_weight: float) -> list[float] | None:
+    """Mix two taste vectors after normalising both, so neither dominates by magnitude."""
+    if own is None:
+        return other
+    if other is None or other_weight <= 0:
+        return own
+    a, b = _norm(own) or 1.0, _norm(other) or 1.0
+    return [(1 - other_weight) * x / a + other_weight * y / b for x, y in zip(own, other)]
+
+
+def _taste(qdrant: QdrantClient, user_id: str, bucket: str) -> list[float] | None:
+    pts = qdrant.retrieve(collection_name="taste_vectors", ids=[taste_point_id(user_id, bucket)], with_vectors=True)
+    return list(pts[0].vector) if pts else None
+
+
+def resolve_taste_vector(
+    qdrant: QdrantClient, user_id: str, item_type: str, taste_from: str | None = None, blend: float = 0.0
+) -> tuple[list[float] | None, str]:
+    """The vector to search with, and a label for how it was built (goes into the response).
+
+    taste_from: use another domain's taste (e.g. music taste to find films).
+    blend: 0-1 share of the cross-domain (_combined) taste mixed into the domain's own.
+    """
+    if taste_from:
+        vec = _taste(qdrant, user_id, taste_from)
+        if vec is not None:
+            own = _taste(qdrant, user_id, item_type) if blend > 0 else None
+            return (blend_vectors(vec, own, blend) if own else vec), f"from:{taste_from}"
+    own = _taste(qdrant, user_id, item_type)
+    combined = _taste(qdrant, user_id, "_combined") if (own is None or blend > 0) else None
+    if own is None:
         # No item_type-specific taste yet — fall back to the combined cross-domain vector.
-        taste_points = qdrant.retrieve(
-            collection_name="taste_vectors", ids=[taste_point_id(user_id, "_combined")], with_vectors=True
-        )
-    if not taste_points:
+        return combined, "combined" if combined is not None else "none"
+    if combined is not None and blend > 0:
+        return blend_vectors(own, combined, blend), f"own+combined:{blend:g}"
+    return own, "own"
+
+
+async def generate_candidates(
+    pool: asyncpg.Pool,
+    qdrant: QdrantClient,
+    user_id: str,
+    item_type: str,
+    total_sources: int = 7,
+    *,
+    group: list[uuid.UUID] | None = None,
+    taste_from: str | None = None,
+    blend: float = 0.0,
+    sources: list[str] | None = None,
+    exclude_sources: list[str] | None = None,
+) -> list[Candidate]:
+    """user_id is the canonical id; group every id of the same person (defaults to [user_id])."""
+    group = group or [uuid.UUID(user_id)]
+    taste, _ = resolve_taste_vector(qdrant, user_id, item_type, taste_from, blend)
+    if taste is None:
         return []  # cold-start: no taste vector at all yet, nothing to rank against
 
-    owned = await get_owned_item_ids(pool, user_id)
-    genre_stats = await get_user_genre_stats(pool, qdrant, user_id)
+    owned = await get_owned_item_ids(pool, group)
+    genre_stats = await get_user_genre_stats(pool, qdrant, group)
 
+    must = [FieldCondition(key="item_type", match=MatchValue(value=item_type))]
+    if sources:
+        must.append(FieldCondition(key="source", match=MatchAny(any=sources)))
+    must_not = [FieldCondition(key="source", match=MatchAny(any=exclude_sources))] if exclude_sources else None
     hits = qdrant.query_points(
         collection_name="content_items",
-        query=taste_points[0].vector,
-        query_filter=Filter(must=[FieldCondition(key="item_type", match=MatchValue(value=item_type))]),
+        query=taste,
+        query_filter=Filter(must=must, must_not=must_not),
         limit=CANDIDATE_POOL_SIZE,
     ).points
 
@@ -169,6 +241,7 @@ async def generate_candidates(
                 completion_rate=features["completion_rate"],
                 confidence=features["confidence"],
                 genres=genres,
+                title=payload.get("title", ""),
             )
         )
     return candidates

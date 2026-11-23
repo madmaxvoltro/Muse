@@ -1,0 +1,295 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Muse Ingestion API",
+  "version": "0.1.0"
+ },
+ "paths": {
+  "/healthz": {
+   "get": {
+    "summary": "Healthz",
+    "operationId": "healthz_healthz_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": {
+          "type": "string"
+         },
+         "type": "object",
+         "title": "Response Healthz Healthz Get"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/events": {
+   "post": {
+    "summary": "Ingest Event",
+    "description": "Adapters POST here, authenticated with their own X-Muse-Api-Key.\n\nThe key determines `source` server-side \u2014 an adapter cannot claim to be a\ndifferent source than the one it was issued a key for, even if it lies in\nthe request body's `source` field. This is intentional defense against a\ncompromised adapter spoofing another source's events.",
+    "operationId": "ingest_event_events_post",
+    "parameters": [
+     {
+      "name": "x-muse-api-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Muse-Api-Key"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Event"
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         },
+         "title": "Response Ingest Event Events Post"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "Action": {
+    "type": "string",
+    "enum": [
+     "played",
+     "completed",
+     "paused",
+     "skipped",
+     "rejected",
+     "favorited",
+     "searched",
+     "added_watchlist",
+     "removed",
+     "detail_viewed",
+     "trailer_played",
+     "requested",
+     "rated",
+     "cataloged",
+     "unfavorited",
+     "added_to_playlist"
+    ],
+    "title": "Action"
+   },
+   "Event": {
+    "properties": {
+     "user_id": {
+      "type": "string",
+      "format": "uuid",
+      "title": "User Id"
+     },
+     "source": {
+      "$ref": "#/components/schemas/Source"
+     },
+     "source_item_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Source Item Id"
+     },
+     "item_type": {
+      "$ref": "#/components/schemas/ItemType"
+     },
+     "action": {
+      "$ref": "#/components/schemas/Action"
+     },
+     "action_weight": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Action Weight"
+     },
+     "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "title": "Timestamp"
+     },
+     "duration_ms": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Duration Ms"
+     },
+     "progress_pct": {
+      "anyOf": [
+       {
+        "type": "number",
+        "maximum": 100.0,
+        "minimum": 0.0
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Progress Pct"
+     },
+     "metadata": {
+      "additionalProperties": true,
+      "type": "object",
+      "title": "Metadata"
+     },
+     "device_context": {
+      "anyOf": [
+       {
+        "additionalProperties": true,
+        "type": "object"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Device Context"
+     }
+    },
+    "type": "object",
+    "required": [
+     "user_id",
+     "source",
+     "item_type",
+     "action"
+    ],
+    "title": "Event"
+   },
+   "HTTPValidationError": {
+    "properties": {
+     "detail": {
+      "items": {
+       "$ref": "#/components/schemas/ValidationError"
+      },
+      "type": "array",
+      "title": "Detail"
+     }
+    },
+    "type": "object",
+    "title": "HTTPValidationError"
+   },
+   "ItemType": {
+    "type": "string",
+    "enum": [
+     "movie",
+     "series_episode",
+     "series",
+     "youtube_video",
+     "track",
+     "audiobook",
+     "ebook",
+     "search_query",
+     "chat"
+    ],
+    "title": "ItemType"
+   },
+   "Source": {
+    "type": "string",
+    "enum": [
+     "jellyfin",
+     "arr",
+     "freetube",
+     "searxng",
+     "openwebui",
+     "navidrome",
+     "audiobookshelf",
+     "mono",
+     "muse",
+     "catalog",
+     "spotify",
+     "youtube",
+     "goodreads",
+     "storygraph",
+     "soundcloud",
+     "app"
+    ],
+    "title": "Source"
+   },
+   "ValidationError": {
+    "properties": {
+     "loc": {
+      "items": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "integer"
+        }
+       ]
+      },
+      "type": "array",
+      "title": "Location"
+     },
+     "msg": {
+      "type": "string",
+      "title": "Message"
+     },
+     "type": {
+      "type": "string",
+      "title": "Error Type"
+     },
+     "input": {
+      "title": "Input"
+     },
+     "ctx": {
+      "type": "object",
+      "title": "Context"
+     }
+    },
+    "type": "object",
+    "required": [
+     "loc",
+     "msg",
+     "type"
+    ],
+    "title": "ValidationError"
+   }
+  }
+ }
+}

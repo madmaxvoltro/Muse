@@ -1,0 +1,20 @@
+# NVIDIA GPU for the audio analyzer (and anything else that learns to use it). Needs the NVIDIA
+# Container Toolkit on the host. Use on top of the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build audio-analyzer
+# Without a GPU everything runs on CPU; nothing else changes.
+
+services:
+  audio-analyzer:
+    build:
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu124
+    environment:
+      MUSE_DEVICE: cuda
+      MUSE_AUDIO_PER_CYCLE: ${MUSE_AUDIO_PER_CYCLE:-200}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

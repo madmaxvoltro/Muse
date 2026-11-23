@@ -1,5 +1,7 @@
 import json
 import logging
+import time
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI
 from muse_schema import DEFAULT_ACTION_WEIGHTS, Event
@@ -34,6 +36,26 @@ WHERE NOT EXISTS (
 """
 
 
+_incognito: dict[str, tuple[float, bool]] = {}
+
+
+async def incognito(conn, user_id) -> bool:
+    """Is this person (via any linked id) in incognito mode? Cached for 30 s."""
+    key = str(user_id)
+    hit = _incognito.get(key)
+    if hit and time.monotonic() - hit[0] < 30:
+        return hit[1]
+    try:
+        until = await conn.fetchval(
+            "SELECT o.preferences->>'incognito_until' FROM user_overlay o "
+            "WHERE o.user_id = COALESCE((SELECT user_id FROM user_alias WHERE alias_id = $1), $1)", user_id)
+    except Exception:  # database without migration 007
+        until = None
+    on = bool(until) and datetime.fromisoformat(until) > datetime.now(timezone.utc)
+    _incognito[key] = (time.monotonic(), on)
+    return on
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     await close_pool()
@@ -62,6 +84,8 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        if event.action.value != "cataloged" and await incognito(conn, event.user_id):
+            return {"status": "dropped", "reason": "incognito"}
         dedupe = event.metadata.get("dedupe_key")
         args = [] if dedupe is None else [str(dedupe)]
         await conn.execute(
