@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncpg
 from muse_schema import content_point_id, taste_point_id
+from muse_schema.storage import fetch_open
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import FieldCondition, Filter, MatchAny, MatchValue
 
@@ -48,9 +49,10 @@ async def get_owned_item_ids(pool: asyncpg.Pool, user_ids: list[uuid.UUID]) -> s
     library-backed client such as Vesper would see every title it owns excluded.
     """
     async with _acq(pool) as conn:
-        rows = await conn.fetch(
+        rows = await fetch_open(
+            conn,
             """
-            SELECT DISTINCT source, source_item_id FROM event
+            SELECT DISTINCT ON (source, source_item_id) source, source_item_id, metadata FROM event
             WHERE user_id = ANY($1::uuid[]) AND source_item_id IS NOT NULL
               AND action IN ('played', 'completed', 'skipped', 'rejected', 'removed', 'rated', 'favorited',
                              'unfavorited', 'added_to_playlist')
@@ -68,9 +70,10 @@ async def get_user_genre_stats(
     / completion_rate / recency_of_similar / confidence in scoring.py.
     """
     async with _acq(pool) as conn:
-        rows = await conn.fetch(
+        rows = await fetch_open(
+            conn,
             """
-            SELECT source, source_item_id, action, action_weight, "timestamp"
+            SELECT source, source_item_id, action, action_weight, "timestamp", metadata
             FROM event
             WHERE user_id = ANY($1::uuid[]) AND source_item_id IS NOT NULL AND action <> 'cataloged'
             ORDER BY "timestamp" DESC

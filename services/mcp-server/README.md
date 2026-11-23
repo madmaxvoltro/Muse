@@ -51,9 +51,15 @@ sends its own token. Expose it only over your tailnet, like the rest of Muse.
 | Music to get | `new_releases`, `wanted`, `want` |
 | Privacy | `set_incognito`, `forget_history`, `access_log` |
 | Muse itself | `suggest_feature`, `list_feature_suggestions` |
+| Taste engine (films, series) | `pending_taste_questions`, `answer_taste_question`, `dismiss_taste_question`, `correct_reason`, `home_rows`, `taste_engine_profile`, `taste_evolution` |
 
 Prompts: `taste_interview`, `use_my_taste` (e.g. films for your music taste), `watch_together`.
 
 The server's instructions tell the assistant to ask one question at a time, only when it fits,
 to store only taste and listening/viewing context (nothing sensitive), to say what it stored,
 and never to mix household members' data.
+
+The taste-engine tools call the recommendation API directly (`MUSE_RECO_URL`, read key in
+`MUSE_READ_KEY(_FILE)`) for the person the token acts for, and post answers to the ingestion
+API (`MUSE_INGEST_URL`, the `muse` key in `MUSE_ANSWER_KEY(_FILE)`). Without those keys they
+say so and every other tool keeps working. Nothing in Muse depends on this server running.

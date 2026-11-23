@@ -28,6 +28,27 @@ from mcp_types import ToolAnnotations
 
 QUERY_URL = os.environ.get("MUSE_QUERY_URL", "http://localhost:8772").rstrip("/")
 ENV_TOKEN = os.environ.get("MUSE_TOKEN", "")
+# The taste engine's tools (questions queue, home rows, profile, evolution, reason corrections)
+# talk to the recommendation API with a read key and post answers to the ingestion API with the
+# `muse` key. Leave the keys empty and those tools say they are unavailable; everything else
+# keeps working through the query API.
+RECO_URL = os.environ.get("MUSE_RECO_URL", "http://recommendation-api:8001").rstrip("/")
+INGEST_URL = os.environ.get("MUSE_INGEST_URL", "http://ingestion-api:8000").rstrip("/")
+
+
+def _secret(name: str) -> str:
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return ""
+    return os.environ.get(name, "")
+
+
+READ_KEY = _secret("MUSE_READ_KEY")
+ANSWER_KEY = _secret("MUSE_ANSWER_KEY")
 
 INSTRUCTIONS = """\
 Muse is a self-hosted taste profile for a household: music (Mono, Navidrome), films and shows
@@ -73,6 +94,12 @@ Goals: `add_goal` ("get into jazz", "10 classic films"), `list_goals`.
 Privacy: `set_incognito` stops learning for a while; `forget_history` deletes a time range or
 source (confirm with the person first); `access_log` shows who read their data.
 Ideas: if you notice Muse missing something that would have helped, `suggest_feature`.
+Taste engine (films and series): `pending_taste_questions` holds the engine's own questions
+(onboarding picks, "why did you stop X?", this-or-that, "you seem to be getting into X, more of
+that?"); record answers with `answer_taste_question` or close them with
+`dismiss_taste_question`. `home_rows` gives themed rows titled by their reason,
+`taste_engine_profile` and `taste_evolution` describe the taste and how it is changing, and
+`correct_reason` fixes a reason Muse gave ("I didn't even like that film", "less of that director").
 Accounts: one person can have several ids (Jellyfin, Mono, ...); `create_link_code` on one
 account and `link_account` on the other joins them into one profile. Only link accounts that
 belong to the same person.
@@ -122,6 +149,41 @@ async def _api(ctx: Context | None, method: str, path: str, params: dict | None 
 
 def _u(user: str | None) -> str:
     return user or "me"
+
+
+async def _person(ctx: Context | None, user: str | None) -> str:
+    """The Muse user id the taste-engine tools act for: `user` with a household token, else the
+    token's own person."""
+    if user and user != "me":
+        return user
+    me = await _api(ctx, "GET", "/v1/me")
+    if me.get("kind") == "admin":
+        raise ToolError("This token acts for the whole household: pass user=<id> (see list_users).")
+    return me["user_id"]
+
+
+async def _reco(path: str, params: dict[str, Any]) -> dict:
+    if not READ_KEY:
+        raise ToolError("Taste-engine tools need MUSE_READ_KEY (a recommendation API read key).")
+    async with httpx.AsyncClient(timeout=30, transport=_transport) as c:
+        try:
+            r = await c.get(f"{RECO_URL}{path}", params={k: v for k, v in params.items() if v is not None},
+                            headers={"X-Muse-Read-Key": READ_KEY})
+        except httpx.HTTPError as e:
+            raise ToolError(f"Muse recommendation API unreachable at {RECO_URL}: {e}") from e
+    if r.status_code >= 400:
+        raise ToolError(f"Muse said {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+
+async def _answer(body: dict) -> dict:
+    if not ANSWER_KEY:
+        raise ToolError("Recording answers needs MUSE_ANSWER_KEY (the `muse` ingestion key).")
+    async with httpx.AsyncClient(timeout=30, transport=_transport) as c:
+        r = await c.post(f"{INGEST_URL}/answers", json=body, headers={"X-Muse-Api-Key": ANSWER_KEY})
+    if r.status_code >= 400:
+        return {"ok": False, "status": r.status_code, "detail": r.text[:500]}
+    return {"ok": True, **r.json()}
 
 
 # --- who ------------------------------------------------------------------------------------
@@ -535,6 +597,66 @@ async def unlink_account(ctx: Context, alias_id: str) -> dict:
 
 
 # --- prompts --------------------------------------------------------------------------------
+
+
+# --- taste engine (films and series) -----------------------------------------------------------
+
+
+@mcp.tool(annotations=READ)
+async def pending_taste_questions(ctx: Context, user: str = "me", limit: int = 3, domain: str | None = None) -> dict:
+    """The taste engine's questions, most valuable first: onboarding picks, 'why did you stop
+    watching X?', this-or-that, and taste-evolution checks ('you seem to be getting into X, more
+    of that?'). Each has a prompt, the allowed answers and the exact answer body. Optional:
+    unanswered questions expire harmlessly."""
+    return await _reco(f"/questions/{await _person(ctx, user)}/queue", {"limit": max(1, min(limit, 10)), "domain": domain})
+
+
+@mcp.tool(annotations=WRITE)
+async def answer_taste_question(ctx: Context, question_id: str, answer: dict, user: str = "me") -> dict:
+    """Record an answer to a taste-engine question. `answer` is the question's answer_with.body
+    without user_id and question_id, e.g. {"kind": "interest", "response": "more"},
+    {"kind": "this_or_that", "a": "...", "b": "...", "answer": "a"} or
+    {"kind": "abandon", "canon_key": "...", "reason": "not_in_mood"}."""
+    return await _answer({**answer, "user_id": await _person(ctx, user), "question_id": question_id})
+
+
+@mcp.tool(annotations=WRITE)
+async def dismiss_taste_question(ctx: Context, question_id: str, user: str = "me") -> dict:
+    """The person doesn't want to answer: close the question without recording any taste data."""
+    return await _answer({"kind": "dismiss", "user_id": await _person(ctx, user), "question_id": question_id})
+
+
+@mcp.tool(annotations=WRITE)
+async def correct_reason(ctx: Context, reason_id: str, response: str, item_type: str = "movie", user: str = "me") -> dict:
+    """Correct a reason Muse gave for a recommendation (reason_details[].id). response:
+    "not_relevant" (don't base recommendations on that title), "more" or "less" (an interest or
+    a tag such as a director), or "restore" to undo."""
+    return await _answer({"kind": "reason", "user_id": await _person(ctx, user), "reason_id": reason_id,
+                          "response": response, "item_type": item_type})
+
+
+@mcp.tool(annotations=READ)
+async def home_rows(ctx: Context, item_type: str = "movie", per_row: int = 6, user: str = "me") -> dict:
+    """A home screen of themed rows, each titled with its reason: Top picks, Because you watched
+    X, More <interest>, For your weekend evenings, Watch again, From your watchlist, New in your
+    library, Something different. Good for "what should I watch?" with a few options."""
+    body = await _reco(f"/rows/{await _person(ctx, user)}", {"item_type": item_type, "per_row": max(4, min(per_row, 12)), "log": "false"})
+    return {"rows": [{"title": r["title"], "items": [{k: i.get(k) for k in ("title", "year", "canon_key", "reasons")} for i in r["items"]]}
+                     for r in body.get("rows", [])]}
+
+
+@mcp.tool(annotations=READ)
+async def taste_engine_profile(ctx: Context, domain: str = "video", user: str = "me") -> dict:
+    """The taste engine's view: interests with examples, loved and disliked titles, top tags and a
+    summary. domain: video | youtube | music | books."""
+    return await _reco(f"/profile/{await _person(ctx, user)}", {"domain": domain})
+
+
+@mcp.tool(annotations=READ)
+async def taste_evolution(ctx: Context, domain: str = "video", user: str = "me") -> dict:
+    """How the taste is changing: per interest emerging/growing/stable/fading/dormant, satiation,
+    rhythms (when they watch what), a monthly timeline and milestones."""
+    return await _reco(f"/evolution/{await _person(ctx, user)}", {"domain": domain})
 
 
 @mcp.prompt(title="Taste interview")

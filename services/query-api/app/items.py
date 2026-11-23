@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+
+from muse_schema.storage import blind_keys, fetch_open
 from typing import Any
 
 DOMAIN_LABELS = {
@@ -36,27 +38,36 @@ def summarize_metadata(item_type: str, md: dict[str, Any]) -> dict[str, Any]:
 
 
 async def item_details(conn, keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
-    """Latest non-empty metadata per (source, source_item_id)."""
+    """Latest non-empty metadata per (source, source_item_id). Events store the item id blind and
+    the metadata sealed (muse_schema.storage), so lookups go by blind id and metadata is read
+    after opening."""
     if not keys:
         return {}
-    rows = await conn.fetch(
+    sources, bids, back = blind_keys(keys)
+    rows = await fetch_open(
+        conn,
         """
-        SELECT DISTINCT ON (e.source, e.source_item_id) e.source, e.source_item_id, e.item_type, e.metadata
+        SELECT e.source, e.source_item_id, e.item_type, e.metadata, e."timestamp"
         FROM event e
         JOIN unnest($1::text[], $2::text[]) AS k(source, sid) ON e.source = k.source AND e.source_item_id = k.sid
-        WHERE e.metadata <> '{}'::jsonb
-        ORDER BY e.source, e.source_item_id, e."timestamp" DESC
+        ORDER BY e."timestamp" DESC
         """,
-        [k[0] for k in keys],
-        [k[1] for k in keys],
+        sources,
+        bids,
     )
-    return {(r["source"], r["source_item_id"]): {"item_type": r["item_type"], "metadata": r["metadata"] or {}} for r in rows}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        k = (r["source"], r["source_item_id"])
+        if k not in out and r["metadata"]:
+            out[k] = {"item_type": r["item_type"], "metadata": r["metadata"]}
+    return out
 
 
 async def interactions(conn, group: list[uuid.UUID], keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
     """What this person did with each item: counts per action, last time, net weight."""
     if not keys:
         return {}
+    sources, bids, back = blind_keys(keys)
     rows = await conn.fetch(
         """
         SELECT e.source, e.source_item_id, e.action, count(*) AS n, max(e."timestamp") AS last, sum(e.action_weight) AS w
@@ -66,13 +77,14 @@ async def interactions(conn, group: list[uuid.UUID], keys: list[tuple[str, str]]
         GROUP BY 1, 2, 3
         """,
         group,
-        [k[0] for k in keys],
-        [k[1] for k in keys],
+        sources,
+        bids,
     )
+    rows = [{**dict(r), "source_item_id": back.get((r["source"], r["source_item_id"]), (r["source"], r["source_item_id"]))[1]} for r in rows]
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for r in rows:
         d = out.setdefault((r["source"], r["source_item_id"]), {"actions": {}, "last": None, "net_weight": 0.0})
-        d["actions"][r["action"]] = r["n"]
+        d["actions"][r["action"]] = d["actions"].get(r["action"], 0) + r["n"]  # plain and blind rows of one item add up
         d["net_weight"] = round(d["net_weight"] + float(r["w"] or 0), 3)
         if d["last"] is None or r["last"] > d["last"]:
             d["last"] = r["last"]

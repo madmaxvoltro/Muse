@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 
-from conftest import ROOT
+from muse_testkit import ROOT
 from muse_schema import Event
 
 

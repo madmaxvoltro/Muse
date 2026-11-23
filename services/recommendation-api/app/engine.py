@@ -1,513 +1,468 @@
-"""The recommendation engine: one pipeline for lists, groups, next-track and radio.
+"""Request-time recommendation pipeline (docs/recommender.md):
 
-1. **Person** — everything Muse knows about one person for one domain: taste vectors in three
-   spaces (text/metadata, sound via CLAP, behaviour via sessions), taste facets, a context
-   taste for the current situation, their preference model over audio features, facts, sliders,
-   what they've already seen, what they keep ignoring, active goals.
-2. **Generators** — candidates from many angles, so the list isn't one neighbourhood of one
-   average: taste, each facet, sound, behaviour, co-occurrence (played after what you played),
-   new arrivals, the current mood, goals.
-3. **Features** — for every candidate, its fit in every space (not only the one that found it),
-   its preference-model probability, mood fit, context fit, and the classic genre statistics.
-4. **Score** — hand-weighted (or learned, when a trained ranker beats them on holdout), plus
-   what Muse was told (facts), source weights, a penalty for things shown again and again
-   without reaction, a goal boost.
-5. **Re-rank** — facet quotas (each of your tastes gets room), artist and genre caps, explore
-   slots for uncertain-but-promising items.
+  profile (stored by the worker)
+    + events newer than the profile (a thumbs-down counts on the very next request)
+  -> generators: interests / short-term / item-to-item / related / household / backlog / mood / quality
+  -> RRF fusion -> exclusion of seen titles
+  -> features + score + uncertainty for every candidate (muse_taste.ranking)
+  -> calibrated, de-duplicated list with Thompson-sampled explore slots (muse_taste.rerank)
+  -> explanations, impression log
 """
 
 from __future__ import annotations
 
-import json
-import math
+import asyncio
+import logging
+import time
 import uuid
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime, timezone
 
-from muse_schema import content_point_id, taste_point_id
-from muse_schema import moods as M
-from qdrant_client.http.models import FieldCondition, Filter, MatchAny, MatchValue
+import asyncpg
+import numpy as np
+from muse_schema import canon_point_id
+from muse_taste.canon import domain_of
+from muse_taste.evolution import Adjustment, adjustment, apply_importance, stretch_score
+from muse_taste.profile import Anchor, Prototype, TasteProfile, apply_tag_overrides, unit
+from muse_taste.ranking import DEFAULT_WEIGHTS, CandidateInput, Scored, explain_structured, score_candidates
+from muse_taste.rerank import daily_seed, select
+from muse_taste.retrieval import interest_quotas, rrf
+from muse_taste.signals import aggregate, feedback_overrides, from_rows
+from muse_schema.crypto import P_PROFILE, get_vault
+from muse_taste.store import ITEMS_COLLECTION, open_canon_data, open_payload
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qm
 
-from .candidates import genre_features, get_owned_item_ids, get_user_genre_stats, resolve_taste_vector
-from .context import Ctx
-from .scoring import Candidate, confidence
+logger = logging.getLogger("muse.reco.engine")
 
-POOL = 400  # candidates kept before scoring
-IMPORT_SOURCES = ("spotify", "soundcloud", "goodreads", "storygraph", "youtube")
-
-
-def title_key(title: str | None) -> str:
-    import re
-    import unicodedata
-
-    t = unicodedata.normalize("NFKD", title or "")
-    t = "".join(ch for ch in t if not unicodedata.combining(ch)).casefold()
-    t = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", t)  # (Remastered), [Live] ...
-    return re.sub(r"[^a-z0-9]+", "", t)
-
-# Hand weights. Missing features contribute nothing. Every term ends up in `explanation`.
-WEIGHTS = {
-    "similarity": 0.28, "facet_fit": 0.14, "audio_sim": 0.14, "behavior_sim": 0.08, "cooccur": 0.08,
-    "preference": 0.08, "context_fit": 0.05, "mood_fit": 0.16, "recency_of_similar": 0.05,
-    "within_user_popularity": 0.04, "completion_rate": 0.04, "confidence": 0.05, "freshness": 0.03, "goal_fit": 0.08,
+# What a request for an item_type actually returns: episodes are never recommended one by one.
+TARGET_TYPES = {
+    "movie": ["movie"],
+    "series": ["series"],
+    "series_episode": ["series"],
+    "youtube_video": ["youtube_video"],
+    "track": ["track"],
+    "audiobook": ["audiobook"],
+    "ebook": ["ebook"],
 }
-FEATURES = tuple(WEIGHTS)
 
-
-def _j(v: Any) -> Any:
-    return json.loads(v) if isinstance(v, str) else v
-
-
-def cos(a, b) -> float | None:
-    if a is None or b is None:
-        return None
-    na = math.sqrt(sum(x * x for x in a)) or 1.0
-    nb = math.sqrt(sum(x * x for x in b)) or 1.0
-    return sum(x * y for x, y in zip(a, b)) / (na * nb)
-
-
-def blend(vectors: list[tuple[list[float] | None, float]]) -> list[float] | None:
-    """Weighted mix of normalised vectors (None entries skipped)."""
-    present = [(v, w) for v, w in vectors if v is not None and w > 0]
-    if not present:
-        return None
-    dim = len(present[0][0])
-    out = [0.0] * dim
-    for v, w in present:
-        n = math.sqrt(sum(x * x for x in v)) or 1.0
-        for i, x in enumerate(v):
-            out[i] += w * x / n
-    return out
+RECENT_EVENTS_SQL = """
+SELECT e.source, e.source_item_id, e.item_type, e.action, e.action_weight, e."timestamp", e.progress_pct, e.metadata,
+       i.canon_key, i.parent_key, p.canon_key AS parent_canon
+FROM event e
+LEFT JOIN item i ON i.item_key = e.source || ':' || e.source_item_id
+LEFT JOIN item p ON p.item_key = i.parent_key
+WHERE e.user_id = $1 AND e.ingested_at > $2 AND e.source_item_id IS NOT NULL AND e.action <> 'cataloged'
+"""
 
 
 @dataclass
-class Facet:
-    space: str
-    idx: int
-    share: float
-    label: str
-    vector: list[float]
-
-
-@dataclass
-class Person:
-    canonical: uuid.UUID
-    group: list[uuid.UUID]
+class Request:
+    user_id: str
     item_type: str
-    taste: list[float] | None = None
-    taste_how: str = "none"
-    context_taste: list[float] | None = None
-    audio_taste: list[float] | None = None
-    behavior_taste: list[float] | None = None
-    facets: list[Facet] = field(default_factory=list)
-    pref_model: dict | None = None
-    pref_summary: list[str] = field(default_factory=list)
-    facts: list[dict] = field(default_factory=list)
-    overlay: dict = field(default_factory=dict)
-    owned: set[str] = field(default_factory=set)
-    genre_stats: dict = field(default_factory=dict)
-    ignored: dict[str, int] = field(default_factory=dict)
-    recent_positive: list[str] = field(default_factory=list)
-    goals: list[dict] = field(default_factory=list)
-    heard_titles: set[str] = field(default_factory=set)  # from imports (Spotify...): same song, other source
-    exclude_heard: bool = True
+    limit: int = 20
+    explore_ratio: float | None = None
+    mood: str | None = None
+    surface: str = "home"
+    include_unavailable: bool = False
+    log: bool = True
+    at: datetime | None = None  # "now" for rhythms (testing, or a client in another timezone)
 
 
 @dataclass
-class Item(Candidate):
-    generators: set[str] = field(default_factory=set)
-    features: dict[str, float] = field(default_factory=dict)
-    audio: dict = field(default_factory=dict)
-    facet: str | None = None
-    facet_key: str | None = None
-    artist: str = ""
-    payload: dict = field(default_factory=dict)
-    goal: str | None = None
-    tv: list[float] | None = None  # text / sound / behaviour vectors, for sequencing
-    av: list[float] | None = None
-    bv: list[float] | None = None
-
-    @property
-    def key(self) -> str:
-        return f"{self.source}:{self.source_item_id}"
+class Result:
+    request_id: str
+    items: list[Scored]
+    profile: TasteProfile | None
+    titles: dict[str, str]
+    cold_start: bool = False
+    timings: dict[str, float] = field(default_factory=dict)
+    pool: list[Scored] = field(default_factory=list)  # the whole scored pool, best first
 
 
-# --- loading a person ----------------------------------------------------------------------------
+class Engine:
+    def __init__(self, pool: asyncpg.Pool, qdrant: QdrantClient, embedder_factory=None):
+        self.pool = pool
+        self.qdrant = qdrant
+        self._embedder_factory = embedder_factory
+        self._embedder = None
+        self._weights: tuple[float, dict[str, float]] = (0.0, dict(DEFAULT_WEIGHTS))
+        self._anchor_cache: dict[tuple[str, str, str], dict[str, np.ndarray]] = {}
 
+    # ---- loading --------------------------------------------------------------------------
+    async def weights(self) -> dict[str, float]:
+        if time.monotonic() - self._weights[0] > 600:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT weights FROM ranker_model WHERE adopted ORDER BY fitted_at DESC LIMIT 1")
+            self._weights = (time.monotonic(), {**DEFAULT_WEIGHTS, **(row["weights"] if row else {})})
+        return self._weights[1]
 
-def _scroll_facets(qd, collection: str, user: str, item_type: str, space: str) -> list[Facet]:
-    try:
-        pts, _ = qd.scroll(collection, scroll_filter=Filter(must=[
-            FieldCondition(key="user_id", match=MatchValue(value=user)),
-            FieldCondition(key="item_type", match=MatchValue(value=item_type))]), with_vectors=True, limit=20)
-    except Exception:
-        return []
-    return [Facet(space, int((p.payload or {}).get("idx", 0)), float((p.payload or {}).get("share", 0)),
-                  (p.payload or {}).get("label", ""), list(p.vector)) for p in pts]
+    async def profile(self, user_id: str, domain: str) -> TasteProfile | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT profile, computed_at FROM taste_profile WHERE user_id = $1 AND domain = $2", uuid.UUID(user_id), domain)
+        if not row:
+            return None
+        p = TasteProfile.from_json(get_vault().open_json(row["profile"], P_PROFILE))
+        p.computed_at = row["computed_at"].isoformat()
+        return p
 
+    async def overlay(self, user_id: str) -> dict:
+        async with self.pool.acquire() as conn:
+            # SELECT * so a database without migration 008 (evolution_strength) still works
+            row = await conn.fetchrow("SELECT * FROM user_overlay WHERE user_id = $1", uuid.UUID(user_id))
+        return dict(row) if row else {}
 
-def _point(qd, collection: str, pid: str) -> list[float] | None:
-    try:
-        pts = qd.retrieve(collection, [pid], with_vectors=True)
-    except Exception:
-        return None
-    return list(pts[0].vector) if pts else None
-
-
-async def load_person(conn, qd, canonical: uuid.UUID, group: list[uuid.UUID], item_type: str, ctx: Ctx, *,
-                      facts: list[dict], overlay: dict, taste_from: str | None = None, blend_ratio: float = 0.0) -> Person:
-    user = str(canonical)
-    p = Person(canonical, group, item_type, facts=facts, overlay=overlay)
-    p.taste, p.taste_how = resolve_taste_vector(qd, user, item_type, taste_from, blend_ratio)
-    ctx_vecs = [_point(qd, "taste_vectors", taste_point_id(user, f"{item_type}@{b}")) for b in ctx.buckets]
-    p.context_taste = blend([(v, 1.0) for v in ctx_vecs])
-    p.audio_taste = _point(qd, "audio_taste", taste_point_id(user, item_type))
-    p.behavior_taste = _point(qd, "behavior_taste", taste_point_id(user, item_type))
-    p.facets = _scroll_facets(qd, "taste_facets", user, item_type, "text") + _scroll_facets(qd, "taste_facets_audio", user, item_type, "audio")
-    p.owned = await get_owned_item_ids(conn, group)
-    p.genre_stats = await get_user_genre_stats(conn, qd, group)
-    try:
-        row = await conn.fetchrow("SELECT model FROM taste_model WHERE user_id = $1 AND item_type = $2 AND kind = 'audio_pref'", canonical, item_type)
-        if row:
-            p.pref_model = _j(row["model"])
-            p.pref_summary = p.pref_model.get("summary", [])
-        p.ignored = {f"{r['source']}:{r['source_item_id']}": r["n"] for r in await conn.fetch(
-            "SELECT source, source_item_id, count(*) AS n FROM engine_impression WHERE user_id = $1 AND item_type = $2 "
-            "AND shown_at > now() - interval '30 days' AND outcome IS DISTINCT FROM 'positive' GROUP BY 1, 2 HAVING count(*) >= 3",
-            canonical, item_type)}
-        p.goals = [dict(r, criteria=_j(r["criteria"])) for r in await conn.fetch(
-            "SELECT id, title, domain, criteria FROM goal WHERE user_id = $1 AND status = 'active' AND domain IN ($2, 'general')",
-            canonical, item_type)]
-    except Exception:  # database without migrations 008/009
-        pass
-    if item_type in ("track", "ebook", "audiobook"):
-        p.heard_titles = {title_key(r["t"]) for r in await conn.fetch(
-            "SELECT DISTINCT metadata->>'title' AS t FROM event WHERE user_id = ANY($1::uuid[]) AND item_type = $2 "
-            "AND source = ANY($3::text[]) AND action IN ('completed', 'favorited', 'rated', 'skipped', 'played') AND metadata ? 'title'",
-            group, item_type, list(IMPORT_SOURCES))}
-    p.recent_positive = [f"{r['source']}:{r['source_item_id']}" for r in await conn.fetch(
-        "SELECT source, source_item_id FROM event WHERE user_id = ANY($1::uuid[]) AND item_type = $2 AND action_weight > 0 "
-        "AND source_item_id IS NOT NULL AND action <> 'cataloged' ORDER BY \"timestamp\" DESC LIMIT 25", group, item_type)]
-    return p
-
-
-# --- generators ---------------------------------------------------------------------------------------
-
-
-def _filter(item_type: str | None, sources: list[str] | None, exclude: list[str] | None) -> Filter:
-    must = [FieldCondition(key="item_type", match=MatchValue(value=item_type))] if item_type else []
-    if sources:
-        must.append(FieldCondition(key="source", match=MatchAny(any=sources)))
-    must_not = [FieldCondition(key="source", match=MatchAny(any=exclude))] if exclude else None
-    return Filter(must=must, must_not=must_not)
-
-
-def _query(qd, collection: str, vector, flt: Filter | None, limit: int) -> list[tuple[str, str, float, dict]]:
-    if vector is None or limit <= 0:
-        return []
-    try:
-        hits = qd.query_points(collection_name=collection, query=list(vector), query_filter=flt, limit=limit).points
-    except Exception:
-        return []
-    return [((h.payload or {}).get("source", ""), (h.payload or {}).get("source_item_id", ""), float(h.score), h.payload or {}) for h in hits]
-
-
-async def generate(conn, qd, p: Person, ctx: Ctx, *, sources=None, exclude_sources=None, exclude: set[str] | None = None,
-                   seeds: list[tuple[str, str]] | None = None) -> dict[str, set[str]]:
-    """key -> generators that proposed it."""
-    found: dict[str, set[str]] = defaultdict(set)
-    t = p.item_type
-    flt = _filter(t, sources, exclude_sources)
-    audio_flt = _filter(None, sources, exclude_sources)  # audio_items holds tracks only
-
-    def add(hits, name):
-        for s, sid, _, _ in hits:
-            if s and sid:
-                found[f"{s}:{sid}"].add(name)
-
-    mood_text = ctx.mood_text_vec
-    taste = blend([(p.taste, 1.0), (p.context_taste, 0.35), (mood_text, 0.45 if mood_text else 0)]) if p.taste or mood_text else None
-    add(_query(qd, "content_items", taste, flt, 160), "taste")
-    for f in p.facets:
-        coll, fl = ("content_items", flt) if f.space == "text" else ("audio_items", audio_flt)
-        add(_query(qd, coll, blend([(f.vector, 1.0), (mood_text if f.space == "text" else ctx.mood_audio_vec, 0.3)]), fl,
-                   max(12, int(120 * f.share))), f"facet:{f.space}:{f.idx}")
-    if t == "track":
-        add(_query(qd, "audio_items", blend([(p.audio_taste, 1.0), (ctx.mood_audio_vec, 0.5 if ctx.mood_audio_vec else 0)]), audio_flt, 100), "sound")
-        if ctx.mood_audio_vec:
-            add(_query(qd, "audio_items", ctx.mood_audio_vec, audio_flt, 50), "mood")
-    if mood_text:
-        add(_query(qd, "content_items", mood_text, flt, 50), "mood")
-    add(_query(qd, "behavior_items", p.behavior_taste, Filter(must=[FieldCondition(key="source", match=MatchAny(any=sources))]) if sources else None, 60), "behavior")
-    for s, sid in seeds or []:  # "more like this" / next track
-        pid = content_point_id(s, sid)
-        for coll, name, fl in (("content_items", "seed_text", flt), ("audio_items", "seed_sound", audio_flt), ("behavior_items", "seed_behavior", None)):
-            vec = _point(qd, coll, pid)
-            add(_query(qd, coll, vec, fl, 60), name)
-    recent = [f"{s}:{sid}" for s, sid in (seeds or [])] + p.recent_positive[:15]
-    try:
-        for r in await conn.fetch(
-            "SELECT to_key, sum(count + 2 * completions - 2 * skips) AS s FROM item_transition WHERE from_key = ANY($1::text[]) "
-            "GROUP BY 1 HAVING sum(count + 2 * completions - 2 * skips) > 0 ORDER BY 2 DESC LIMIT 80", recent):
-            found[r["to_key"]].add("cooccur")
-    except Exception:
-        pass
-    for r in await conn.fetch(
-        "SELECT DISTINCT source, source_item_id FROM event WHERE action = 'cataloged' AND item_type = $1 AND source_item_id IS NOT NULL "
-        "AND ingested_at > now() - interval '14 days' AND source <> 'catalog' AND ($2::text[] IS NULL OR source = ANY($2)) LIMIT 150",
-        t, sources):
-        found[f"{r['source']}:{r['source_item_id']}"].add("fresh")
-    for g in p.goals:
-        add(_query(qd, "content_items", (g["criteria"] or {}).get("vec"), flt, 40), f"goal:{g['id']}")
-
-    drop = set(p.owned) | (exclude or set())
-    out = {k: v for k, v in found.items() if k not in drop}
-    if exclude_sources:
-        out = {k: v for k, v in out.items() if k.split(":", 1)[0] not in exclude_sources}
-    if sources:
-        out = {k: v for k, v in out.items() if k.split(":", 1)[0] in sources}
-    # Keep the pool bounded: items proposed by more generators first.
-    return dict(sorted(out.items(), key=lambda kv: -len(kv[1]))[:POOL])
-
-
-# --- features ------------------------------------------------------------------------------------------
-
-
-def _retrieve_many(qd, collection: str, ids: list[str], with_vectors=True) -> dict[str, Any]:
-    out = {}
-    for i in range(0, len(ids), 256):
-        try:
-            for pt in qd.retrieve(collection, ids[i:i + 256], with_vectors=with_vectors, with_payload=True):
-                out[str(pt.id)] = pt
-        except Exception:
-            break
-    return out
-
-
-async def audio_features(conn, keys: list[str]) -> dict[str, dict]:
-    if not keys:
-        return {}
-    try:
-        rows = await conn.fetch(
-            "SELECT source, source_item_id, features FROM item_audio a JOIN unnest($1::text[], $2::text[]) AS k(s, i) "
-            "ON a.source = k.s AND a.source_item_id = k.i WHERE a.status = 'done'",
-            [k.split(":", 1)[0] for k in keys], [k.split(":", 1)[1] for k in keys])
-    except Exception:
-        return {}
-    return {f"{r['source']}:{r['source_item_id']}": _j(r["features"]) for r in rows}
-
-
-def pref_prob(model: dict | None, feats: dict | None) -> float | None:
-    if not model or not feats or "energy" not in feats:
-        return None
-    from muse_schema.audio import feature_vector
-
-    x = feature_vector(feats)
-    z = sum(((xi - m) / s) * w for xi, m, s, w in zip(x, model["mean"], model["std"], model["weights"])) + model["bias"]
-    return 1 / (1 + math.exp(-max(-30, min(30, z))))
-
-
-async def featurize(conn, qd, p: Person, ctx: Ctx, found: dict[str, set[str]], total_sources: int = 7,
-                    cooccur_scores: dict[str, float] | None = None) -> list[Item]:
-    keys = list(found)
-    pids = {k: content_point_id(*k.split(":", 1)) for k in keys}
-    text = _retrieve_many(qd, "content_items", list(pids.values()))
-    audio = _retrieve_many(qd, "audio_items", list(pids.values())) if p.item_type == "track" else {}
-    beh = _retrieve_many(qd, "behavior_items", list(pids.values()))
-    feats_by_key = await audio_features(conn, keys) if p.item_type == "track" else {}
-    if cooccur_scores is None:
-        cooccur_scores = {}
-        recent = p.recent_positive[:15]
-        if recent:
+    def catalog_ready(self) -> bool:
+        """False on a fresh install until the worker has created the vector collection."""
+        if not getattr(self, "_ready", False):
             try:
-                for r in await conn.fetch(
-                    "SELECT to_key, sum(count + 2 * completions - 2 * skips) AS s FROM item_transition "
-                    "WHERE from_key = ANY($1::text[]) AND to_key = ANY($2::text[]) GROUP BY 1", recent, keys):
-                    cooccur_scores[r["to_key"]] = float(r["s"])
+                self._ready = bool(self.qdrant.collection_exists(ITEMS_COLLECTION))
             except Exception:
-                pass
-    top_co = max(cooccur_scores.values(), default=0) or 1.0
-    text_taste = blend([(p.taste, 1.0), (p.context_taste, 0.25)]) if p.taste else None
+                self._ready = False
+        return self._ready
 
-    items: list[Item] = []
-    for k in keys:
-        pid = pids[k]
-        tp = text.get(pid)
-        if tp is None:
-            continue  # not embedded: nothing to judge it on
-        payload = tp.payload or {}
-        if payload.get("item_type") != p.item_type:
-            continue
-        if p.exclude_heard and p.heard_titles and k.split(":", 1)[0] not in IMPORT_SOURCES and title_key(payload.get("title")) in p.heard_titles:
-            continue  # heard it on Spotify/SoundCloud already: not a discovery
-        tv = list(tp.vector)
-        ap = audio.get(pid)
-        av = list(ap.vector) if ap is not None else None
-        bp = beh.get(pid)
-        genres = payload.get("genres", []) or []
-        gf = genre_features(genres, p.genre_stats, total_sources)
-        f: dict[str, float] = {
-            "similarity": cos(text_taste, tv) or 0.0,
-            "recency_of_similar": math.exp(-gf["recency_of_similar_days"] / 30.0),
-            "within_user_popularity": gf["within_user_popularity"],
-            "completion_rate": gf["completion_rate"],
-            "confidence": gf["confidence"],
+    async def titles_for(self, keys: list[str]) -> dict[str, str]:
+        """Titles for blind canonical keys (canon_item data is sealed)."""
+        if not keys:
+            return {}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT canon_key, data FROM canon_item WHERE canon_key = ANY($1::text[])", list(keys))
+        return {r["canon_key"]: open_canon_data(r["data"]).get("title") or "" for r in rows}
+
+    async def canon_items(self, keys: list[str]) -> list[dict]:
+        if not keys:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT canon_key, item_type, available, data FROM canon_item WHERE canon_key = ANY($1::text[])", list(keys))
+        return [{**open_canon_data(r["data"]), "canon_key": r["canon_key"], "item_type": r["item_type"], "available": r["available"]} for r in rows]
+
+    def embedder(self):
+        if self._embedder is None:
+            if self._embedder_factory is None:
+                raise RuntimeError("no embedder configured")
+            try:
+                self._embedder = self._embedder_factory()
+            except Exception as exc:
+                raise RuntimeError(
+                    "mood queries need an embedder in the recommendation API: set MUSE_EMBED_PROVIDER=openai "
+                    f"(an embedding server) or install sentence-transformers in its image ({exc})"
+                ) from exc
+        return self._embedder
+
+    # ---- responsiveness ---------------------------------------------------------------------
+    async def apply_recent(self, prof: TasteProfile, user_id: str, domain: str, disabled: list[str]) -> None:
+        """Folds events that arrived after the profile was computed into it, so feedback is
+        visible immediately instead of after the next worker cycle (Wang et al. 2023 measure
+        exactly this 'responsiveness')."""
+        since = datetime.fromisoformat(prof.computed_at)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(RECENT_EVENTS_SQL, uuid.UUID(user_id), since)
+        if not rows:
+            return
+        recent = [e for e in from_rows(rows) if domain_of(e.item_type) == domain]
+        # corrections to reasons take effect immediately, not after the next worker cycle
+        muted, tag_over = feedback_overrides(recent)
+        if muted:
+            prof.anchors = [a for a in prof.anchors if a.key not in muted]
+            prof.muted = sorted(set(prof.muted) | muted)
+        if tag_over:
+            prof.tag_weights = apply_tag_overrides(prof.tag_weights, prof.tag_scale, tag_over)
+        sig = aggregate(recent, disabled_sources=disabled)
+        seen = set(prof.seen)
+        new_neg, new_pos = [], []
+        for k, s in sig.items():
+            if s.seen or s.explicit:
+                seen.add(k)
+            if s.explicit and s.preference < 0:
+                new_neg.append((k, s))
+            elif s.preference > 0.5:
+                new_pos.append((k, s))
+        prof.seen = sorted(seen)
+        if new_neg or new_pos:
+            vecs = self.vectors([k for k, _ in new_neg + new_pos])
+            for k, s in new_neg:
+                if k in vecs:
+                    prof.negatives.insert(0, Prototype(key=k, vector=vecs[k].tolist(), weight=min(-s.preference, 2.0)))
+            for k, s in new_pos:
+                prof.anchors.insert(0, Anchor(key=k, preference=s.preference, confidence=s.confidence, weight=s.preference))
+
+    # ---- vector store helpers ----------------------------------------------------------------
+    def vectors(self, keys: list[str]) -> dict[str, np.ndarray]:
+        ids = {canon_point_id(k): k for k in keys}
+        out: dict[str, np.ndarray] = {}
+        idl = list(ids)
+        for i in range(0, len(idl), 256):
+            for p in self.qdrant.retrieve(ITEMS_COLLECTION, ids=idl[i : i + 256], with_vectors=True, with_payload=False):
+                out[ids[str(p.id)]] = np.asarray(p.vector, dtype=np.float32)
+        return out
+
+    def anchor_vectors(self, prof: TasteProfile) -> dict[str, np.ndarray]:
+        key = (prof.user_id, prof.domain, prof.computed_at)
+        if key not in self._anchor_cache:
+            if len(self._anchor_cache) > 64:
+                self._anchor_cache.clear()
+            self._anchor_cache[key] = self.vectors([a.key for a in prof.anchors[:300]])
+        cached = self._anchor_cache[key]
+        missing = [a.key for a in prof.anchors[:300] if a.key not in cached]
+        return {**cached, **(self.vectors(missing) if missing else {})}
+
+    def _filter(self, types: list[str], include_unavailable: bool) -> qm.Filter:
+        must: list = [qm.FieldCondition(key="item_type", match=qm.MatchAny(any=types))]
+        if not include_unavailable:
+            must.append(qm.FieldCondition(key="available", match=qm.MatchValue(value=True)))
+        return qm.Filter(must=must)
+
+    def _query(self, query, flt: qm.Filter, limit: int, pool: dict) -> list[str]:
+        try:
+            pts = self.qdrant.query_points(ITEMS_COLLECTION, query=query, query_filter=flt, limit=limit, with_vectors=True, with_payload=True).points
+        except Exception as exc:  # e.g. querying by a point id that was removed
+            logger.debug("query failed: %s", exc)
+            return []
+        keys = []
+        for p in pts:
+            k = (p.payload or {}).get("ck")
+            if k:
+                if k not in pool:
+                    pool[k] = (np.asarray(p.vector, dtype=np.float32), open_payload(p.payload))
+                keys.append(k)
+        return keys
+
+    def _by_keys(self, keys: list[str], types: list[str], include_unavailable: bool, pool: dict) -> list[str]:
+        if not keys:
+            return []
+        want = {canon_point_id(k): k for k in keys}
+        got: dict[str, tuple] = {}
+        idl = list(want)
+        for i in range(0, len(idl), 256):
+            for p in self.qdrant.retrieve(ITEMS_COLLECTION, ids=idl[i : i + 256], with_vectors=True, with_payload=True):
+                raw = p.payload or {}
+                if raw.get("item_type") in types and (include_unavailable or raw.get("available")):
+                    got[want[str(p.id)]] = (np.asarray(p.vector, dtype=np.float32), open_payload(raw))
+        for k, v in got.items():
+            pool.setdefault(k, v)
+        return [k for k in keys if k in got]
+
+    # ---- generation ---------------------------------------------------------------------
+    def generate(self, prof: TasteProfile | None, types: list[str], include_unavailable: bool, mood_vec: np.ndarray | None,
+                 adj: Adjustment | None = None) -> tuple[dict[str, list[str]], dict]:
+        flt = self._filter(types, include_unavailable)
+        pool: dict[str, tuple[np.ndarray, dict]] = {}
+        lists: dict[str, list[str]] = {}
+        if prof is not None:
+            quotas = interest_quotas([i.importance for i in prof.interests], total=240)
+            for it, q in zip(prof.interests, quotas):
+                if q <= 0:
+                    continue
+                name = "pinned" if it.kind == "pinned" else "interests"
+                lists[f"{name}:{it.id}"] = self._query(it.medoid if it.kind == "behaviour" else it.centroid, flt, q, pool)
+            if prof.short_term:
+                lists["short_term"] = self._query(prof.short_term, flt, 60, pool)
+            recent_pos = [a for a in prof.anchors if a.preference > 0.8][:6]
+            for a in recent_pos:
+                lists[f"item2item:{a.key}"] = self._query(canon_point_id(a.key), flt, 25, pool)
+            lists["related"] = self._by_keys([r["key"] for r in prof.related[:200]], types, include_unavailable, pool)
+            lists["household"] = self._by_keys([h["key"] for h in prof.household[:120]], types, include_unavailable, pool)
+            backlog = sorted(prof.backlog, key=lambda k: -prof.backlog[k])
+            lists["backlog"] = self._by_keys(backlog[:100], types, include_unavailable, pool)
+            if adj is not None and prof.interests:
+                lists["stretch"] = self._stretch(prof, adj, flt, pool)
+        if mood_vec is not None:
+            lists["mood"] = self._query(mood_vec.tolist(), flt, 120, pool)
+        try:
+            pts, _ = self.qdrant.scroll(ITEMS_COLLECTION, scroll_filter=flt, limit=80, with_vectors=True, with_payload=True,
+                                        order_by=qm.OrderBy(key="quality", direction=qm.Direction.DESC))
+        except Exception:
+            pts, _ = self.qdrant.scroll(ITEMS_COLLECTION, scroll_filter=flt, limit=80, with_vectors=True, with_payload=True)
+        q_keys = []
+        for p in pts:
+            k = (p.payload or {}).get("ck")
+            if k:
+                if k not in pool:
+                    pool[k] = (np.asarray(p.vector, dtype=np.float32), open_payload(p.payload))
+                q_keys.append(k)
+        lists["quality"] = q_keys
+        return lists, pool
+
+    def _stretch(self, prof: TasteProfile, adj: Adjustment, flt: qm.Filter, pool: dict) -> list[str]:
+        """'One step beyond': titles in the band just outside the edge of your strongest
+        interests (evolution.stretch_score), best first."""
+        found: list[str] = []
+        for it in sorted(prof.interests, key=lambda i: -i.importance)[:3]:
+            found += self._query(it.centroid, flt, 150, pool)
+        keys = list(dict.fromkeys(found))
+        if not keys:
+            return []
+        X = unit(np.stack([pool[k][0] for k in keys]))
+        sims = (X @ prof.centroid_matrix().T - prof.baseline) / max(1.0 - prof.baseline, 1e-6)
+        radii = np.array([i.radius for i in prof.interests])
+        sc = stretch_score(sims, radii, prof.importance_vector(), adj.band)
+        return [keys[i] for i in np.argsort(-sc) if sc[i] > 0][:60]
+
+    async def fatigue(self, user_id: str) -> dict[str, int]:
+        """Distinct days a title was shown in the last 30 days without being touched since."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT canon_key, count(DISTINCT date_trunc('day', shown_at)) AS days
+                FROM impression WHERE user_id = $1 AND shown_at > now() - interval '30 days' AND NOT explore
+                GROUP BY canon_key
+                """,
+                uuid.UUID(user_id),
+            )
+        return {r["canon_key"]: int(r["days"]) for r in rows}
+
+    # ---- the whole thing ------------------------------------------------------------------
+    async def recommend(self, req: Request) -> Result:
+        t0 = time.monotonic()
+        timings: dict[str, float] = {}
+        types = TARGET_TYPES.get(req.item_type, [req.item_type])
+        domain = domain_of(types[0])
+        overlay = await self.overlay(req.user_id)
+        prof = await self.profile(req.user_id, domain)
+        adj: Adjustment | None = None
+        if prof is not None:
+            await self.apply_recent(prof, req.user_id, domain, overlay.get("disabled_sources") or [])
+            # Taste evolution: trends, satiation, rediscovery and rhythms shift interest
+            # importance for this request (retrieval slots + calibration targets), in memory only.
+            strength = float(overlay.get("evolution_strength", 1.0) if overlay.get("evolution_strength") is not None else 1.0)
+            adj = adjustment(prof, at=req.at, strength=strength)
+            apply_importance(prof, adj)
+        timings["profile"] = time.monotonic() - t0
+
+        mood_vec = None
+        if req.mood:
+            mood_vec = await asyncio.to_thread(lambda: self.embedder().embed_query(req.mood))
+
+        lists, pool = await asyncio.to_thread(self.generate, prof, types, req.include_unavailable, mood_vec, adj)
+        timings["generate"] = time.monotonic() - t0
+        exclude = set(prof.seen) | set(prof.in_progress) if prof else set()
+        fused, sources = rrf(lists)
+        cold = prof is None or (not prof.interests and not prof.anchors)
+        if prof is None:
+            prof = _empty_profile(req.user_id, domain)
+
+        fatigue = await self.fatigue(req.user_id) if not cold else {}
+        rel_map = {r["key"]: r for r in prof.related}
+        hh_map = {h["key"]: h["support"] for h in prof.household}
+        now_ts = datetime.now(timezone.utc).timestamp()
+        cands: list[CandidateInput] = []
+        for k, (vec, pl) in pool.items():
+            if k in exclude:
+                continue
+            added = pl.get("added_at")
+            cands.append(
+                CandidateInput(
+                    key=k,
+                    vector=vec,
+                    tags=pl.get("tags") or [],
+                    vote_average=pl.get("vote_average"),
+                    vote_count=pl.get("vote_count"),
+                    added_days_ago=(now_ts - added) / 86400.0 if isinstance(added, (int, float)) else None,
+                    related_support=float(rel_map.get(k, {}).get("support", 0.0)),
+                    related_via=list(rel_map.get(k, {}).get("via", [])),
+                    related_via_keys=list(rel_map.get(k, {}).get("via_keys", [])),
+                    household_support=float(hh_map.get(k, 0.0)),
+                    impressions_unengaged=fatigue.get(k, 0),
+                    generators=sources.get(k, set()),
+                    rrf=fused.get(k, 0.0),
+                    payload={
+                        "title": pl.get("title"),
+                        "year": pl.get("year"),
+                        "collection_id": pl.get("collection_id"),
+                        "vote_average": pl.get("vote_average"),
+                        "available": pl.get("available"),
+                        "library_refs": pl.get("library_refs") or [],
+                        "item_type": pl.get("item_type"),
+                        "real_key": pl.get("real_key"),
+                    },
+                )
+            )
+        anchors = await asyncio.to_thread(self.anchor_vectors, prof) if prof.anchors else {}
+        weights = await self.weights()
+        scored = score_candidates(prof, cands, anchor_vectors=anchors, weights=weights, mood_vector=mood_vec, evolution=adj)
+        timings["score"] = time.monotonic() - t0
+        scored.sort(key=lambda s: -s.score)
+        explore = req.explore_ratio if req.explore_ratio is not None else float(overlay.get("explore_ratio") or 0.125)
+        if cold:
+            explore = 0.0
+        items = select(scored[:400], prof, req.limit, explore_ratio=explore, seed=daily_seed(req.user_id, f"{req.surface}:{req.item_type}"))
+        timings["rerank"] = time.monotonic() - t0
+
+        titles = {k: (pl.get("title") or "") for k, (_, pl) in pool.items()}
+        need = [s.nearest_anchor for s in items if s.nearest_anchor and s.nearest_anchor not in titles]
+        need += [i.medoid_key for i in prof.interests if i.medoid_key not in titles]
+        if need:
+            async with self.pool.acquire() as conn:
+                for r in await conn.fetch("SELECT canon_key, data FROM canon_item WHERE canon_key = ANY($1::text[])", need):
+                    titles[r["canon_key"]] = open_canon_data(r["data"]).get("title") or ""
+
+        request_id = str(uuid.uuid4())
+        if req.log and items:
+            await self.log_impressions(request_id, req.user_id, req.surface, items)
+        timings["total"] = time.monotonic() - t0
+        return Result(request_id, items, prof, titles, cold_start=cold, timings=timings, pool=scored)
+
+    async def log_impressions(self, request_id: str, user_id: str, surface: str, items: list[Scored]) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO impression (request_id, user_id, canon_key, surface, position, score, sigma, explore, features) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)",
+                [
+                    (uuid.UUID(request_id), uuid.UUID(user_id), s.key, surface, pos, s.score, s.sigma, s.explore,
+                     {k: round(v, 5) for k, v in s.features.items()})
+                    for pos, s in enumerate(items)
+                ],
+            )
+
+    def describe(self, s: Scored, prof: TasteProfile, titles: dict[str, str]) -> dict:
+        refs = s.payload.get("library_refs") or []
+        real = s.payload.get("real_key") or ""
+        if refs:
+            source, sid = refs[0]["source"], refs[0]["source_item_id"]
+        elif ":" in real:  # not in the library: e.g. ("tmdb", "movie:603")
+            source, sid = real.split(":", 1)
+        else:
+            source, sid = "muse", s.key
+        interest = prof.interests[s.interest_id] if s.interest_id is not None and s.interest_id < len(prof.interests) else None
+        details = explain_structured(s, prof, titles)
+        return {
+            "source": source,
+            "source_item_id": sid,
+            "canon_key": s.key,  # opaque id: send it back as-is in answers
+            "tmdb_id": _tmdb_id(s.payload.get("real_key")),
+            "title": s.payload.get("title"),
+            "year": s.payload.get("year"),
+            "item_type": s.payload.get("item_type"),
+            "available": bool(s.payload.get("available")),
+            "score": round(s.score, 4),
+            "confidence": round(s.confidence, 4),
+            "explore": s.explore,
+            "interest": (interest.label or ", ".join(t.split(":", 1)[-1] for t in interest.top_tags[:2])) if interest else None,
+            "reasons": [r["text"] for r in details],
+            # each reason with its id and the corrections a client may offer (POST /answers kind "reason")
+            "reason_details": details,
+            # numeric per-feature contributions (kept as a flat map for the Jellyfin plugin)
+            "explanation": {k: round(v, 4) for k, v in s.contributions.items() if abs(v) >= 1e-4},
+            "generators": s.payload.get("generators", []),
         }
-        best_facet, best = None, -1.0
-        for fc in p.facets:
-            s = cos(fc.vector, tv if fc.space == "text" else av)
-            if s is not None and s > best:
-                best, best_facet = s, fc
-        if best_facet is not None:
-            f["facet_fit"] = best
-        if av is not None and p.audio_taste is not None:
-            f["audio_sim"] = cos(p.audio_taste, av) or 0.0
-        if bp is not None and p.behavior_taste is not None:
-            f["behavior_sim"] = cos(p.behavior_taste, list(bp.vector)) or 0.0
-        if k in cooccur_scores:
-            f["cooccur"] = max(0.0, cooccur_scores[k]) / top_co
-        af = feats_by_key.get(k) or {}
-        prob = pref_prob(p.pref_model, af)
-        if prob is not None:
-            f["preference"] = (prob - 0.5) * 2
-        if p.context_taste is not None:
-            f["context_fit"] = cos(p.context_taste, tv) or 0.0
-        if ctx.mood:
-            parts = [x for x in (cos(ctx.mood_text_vec, tv), cos(ctx.mood_audio_vec, av), M.audio_fit(af, ctx.mood_def)) if x is not None]
-            if parts:
-                f["mood_fit"] = sum(parts) / len(parts)
-        if "fresh" in found[k]:
-            f["freshness"] = 1.0
-        goal = None
-        for g in p.goals:
-            gs = cos((g["criteria"] or {}).get("vec"), tv)
-            gg = {x.lower() for x in (g["criteria"] or {}).get("genres", [])}
-            hit = max(gs or 0.0, 1.0 if gg & {x.lower() for x in genres} else 0.0)
-            if hit > f.get("goal_fit", 0.0) and hit > 0.45:
-                f["goal_fit"], goal = hit, g["title"]
-        conf = f["confidence"]
-        if p.taste is None and av is None:
-            conf = min(conf, 0.3)
-        it = Item(source=k.split(":", 1)[0], source_item_id=k.split(":", 1)[1], item_type=p.item_type,
-                  similarity=f["similarity"], recency_of_similar_days=gf["recency_of_similar_days"],
-                  within_user_popularity=gf["within_user_popularity"], completion_rate=gf["completion_rate"],
-                  confidence=conf, genres=genres, title=payload.get("title", ""))
-        it.generators, it.features, it.audio, it.payload, it.goal = found[k], f, af, payload, goal
-        it.tv, it.av, it.bv = tv, av, (list(bp.vector) if bp is not None else None)
-        it.artist = (payload.get("title", "").split(" - ")[0] if p.item_type == "track" else "")
-        if best_facet is not None:
-            it.facet, it.facet_key = best_facet.label, f"{best_facet.space}:{best_facet.idx}"
-        items.append(it)
-    return items
 
 
-# --- scoring & re-ranking --------------------------------------------------------------------------------
+def _tmdb_id(real_key: str | None) -> int | None:
+    if real_key and real_key.startswith("tmdb:"):
+        try:
+            return int(real_key.rsplit(":", 1)[1])
+        except ValueError:
+            return None
+    return None
 
 
-def score(items: list[Item], weights: dict[str, float] | None = None) -> list[Item]:
-    w = weights or WEIGHTS
-    for it in items:
-        it.reasons = {k: w[k] * v for k, v in it.features.items() if k in w and v}
-        it.score = sum(it.reasons.values())
-    return items
+def _empty_profile(user_id: str, domain: str) -> TasteProfile:
+    return TasteProfile(
+        user_id=user_id, domain=domain, computed_at=datetime.now(timezone.utc).isoformat(), baseline=0.2, interests=[], negatives=[],
+        short_term=None, tag_weights={}, tag_scale=1.0, anchors=[], seen=[], in_progress=[], backlog={}, abandoned=[],
+        n_positive=0, n_negative=0, total_confidence=0.0,
+    )
 
 
-def penalize_ignored(items: list[Item], ignored: dict[str, int]) -> None:
-    for it in items:
-        n = ignored.get(it.key, 0)
-        if n >= 3:
-            pen = -0.06 * (n - 2)
-            it.reasons["shown_but_ignored"] = pen
-            it.score += pen
-
-
-def rerank(items: list[Item], limit: int, explore_ratio: float, facets: list[Facet], *, max_per_genre: int = 3,
-           max_per_artist: int = 2) -> list[Item]:
-    ranked = sorted(items, key=lambda c: -c.score)
-    explore_slots = max(1, round(limit * explore_ratio)) if ranked and explore_ratio > 0 else 0
-    exploit_slots = limit - explore_slots
-    selected: list[Item] = []
-    genre_n: dict[str, int] = defaultdict(int)
-    artist_n: dict[str, int] = defaultdict(int)
-
-    def fits(c: Item) -> bool:
-        if c.artist and artist_n[c.artist.casefold()] >= max_per_artist:
-            return False
-        return all(genre_n[g] < max_per_genre for g in c.genres)
-
-    def take(c: Item) -> None:
-        selected.append(c)
-        for g in c.genres:
-            genre_n[g] += 1
-        if c.artist:
-            artist_n[c.artist.casefold()] += 1
-
-    # 1. Each facet gets room in proportion to its share (at least one slot if it has candidates).
-    for fc in sorted(facets, key=lambda f: -f.share):
-        quota = max(1, int(exploit_slots * fc.share * 0.6))
-        key = f"{fc.space}:{fc.idx}"
-        for c in ranked:
-            if quota <= 0 or len(selected) >= exploit_slots:
-                break
-            if c.facet_key == key and c.confidence >= 0.5 and c not in selected and fits(c):
-                take(c)
-                quota -= 1
-    # 2. Best remaining confident items.
-    for c in ranked:
-        if len(selected) >= exploit_slots:
-            break
-        if c not in selected and c.confidence >= 0.5 and fits(c):
-            take(c)
-    # 3. Explore slots: uncertain but promising.
-    n_explore = 0
-    for c in ranked:
-        if n_explore >= explore_slots:
-            break
-        if c not in selected and c.confidence < 0.5 and fits(c):
-            take(c)
-            n_explore += 1
-    # 4. Backfill, relaxing the caps.
-    for c in ranked:
-        if len(selected) >= limit:
-            break
-        if c not in selected:
-            take(c)
-    return selected[:limit]
-
-
-def describe(c: Item, facts: list[dict] | None, ctx: Ctx | None, pref_summary: list[str] | None = None) -> list[str]:
-    from .scoring import _mentions
-
-    f, why = c.features, []
-    if f.get("audio_sim", 0) >= 0.5:
-        why.append((f["audio_sim"] + 0.1, "Sounds like the music you love"))
-    if c.facet and f.get("facet_fit", 0) >= 0.45:
-        why.append((f["facet_fit"], f"Fits your {c.facet} side"))
-    if f.get("similarity", 0) >= 0.4:
-        why.append((f["similarity"], "Close to what you enjoy" if f["similarity"] < 0.55 else "Very close to what you enjoy"))
-    if c.reasons.get("stated_preference", 0) > 0:
-        subjects = [x["subject"] for x in facts or [] if x.get("subject") and x["kind"] == "likes" and _mentions(x["subject"], c)]
-        why.append((2.0, f"You said you like {subjects[0]}" if subjects else "Matches something you told Muse"))
-    if f.get("cooccur", 0) >= 0.3:
-        why.append((0.5 + f["cooccur"], "Often played after songs you just played" if c.item_type == "track" else "Often watched after what you watched"))
-    if f.get("behavior_sim", 0) >= 0.5:
-        why.append((f["behavior_sim"], "Played by people with your habits here"))
-    if f.get("preference", 0) >= 0.4 and pref_summary:
-        why.append((0.6, pref_summary[0].replace("prefers", "Has the", 1) + " you like"))
-    if ctx and ctx.mood and f.get("mood_fit", 0) >= 0.55:
-        why.append((1.5, f"For your {ctx.mood} mood" if len(ctx.mood) < 25 else "Fits your mood"))
-    if f.get("context_fit", 0) >= 0.5 and ctx and ctx.buckets:
-        why.append((0.55, f"Fits your {ctx.buckets[0]} listening" if c.item_type == "track" else f"Fits your {ctx.buckets[0]} viewing"))
-    if c.goal:
-        why.append((1.4, f"For your goal: {c.goal}"))
-    if "fresh" in c.generators:
-        why.append((0.45, "New in your library"))
-    if c.source == "catalog":
-        rel = c.payload.get("related_to")
-        why.append((0.5, f"Not in your library yet; related to {rel}" if rel else "Not in your library yet"))
-    if f.get("completion_rate", 0) >= 0.6 and c.genres:
-        why.append((f["completion_rate"] * 0.5, f"You usually finish {c.genres[0]}"))
-    if c.confidence < 0.5:
-        why.append((-1, "Something new to try"))
-    return [t for _, t in sorted(why, key=lambda x: -x[0])][:4]
+def pool_vectors(pool: dict) -> tuple[list[str], np.ndarray]:
+    keys = list(pool)
+    return keys, unit(np.stack([pool[k][0] for k in keys])) if keys else np.zeros((0, 1))

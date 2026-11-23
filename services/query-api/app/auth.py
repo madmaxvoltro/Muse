@@ -17,24 +17,22 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import uuid
+
+from muse_schema.storage import fetch_open
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request
 from muse_schema import canonical_user
+from muse_schema.config import key_list, secret
 
 from .db import get_pool
 
-ADMIN_TOKEN = os.environ.get("MUSE_ADMIN_TOKEN", "")
+ADMIN_TOKEN = secret("MUSE_ADMIN_TOKEN", "") or ""  # MUSE_ADMIN_TOKEN_FILE (a Docker secret) or the env var
 # History imports run as the person (via a token or an adapter): their events don't make an id
 # "belong" to that service for the adapter guard below.
 IMPORT_SOURCES = ("spotify", "youtube", "goodreads", "storygraph", "soundcloud", "app", "catalog")
-_ADAPTER_KEYS: dict[str, str] = {}
-for pair in os.environ.get("MUSE_ADAPTER_KEYS", "").split(","):
-    if ":" in pair:
-        src, key = pair.split(":", 1)
-        _ADAPTER_KEYS[key.strip()] = src.strip()
+_ADAPTER_KEYS: dict[str, str] = key_list("MUSE_ADAPTER_KEYS")  # MUSE_ADAPTER_KEYS_FILE or the env var
 
 
 def hash_secret(secret: str) -> str:
@@ -103,11 +101,17 @@ async def _identify(authorization: str | None, x_muse_api_key: str | None, x_mus
         async with pool.acquire() as conn:
             # Events Muse wrote itself (answers, ratings via the API) carry metadata.via and
             # may be about any source's items; only ingested events say whose id this is.
-            other = await conn.fetchval(
-                "SELECT source FROM event WHERE user_id = $1 AND source <> ALL($2::text[]) AND NOT metadata ? 'via' "
-                "AND source <> ALL($3::text[]) LIMIT 1",
+            # metadata is sealed at rest (muse_schema.storage), so `via` is checked after opening.
+            other = None
+            for r in await fetch_open(
+                conn,
+                "SELECT source, source_item_id, metadata FROM event WHERE user_id = $1 AND source <> ALL($2::text[]) "
+                "AND source <> ALL($3::text[]) ORDER BY ingested_at LIMIT 200",
                 uid, [source, "muse"], list(IMPORT_SOURCES),
-            )
+            ):
+                if "via" not in (r["metadata"] or {}):
+                    other = r["source"]
+                    break
         if other:
             raise HTTPException(403, f"user {uid} belongs to source '{other}', not '{source}'")
         return Principal("adapter", uid, True, f"{source} adapter", source=source)

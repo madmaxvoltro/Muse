@@ -6,9 +6,10 @@ import os
 from typing import Any
 
 import httpx
+from muse_schema.config import secret
 
 REC_URL = os.environ.get("MUSE_REC_URL", "http://recommendation-api:8001").rstrip("/")
-READ_KEY = os.environ.get("MUSE_REC_READ_KEY", "")
+READ_KEY = secret("MUSE_REC_READ_KEY", "") or ""
 
 
 class RecUnavailable(Exception):

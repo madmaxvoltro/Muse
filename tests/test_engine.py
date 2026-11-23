@@ -13,9 +13,10 @@ import httpx
 import numpy as np
 import pytest
 from qdrant_client import QdrantClient
+from muse_schema.vectors import SealedQdrant
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
 
-from conftest import ROOT, FakeModel
+from muse_testkit import ROOT, FakeModel
 from test_flow import services
 
 sys.path.insert(0, str(ROOT / "services" / "embedding-worker"))
@@ -44,11 +45,11 @@ def vec(axis: int, dim: int) -> list[float]:
 @pytest.fixture
 async def eng(db):
     worker, rec, query = services()
-    qd = QdrantClient(":memory:")
+    qd = SealedQdrant(QdrantClient(":memory:"))  # payloads sealed at rest, as in production
     worker.ensure_collections(qd)
     qd.create_collection("audio_items", vectors_config=VectorParams(size=512, distance=Distance.COSINE))
     D.ensure_collections(qd)
-    rec._qdrant = qd
+    rec.MS.set_qdrant(qd)  # the multi-space routes (and /recommendations for music) use this client
     sys.modules["recapi.db"]._pool = None
     conn = await asyncpg.connect(db)
     t = datetime.now(timezone.utc) - timedelta(days=10)
@@ -152,7 +153,7 @@ async def test_group_is_fair_and_vetoes(eng):
 async def test_context_taste_vectors(db):
     """Night listening differs from day listening: the worker learns a 'track@night' taste."""
     worker, rec, query = services()
-    qd = QdrantClient(":memory:")
+    qd = SealedQdrant(QdrantClient(":memory:"))  # payloads sealed at rest, as in production
     worker.ensure_collections(qd)
     conn = await asyncpg.connect(db)
     for i in range(20):

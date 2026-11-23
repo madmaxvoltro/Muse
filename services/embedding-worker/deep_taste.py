@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 import numpy as np
+from muse_schema.storage import fetch_open
 from muse_schema import content_point_id, identity_group, taste_point_id
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, FieldCondition, Filter, FilterSelector, MatchValue, PointStruct, VectorParams
@@ -109,9 +110,10 @@ async def descriptor_vectors(http: httpx.AsyncClient | None = None) -> np.ndarra
 
 async def item_weights(conn, group: list[uuid.UUID], item_type: str) -> dict[tuple[str, str], float]:
     """Net, time-decayed weight per item for this person."""
-    rows = await conn.fetch(
+    rows = await fetch_open(
+        conn,
         """
-        SELECT source, source_item_id, action_weight, "timestamp" FROM event
+        SELECT source, source_item_id, action_weight, "timestamp", metadata FROM event
         WHERE user_id = ANY($1::uuid[]) AND item_type = $2 AND source_item_id IS NOT NULL AND action_weight <> 0
           AND "timestamp" > now() - make_interval(days => $3::int)
         """,
@@ -278,18 +280,19 @@ async def _preference(conn, weights: dict[tuple[str, str], float]) -> TM.Prefere
 
 
 async def compute_household(conn, qd: QdrantClient) -> dict[str, int]:
-    rows = await conn.fetch(
+    rows = await fetch_open(
+        conn,
         """
-        SELECT COALESCE(a.user_id, e.user_id)::text AS person, e.source || ':' || e.source_item_id AS item,
+        SELECT COALESCE(a.user_id, e.user_id)::text AS person, e.source, e.source_item_id, e.metadata,
                extract(epoch FROM e."timestamp") AS t, e.action
         FROM event e LEFT JOIN user_alias a ON a.alias_id = e.user_id
         WHERE e.source_item_id IS NOT NULL AND e.action IN ('played', 'completed', 'skipped', 'favorited', 'added_to_playlist')
           AND e.item_type IN ('track', 'series_episode', 'youtube_video', 'movie') AND e."timestamp" > now() - make_interval(days => $1::int)
-        ORDER BY 1, 3
+        ORDER BY 1, e."timestamp"
         """,
         LOOKBACK_DAYS,
     )
-    events = [(r["person"], r["item"], float(r["t"]), r["action"]) for r in rows]
+    events = [(r["person"], f'{r["source"]}:{r["source_item_id"]}', float(r["t"]), r["action"]) for r in rows]
     emb = TM.behavior_embeddings(TM.sessions(events))
     if emb:
         points = []

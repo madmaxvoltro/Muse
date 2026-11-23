@@ -20,6 +20,8 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from muse_schema import RATED_WEIGHTS, identity_group
+from muse_schema.storage import insert_event
+from muse_schema.vectors import SealedQdrant, qdrant_client
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
@@ -69,13 +71,13 @@ _qdrant: QdrantClient | None = None
 def qdrant() -> QdrantClient:
     global _qdrant
     if _qdrant is None:
-        _qdrant = QdrantClient(url=QDRANT_URL) if QDRANT_URL != ":memory:" else QdrantClient(":memory:")
+        _qdrant = qdrant_client(QDRANT_URL)  # API key + sealed payloads (muse_schema.vectors)
     return _qdrant
 
 
 def set_qdrant(client: QdrantClient) -> None:
     global _qdrant
-    _qdrant = client
+    _qdrant = client if isinstance(client, SealedQdrant) else SealedQdrant(client)
 
 
 @app.on_event("startup")
@@ -429,11 +431,8 @@ async def feedback(user: str, body: FeedbackIn, p: Principal = Depends(writer)) 
         md.update({"value": body.rating, "via": _via(p)})
         if body.note:
             md["note"] = body.note[:500]
-        await conn.execute(
-            "INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, metadata) "
-            "VALUES ($1, $2, $3, $4, 'rated', $5, $6)",
-            uid, body.source, body.source_item_id, d["item_type"], RATED_WEIGHTS[body.rating], md,
-        )
+        await insert_event(conn, user_id=uid, source=body.source, source_item_id=body.source_item_id, item_type=d["item_type"],
+                           action="rated", action_weight=RATED_WEIGHTS[body.rating], metadata=md)
         return {"rated": body.rating, "title": md.get("title"), "note": "taste vector updates on the embedding worker's next cycle"}
 
 

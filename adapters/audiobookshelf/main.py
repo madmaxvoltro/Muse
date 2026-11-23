@@ -23,10 +23,19 @@ import httpx
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("muse.audiobookshelf_adapter")
 
+def _secret(name: str, default: str = "") -> str:
+    """NAME_FILE (a Docker secret) wins over NAME; secrets don't belong in environment variables."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        with open(path) as f:
+            return f.read().strip()
+    return os.environ.get(name, default)
+
+
 ABS_URL = os.environ.get("AUDIOBOOKSHELF_URL", "").rstrip("/")
-ABS_TOKEN = os.environ.get("AUDIOBOOKSHELF_TOKEN", "")
+ABS_TOKEN = _secret("AUDIOBOOKSHELF_TOKEN")
 INGESTION_URL = os.environ.get("MUSE_INGESTION_URL", "").rstrip("/")
-ADAPTER_KEY = os.environ.get("MUSE_ADAPTER_KEY", "")
+ADAPTER_KEY = _secret("MUSE_ADAPTER_KEY")
 PROGRESS_SECONDS = int(os.environ.get("MUSE_PROGRESS_INTERVAL_SECONDS", "300"))
 CATALOG_SECONDS = int(os.environ.get("MUSE_CATALOG_SYNC_INTERVAL_SECONDS", "86400"))
 NS = uuid.UUID("3b0d7c2e-1f4a-4e6b-8a9c-5d2e7f1a3c48")

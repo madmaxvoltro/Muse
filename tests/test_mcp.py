@@ -8,7 +8,7 @@ import sys
 import httpx
 import pytest
 
-from conftest import ROOT
+from muse_testkit import ROOT
 from test_flow import MONO_USER, world  # noqa: F401  (fixture)
 
 sys.path.insert(0, str(ROOT / "services" / "mcp-server"))

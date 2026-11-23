@@ -12,9 +12,10 @@ import asyncpg
 import numpy as np
 import pytest
 from qdrant_client import QdrantClient
+from muse_schema.vectors import SealedQdrant
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
 
-from conftest import ROOT
+from muse_testkit import ROOT
 
 sys.path.insert(0, str(ROOT / "services" / "embedding-worker"))
 import deep_taste as D  # noqa: E402
@@ -40,7 +41,7 @@ GROUPS = {  # name: (n, text axis, audio axis, features, action)
 
 async def test_deep_taste(db):
     conn = await asyncpg.connect(db)
-    qd = QdrantClient(":memory:")
+    qd = SealedQdrant(QdrantClient(":memory:"))  # payloads sealed at rest, as in production
     qd.create_collection("content_items", vectors_config=VectorParams(size=384, distance=Distance.COSINE))
     qd.create_collection("audio_items", vectors_config=VectorParams(size=512, distance=Distance.COSINE))
     D.ensure_collections(qd)

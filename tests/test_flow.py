@@ -10,15 +10,16 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from qdrant_client import QdrantClient
+from muse_schema.vectors import SealedQdrant
 
-from conftest import ROOT, FakeModel, load_module, load_package
+from muse_testkit import ROOT, FakeModel, load_module, load_package
 
 _loaded: dict = {}
 
 
 def services():
     if not _loaded:
-        _loaded["worker"] = load_module("muse_worker", ROOT / "services" / "embedding-worker" / "worker.py")
+        _loaded["worker"] = load_module("muse_worker", ROOT / "services" / "embedding-worker" / "vector_worker.py")
         _loaded["rec"] = load_package("recapi", ROOT / "services" / "recommendation-api" / "app")
         load_module("recapi.main", ROOT / "services" / "recommendation-api" / "app" / "main.py")
         _loaded["query"] = load_package("queryapi", ROOT / "services" / "query-api" / "app")
@@ -64,9 +65,9 @@ async def world(db, monkeypatch):
     import asyncpg
 
     worker, rec, query = services()
-    qd = QdrantClient(":memory:")
+    qd = SealedQdrant(QdrantClient(":memory:"))  # payloads sealed at rest, as in production
     worker.ensure_collections(qd)
-    rec._qdrant = qd
+    rec.MS.set_qdrant(qd)  # the multi-space routes (and /recommendations for music) use this client
     query.set_qdrant(qd)
     import sys
 

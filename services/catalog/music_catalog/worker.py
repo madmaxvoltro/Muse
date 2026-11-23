@@ -34,8 +34,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
+from muse_schema.config import database_url
+from muse_schema.storage import fetch_open, insert_event, item_ids
 import httpx
 from muse_schema import notify
+from muse_schema.config import secret
 
 from .clients import Deezer, Http, ListenBrainz, MusicBrainz
 
@@ -56,7 +59,7 @@ NEW_RELEASE_WINDOW_DAYS = int(os.environ.get("MUSE_NEW_RELEASE_WINDOW_DAYS", "90
 DISCOVERY_PER_PERSON = int(os.environ.get("MUSE_DISCOVERY_WANTED_PER_DAY", "5"))
 DISCOVERY_MIN_SCORE = float(os.environ.get("MUSE_DISCOVERY_MIN_SCORE", "0.45"))
 REC_URL = os.environ.get("MUSE_REC_URL", "http://recommendation-api:8001").rstrip("/")
-REC_READ_KEY = os.environ.get("MUSE_REC_READ_KEY", "")
+REC_READ_KEY = secret("MUSE_REC_READ_KEY", "") or ""
 
 
 # --- names --------------------------------------------------------------------------------------
@@ -105,21 +108,26 @@ def _date(s: str | None) -> date | None:
 
 async def loved_artists(conn, days: int = 365) -> dict[uuid.UUID, dict[str, float]]:
     """person -> {artist name: net weight}, only net-positive artists."""
-    rows = await conn.fetch(
+    # artists live in the sealed metadata (muse_schema.storage): sum in Python
+    sums: dict[tuple[uuid.UUID, str], float] = defaultdict(float)
+    for r in await fetch_open(
+        conn,
         """
-        SELECT COALESCE(a.user_id, e.user_id) AS person, e.metadata->>'artist' AS artist, sum(e.action_weight) AS w
+        SELECT COALESCE(a.user_id, e.user_id) AS person, e.source, e.source_item_id, e.metadata, e.action_weight AS w
         FROM event e LEFT JOIN user_alias a ON a.alias_id = e.user_id
-        WHERE e.item_type = 'track' AND e.metadata ? 'artist' AND e.action <> 'cataloged' AND e.source <> 'catalog'
+        WHERE e.item_type = 'track' AND e.action <> 'cataloged' AND e.source <> 'catalog'
           AND e."timestamp" > now() - make_interval(days => $1::int)
-        GROUP BY 1, 2 HAVING sum(e.action_weight) > 0
         """,
         days,
-    )
+    ):
+        artist = (r["metadata"] or {}).get("artist")
+        if artist:
+            sums[(r["person"], artist)] += float(r["w"])
     out: dict[uuid.UUID, dict[str, float]] = defaultdict(dict)
-    for r in rows:
-        name = primary_artist(r["artist"])
-        if name:
-            out[r["person"]][name] = out[r["person"]].get(name, 0.0) + float(r["w"])
+    for (person, artist), w in sums.items():
+        name = primary_artist(artist)
+        if w > 0 and name:
+            out[person][name] = out[person].get(name, 0.0) + w
     return out
 
 
@@ -210,15 +218,22 @@ async def enrich(conn, mb: MusicBrainz, lb: ListenBrainz, dz: Deezer) -> int:
 
 
 async def library_keys(conn) -> set[str]:
-    rows = await conn.fetch(
+    rows = await _library_tracks(conn)
+    return {track_key(md.get("artist"), md.get("title")) for md in rows}
+
+
+async def _library_tracks(conn) -> list[dict]:
+    """Metadata of every track in a library (opened, see muse_schema.storage)."""
+    rows = await fetch_open(
+        conn,
         """
-        SELECT DISTINCT metadata->>'artist' AS artist, metadata->>'title' AS title FROM event
+        SELECT DISTINCT ON (source, source_item_id) source, source_item_id, metadata FROM event
         WHERE item_type = 'track' AND source = ANY($1::text[]) AND action = 'cataloged'
-          AND COALESCE(metadata->>'in_library', 'true') <> 'false'
+        ORDER BY source, source_item_id, "timestamp" DESC
         """,
         list(LIBRARY_SOURCES),
     )
-    return {track_key(r["artist"], r["title"]) for r in rows}
+    return [r["metadata"] for r in rows if r["metadata"] and str(r["metadata"].get("in_library", True)).lower() != "false"]
 
 
 async def _tracked_artists(conn) -> list[dict]:
@@ -278,15 +293,9 @@ async def fetch_tracks(conn, lb: ListenBrainz, dz: Deezer, mb: MusicBrainz) -> i
                 "dedupe_key": f"catalog:{sid}",
             }
             md = {k: v for k, v in md.items() if v not in (None, "", [])}
-            inserted = await conn.fetchval(
-                """
-                INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, metadata)
-                SELECT $1, 'catalog', $2, 'track', 'cataloged', 0, $3::text::jsonb
-                WHERE NOT EXISTS (SELECT 1 FROM event WHERE source = 'catalog' AND source_item_id = $2 AND action = 'cataloged')
-                RETURNING 1
-                """,
-                CATALOG_USER, sid, json.dumps(md),
-            )
+            # once per catalog track: the dedupe key (catalog:<sid>) makes the insert idempotent
+            inserted = await insert_event(conn, user_id=CATALOG_USER, source="catalog", source_item_id=sid, item_type="track",
+                                          action="cataloged", action_weight=0.0, metadata=md)
             if inserted:
                 emitted += 1
                 if md.get("preview_url"):
@@ -383,11 +392,9 @@ async def discovery_wanted(conn, persons: list[uuid.UUID], rec_get=None) -> int:
         recs = await rec_get(str(person), {"item_type": "track", "source": "catalog", "limit": 30})
         picks = [r for r in recs if r.get("score", 0) >= DISCOVERY_MIN_SCORE][:DISCOVERY_PER_PERSON]
         for r in picks:
-            md = await conn.fetchval(
-                "SELECT metadata FROM event WHERE source = 'catalog' AND source_item_id = $1 AND action = 'cataloged' LIMIT 1",
-                r["source_item_id"],
-            )
-            md = _j(md) or {}
+            md = next((e["metadata"] for e in await fetch_open(
+                conn, "SELECT source, source_item_id, metadata FROM event WHERE source = 'catalog' AND source_item_id = ANY($1::text[]) "
+                      "AND action = 'cataloged' LIMIT 1", item_ids("catalog", r["source_item_id"]))), {})
             title = md.get("title", r.get("title", ""))
             artist = md.get("artist") or title.split(" - ")[0]
             added += await add_wanted(
@@ -399,16 +406,19 @@ async def discovery_wanted(conn, persons: list[uuid.UUID], rec_get=None) -> int:
 
 
 async def wishlist_wanted(conn) -> int:
-    rows = await conn.fetch(
+    rows = await fetch_open(
+        conn,
         """
         SELECT DISTINCT ON (COALESCE(a.user_id, e.user_id), e.source_item_id)
-               COALESCE(a.user_id, e.user_id) AS person, e.source_item_id, e.metadata
+               COALESCE(a.user_id, e.user_id) AS person, e.source, e.source_item_id, e.metadata
         FROM event e LEFT JOIN user_alias a ON a.alias_id = e.user_id
-        WHERE e.source = 'mono' AND e.source_item_id LIKE 'wish:%' AND e.action IN ('favorited', 'added_to_playlist')
+        WHERE e.source = 'mono' AND e.action IN ('favorited', 'added_to_playlist')
         """
     )
     added = 0
     for r in rows:
+        if not str(r["source_item_id"] or "").startswith("wish:"):  # ids are blind in SQL; checked once opened
+            continue
         md = _j(r["metadata"]) or {}
         title = md.get("title", "")
         artist = md.get("artist") or title.split(" - ")[0]
@@ -420,14 +430,7 @@ async def wishlist_wanted(conn) -> int:
 
 async def mark_in_library(conn) -> int:
     have = await library_keys(conn)
-    albums = {
-        (norm(primary_artist(r["artist"])), norm(r["album"]))
-        for r in await conn.fetch(
-            "SELECT DISTINCT metadata->>'artist' AS artist, metadata->>'album' AS album FROM event "
-            "WHERE item_type = 'track' AND source = ANY($1::text[]) AND metadata ? 'album'",
-            list(LIBRARY_SOURCES),
-        )
-    }
+    albums = {(norm(primary_artist(md.get("artist"))), norm(md["album"])) for md in await _library_tracks(conn) if md.get("album")}
     n = 0
     for w in await conn.fetch("SELECT id, kind, artist_name, title FROM wanted WHERE status IN ('wanted', 'grabbed')"):
         hit = (w["kind"] == "recording" and track_key(w["artist_name"], w["title"]) in have) or \
@@ -468,7 +471,7 @@ async def run_cycle(pool: asyncpg.Pool, mb: MusicBrainz, lb: ListenBrainz, dz: D
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    pool = await asyncpg.create_pool(dsn=os.environ["MUSE_DATABASE_URL"], min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=3)
     http = Http()
     mb, lb, dz = MusicBrainz(http), ListenBrainz(http), Deezer(http)
     while True:

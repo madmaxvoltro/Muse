@@ -17,8 +17,9 @@ import uuid
 from collections import defaultdict
 
 from muse_schema import identity_group
+from muse_schema.storage import fetch_open
 
-from . import engine as E
+from . import multispace as E
 from .context import Ctx
 from .scoring import apply_knowledge
 
@@ -92,8 +93,9 @@ async def group_recommend(pool, qd, member_ids: list[str], item_type: str, limit
     negative: set[str] = set()
     async with pool.acquire() as conn:
         for c in canon:
-            negative |= {f"{r['source']}:{r['source_item_id']}" for r in await conn.fetch(
-                "SELECT source, source_item_id FROM event WHERE user_id = ANY($1::uuid[]) AND item_type = $2 "
+            negative |= {f"{r['source']}:{r['source_item_id']}" for r in await fetch_open(
+                conn,
+                "SELECT source, source_item_id, metadata FROM event WHERE user_id = ANY($1::uuid[]) AND item_type = $2 "
                 "AND action IN ('rejected', 'rated', 'skipped', 'unfavorited') AND action_weight < 0", groups[c], item_type)}
     keys -= negative
 

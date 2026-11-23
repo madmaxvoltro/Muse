@@ -1,20 +1,43 @@
-# NVIDIA GPU for the audio analyzer (and anything else that learns to use it). Needs the NVIDIA
-# Container Toolkit on the host. Use on top of the base file:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build audio-analyzer
-# Without a GPU everything runs on CPU; nothing else changes.
+# NVIDIA GPU for embeddings, the audio analyzer (and an optional local LLM). Use with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml build \
+#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124 embedding-worker vector-worker curator audio-analyzer
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Needs the NVIDIA Container Toolkit on the host. MUSE_EMBED_DEVICE=auto picks the GPU.
+#
+# `ollama` is optional: start it with --profile llm, then set
+#   MUSE_LLM_PROVIDER=ollama MUSE_LLM_MODEL=qwen3:8b   (and/or MUSE_EMBED_PROVIDER=openai,
+#   MUSE_EMBED_BASE_URL=http://ollama:11434/v1, MUSE_EMBEDDING_MODEL=qwen3-embedding:0.6b)
+# and pull the models once: docker compose exec ollama ollama pull qwen3:8b
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
 
 services:
+  embedding-worker:
+    <<: *gpu
+  curator:
+    <<: *gpu
+  vector-worker:
+    <<: *gpu
   audio-analyzer:
-    build:
-      args:
-        TORCH_INDEX: https://download.pytorch.org/whl/cu124
+    <<: *gpu
     environment:
       MUSE_DEVICE: cuda
       MUSE_AUDIO_PER_CYCLE: ${MUSE_AUDIO_PER_CYCLE:-200}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+
+  ollama:
+    <<: *gpu
+    image: ollama/ollama:latest
+    profiles: [llm]
+    restart: unless-stopped
+    volumes: [ollama_data:/root/.ollama]
+    networks: [data, egress]  # worker reaches it on `data`; model pulls need egress
+
+volumes:
+  ollama_data:

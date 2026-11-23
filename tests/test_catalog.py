@@ -12,10 +12,11 @@ import asyncpg
 import httpx
 import pytest
 
-from conftest import ROOT
+from muse_testkit import ROOT
+from muse_schema.storage import open_event
 
 sys.path.insert(0, str(ROOT / "services" / "catalog"))
-from catalog import clients as C, worker as W  # noqa: E402
+from music_catalog import clients as C, worker as W  # noqa: E402
 from test_flow import MONO_USER as MONO, world  # noqa: E402,F401
 
 KEN = "11111111-aaaa-4aaa-8aaa-000000000001"
@@ -99,8 +100,9 @@ async def test_full_cycle(conn, db):
     assert json.loads(artist["tags"])[:1] == ["dutch rock"] and artist["deezer_id"] == 1
     assert {r["name"] for r in json.loads(artist["related"])} == {"Racoon", "Bløf"}
 
-    items = {r["source_item_id"]: json.loads(r["metadata"]) for r in await conn.fetch(
-        "SELECT source_item_id, metadata FROM event WHERE source = 'catalog'")}
+    # catalog events are stored like every event: blind id, sealed metadata (muse_schema.storage)
+    items = {r["source_item_id"]: r["metadata"] for r in map(open_event, await conn.fetch(
+        "SELECT source, source_item_id, metadata FROM event WHERE source = 'catalog'"))}
     assert "dz:101" not in items  # "Sorry" is already in the library
     assert items["mb:rec-oceaan"]["related_to"] == "Kensington" and items["mb:rec-oceaan"]["in_library"] is False
     assert items["dz:102"]["preview_url"] and "dutch rock" in items["dz:102"]["genres"]

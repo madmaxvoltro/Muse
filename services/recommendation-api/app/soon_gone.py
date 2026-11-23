@@ -8,11 +8,12 @@ going through the rate-limited ingestion API — see docs/architecture.md Securi
 for why that distinction is safe (adapters are the untrusted write path, this isn't one).
 """
 
-import json
 import uuid
 from datetime import datetime, timezone
 
 import asyncpg
+from muse_schema.crypto import get_vault
+from muse_schema.storage import INSERT_SQL, event_row
 
 
 async def list_pending(pool: asyncpg.Pool) -> list[dict]:
@@ -42,15 +43,9 @@ async def whitelist(pool: asyncpg.Pool, source_item_id: str, user_id: str) -> bo
                 uuid.UUID(user_id),
                 row["id"],
             )
-            await conn.execute(
-                """
-                INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, "timestamp", metadata)
-                VALUES ($1, 'jellyfin', $2, $3, 'favorited', 1.5, $4, $5::jsonb)
-                """,
-                uuid.UUID(user_id),
-                source_item_id,
-                row["item_type"],
-                datetime.now(timezone.utc),
-                json.dumps({"via": "soon_gone_whitelist"}),
+            args, _ = event_row(
+                get_vault(), user_id=uuid.UUID(user_id), source="jellyfin", source_item_id=source_item_id, item_type=row["item_type"],
+                action="favorited", action_weight=1.5, timestamp=datetime.now(timezone.utc), metadata={"via": "soon_gone_whitelist"},
             )
+            await conn.execute(INSERT_SQL, *args)
     return True

@@ -21,10 +21,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import asyncpg
+from muse_schema.config import database_url
+from muse_schema.storage import fetch_open, item_ids
+from muse_schema.vectors import qdrant_client
 import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from muse_schema import content_point_id
+from muse_schema.config import secret
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
@@ -38,11 +42,11 @@ log = logging.getLogger("muse.audio")
 AUDIO_COLLECTION = "audio_items"
 QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 MONO_URL = os.environ.get("MUSE_MONO_URL", "").rstrip("/")
-MONO_STREAM_TOKEN = os.environ.get("MUSE_MONO_STREAM_TOKEN", "")
+MONO_STREAM_TOKEN = secret("MUSE_MONO_STREAM_TOKEN", "") or ""
 DEEZER_URL = os.environ.get("MUSE_DEEZER_URL", "https://api.deezer.com").rstrip("/")
 NAVIDROME_URL = os.environ.get("MUSE_NAVIDROME_URL", "").rstrip("/")
 NAVIDROME_USER = os.environ.get("MUSE_NAVIDROME_USER", "")
-NAVIDROME_PASSWORD = os.environ.get("MUSE_NAVIDROME_PASSWORD", "")
+NAVIDROME_PASSWORD = secret("MUSE_NAVIDROME_PASSWORD", "") or ""
 INTERVAL = int(os.environ.get("MUSE_AUDIO_INTERVAL_SECONDS", "60"))
 PER_CYCLE = int(os.environ.get("MUSE_AUDIO_PER_CYCLE", "20"))
 MAX_ATTEMPTS = 3
@@ -62,24 +66,31 @@ async def enqueue_library(conn) -> int:
     sources = (["mono"] if MONO_URL and MONO_STREAM_TOKEN else []) + (["navidrome"] if NAVIDROME_URL and NAVIDROME_USER else [])
     if not sources:
         return 0
-    res = await conn.execute(
+    # Events store item ids blind and metadata sealed (muse_schema.storage): open them here.
+    rows = await fetch_open(
+        conn,
         """
-        INSERT INTO item_audio (source, source_item_id)
-        SELECT DISTINCT source, source_item_id FROM event
+        SELECT DISTINCT ON (source, source_item_id) source, source_item_id, metadata FROM event
         WHERE item_type = 'track' AND action = 'cataloged' AND source = ANY($1::text[]) AND source_item_id IS NOT NULL
-          AND COALESCE(metadata->>'in_library', 'true') <> 'false'
-        ON CONFLICT DO NOTHING
+        ORDER BY source, source_item_id, "timestamp" DESC
         """,
         sources,
+    )
+    keys = [(r["source"], r["source_item_id"]) for r in rows if str((r["metadata"] or {}).get("in_library", True)).lower() != "false"]
+    if not keys:
+        return 0
+    res = await conn.execute(
+        "INSERT INTO item_audio (source, source_item_id) SELECT * FROM unnest($1::text[], $2::text[]) ON CONFLICT DO NOTHING",
+        [k[0] for k in keys], [k[1] for k in keys],
     )
     return int(res.split()[-1])
 
 
 async def resolve(conn, http: httpx.AsyncClient, source: str, sid: str) -> tuple[str, bool, float | None, dict] | None:
     """(url, is_preview, duration, metadata) or None when there is nothing to listen to."""
-    md = _j(await conn.fetchval(
-        "SELECT metadata FROM event WHERE source = $1 AND source_item_id = $2 AND metadata <> '{}'::jsonb "
-        "ORDER BY \"timestamp\" DESC LIMIT 1", source, sid)) or {}
+    md = next((r["metadata"] for r in await fetch_open(
+        conn, "SELECT source, source_item_id, metadata FROM event WHERE source = $1 AND source_item_id = ANY($2::text[]) "
+              "ORDER BY \"timestamp\" DESC LIMIT 50", source, item_ids(source, sid)) if r["metadata"]), {})
     if source == "mono" and MONO_URL and MONO_STREAM_TOKEN:
         return f"{MONO_URL}/api/tracks/{sid}/stream?t={MONO_STREAM_TOKEN}", False, md.get("duration_s"), md
     if source == "navidrome" and NAVIDROME_URL and NAVIDROME_USER:
@@ -178,8 +189,8 @@ def load_clap():
 
 
 async def _loop() -> None:
-    pool = await asyncpg.create_pool(dsn=os.environ["MUSE_DATABASE_URL"], min_size=1, max_size=3)
-    qd = QdrantClient(url=QDRANT_URL)
+    pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=3)
+    qd = qdrant_client(QDRANT_URL)
     ensure_collection(qd)
     state["clap"] = await asyncio.to_thread(load_clap)
     state["pool"] = pool

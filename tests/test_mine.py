@@ -12,7 +12,7 @@ import asyncpg
 import httpx
 import pytest
 
-from conftest import ROOT, load_package, load_module
+from muse_testkit import ROOT, load_package, load_module
 from test_flow import ADMIN, MONO_USER, OTHER, as_mono, world  # noqa: F401
 
 SPOTIFY = json.dumps([

@@ -33,7 +33,7 @@ async def label_outcomes(conn) -> int:
     res = await conn.execute(
         """
         WITH ids AS (
-            SELECT i.id, i.shown_at, i.source, i.source_item_id,
+            SELECT i.id, i.shown_at, i.source, COALESCE(i.item_bid, i.source_item_id) AS item_bid,
                    array_append(COALESCE(array_agg(a.alias_id) FILTER (WHERE a.alias_id IS NOT NULL), '{}'), i.user_id) AS uids
             FROM engine_impression i LEFT JOIN user_alias a ON a.user_id = i.user_id
             WHERE i.outcome IS NULL AND i.shown_at < now() - interval '1 hour'
@@ -43,7 +43,7 @@ async def label_outcomes(conn) -> int:
                    bool_or(e.action_weight > 0 AND e.action IN ('completed', 'favorited', 'rated', 'added_to_playlist')) AS pos,
                    bool_or(e.action_weight < 0) AS neg,
                    min(ids.shown_at) AS shown_at
-            FROM ids LEFT JOIN event e ON e.user_id = ANY(ids.uids) AND e.source = ids.source AND e.source_item_id = ids.source_item_id
+            FROM ids LEFT JOIN event e ON e.user_id = ANY(ids.uids) AND e.source = ids.source AND e.source_item_id = ids.item_bid
                  AND e."timestamp" BETWEEN ids.shown_at AND ids.shown_at + interval '7 days'
             GROUP BY ids.id
         )

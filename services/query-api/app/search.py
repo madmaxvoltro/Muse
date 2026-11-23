@@ -30,23 +30,58 @@ def _filter(item_types: list[str] | None, sources: list[str] | None) -> Filter |
     return Filter(must=must) if must else None
 
 
-async def _keyword(conn, q: str, item_types, sources, limit: int) -> dict[tuple[str, str], float]:
-    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-    rows = await conn.fetch(
-        """
-        SELECT source, source_item_id,
-               max(CASE WHEN metadata->>'title' ILIKE $2 THEN 1.0
-                        WHEN metadata->>'title' ILIKE $1 THEN 0.85
-                        WHEN metadata->>'artist' ILIKE $1 OR metadata->>'album' ILIKE $1 THEN 0.7
-                        WHEN metadata::text ILIKE $1 THEN 0.45 ELSE 0 END) AS s
-        FROM event
-        WHERE source_item_id IS NOT NULL AND metadata <> '{}'::jsonb AND metadata::text ILIKE $1
-          AND ($3::text[] IS NULL OR item_type = ANY($3)) AND ($4::text[] IS NULL OR source = ANY($4))
-        GROUP BY 1, 2 ORDER BY s DESC LIMIT $5
-        """,
-        like, q.replace("%", "") + "%", item_types, sources, limit,
-    )
-    return {(r["source"], r["source_item_id"]): float(r["s"]) for r in rows if r["s"]}
+# Keyword search can't run in SQL: titles live in sealed event metadata (muse_schema.storage).
+# It runs on a small in-memory index of every item's title/artist/album, read from the
+# content_items collection (payloads opened by muse_schema.vectors) and refreshed every few
+# minutes. One entry per item, so this stays small even for large libraries.
+_INDEX: dict = {"at": 0.0, "items": [], "n": -1}
+INDEX_TTL_S = 300
+
+
+def _keyword_index(qdrant) -> list[tuple[str, str, str, str, str, str]]:
+    import time
+
+    try:  # rebuilt when items were added or removed, else at most every INDEX_TTL_S
+        n = qdrant.count("content_items", exact=False).count
+    except Exception:
+        n = -1
+    if _INDEX["items"] and n == _INDEX["n"] and time.monotonic() - _INDEX["at"] < INDEX_TTL_S:
+        return _INDEX["items"]
+    items, offset = [], None
+    try:
+        while True:
+            pts, offset = qdrant.scroll("content_items", limit=1000, offset=offset, with_payload=True, with_vectors=False)
+            for pt in pts:
+                pl = pt.payload or {}
+                if pl.get("source_item_id"):
+                    items.append((pl.get("source", ""), str(pl["source_item_id"]), pl.get("item_type", ""),
+                                  (pl.get("title") or "").casefold(), (pl.get("artist") or "").casefold(), (pl.get("album") or "").casefold()))
+            if offset is None:
+                break
+    except Exception:  # no collection yet
+        return _INDEX["items"]
+    _INDEX.update(at=time.monotonic(), items=items, n=n)
+    return items
+
+
+async def _keyword(conn, qdrant, q: str, item_types, sources, limit: int) -> dict[tuple[str, str], float]:
+    needle = q.strip().casefold()
+    if not needle:
+        return {}
+    out: dict[tuple[str, str], float] = {}
+    for source, sid, item_type, title, artist, album in _keyword_index(qdrant):
+        if (item_types and item_type not in item_types) or (sources and source not in sources):
+            continue
+        if title.startswith(needle):
+            s_ = 1.0
+        elif needle in title:
+            s_ = 0.85
+        elif needle in artist or needle in album:
+            s_ = 0.7
+        else:
+            continue
+        out[(source, sid)] = s_
+    return dict(sorted(out.items(), key=lambda kv: -kv[1])[:limit])
 
 
 async def search(
@@ -65,7 +100,7 @@ async def search(
             scores.setdefault((p.get("source", ""), p.get("source_item_id", "")), {})["semantic"] = float(h.score)
         mode.append("semantic")
     if q:
-        for k, s in (await _keyword(conn, q, item_types, sources, limit * 3)).items():
+        for k, s in (await _keyword(conn, qdrant, q, item_types, sources, limit * 3)).items():
             scores.setdefault(k, {})["keyword"] = s
         mode.append("keyword")
 

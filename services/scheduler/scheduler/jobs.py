@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 from muse_schema import notify
+from muse_schema.storage import fetch_open, item_ids
+from muse_schema.config import secret
 
 log = logging.getLogger("muse.scheduler")
 
@@ -31,7 +33,7 @@ WEATHER_LAT = os.environ.get("MUSE_WEATHER_LAT")
 WEATHER_LON = os.environ.get("MUSE_WEATHER_LON")
 OPEN_METEO = os.environ.get("MUSE_OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")
 REC_URL = os.environ.get("MUSE_REC_URL", "http://recommendation-api:8001").rstrip("/")
-REC_READ_KEY = os.environ.get("MUSE_REC_READ_KEY", "")
+REC_READ_KEY = secret("MUSE_REC_READ_KEY", "") or ""
 IMPRESSION_DAYS = int(os.environ.get("MUSE_IMPRESSION_RETENTION_DAYS", "180"))
 ACCESS_LOG_DAYS = int(os.environ.get("MUSE_ACCESS_LOG_RETENTION_DAYS", "90"))
 BACKOFF_MIN = [1, 5, 30, 120, 720]  # minutes between webhook attempts
@@ -235,19 +237,23 @@ async def goals(conn) -> int:
         genres = [x.lower() for x in c.get("genres", [])]
         artists = [x.lower() for x in c.get("artists", [])]
         items = c.get("items", [])  # explicit "source:id" list (e.g. a list of classics)
-        rows = await conn.fetch(
+        rows = await fetch_open(
+            conn,
             """
-            SELECT DISTINCT e.source, e.source_item_id, e.metadata FROM event e LEFT JOIN user_alias a ON a.alias_id = e.user_id
+            SELECT e.source, e.source_item_id, e.metadata FROM event e LEFT JOIN user_alias a ON a.alias_id = e.user_id
             WHERE COALESCE(a.user_id, e.user_id) = $1 AND e."timestamp" >= $2 AND e.action IN ('completed', 'favorited', 'rated', 'added_to_playlist')
               AND e.action_weight > 0 AND ($3 = 'general' OR e.item_type = $3)
             """, g["user_id"], g["created_at"], g["domain"])
         hit = set()
-        meta_by = {}
-        for r in rows:
-            meta_by[(r["source"], r["source_item_id"])] = _j(r["metadata"]) or {}
+        meta_by: dict = {}
+        for r in rows:  # opened (muse_schema.storage): real ids, readable metadata
+            key = (r["source"], r["source_item_id"])
+            meta_by[key] = meta_by.get(key) or r["metadata"] or {}
         for key, md in meta_by.items():
             if not md:
-                md = _j(await conn.fetchval("SELECT metadata FROM event WHERE source = $1 AND source_item_id = $2 AND metadata <> '{}'::jsonb LIMIT 1", *key)) or {}
+                md = next((e["metadata"] for e in await fetch_open(
+                    conn, "SELECT source, source_item_id, metadata FROM event WHERE source = $1 AND source_item_id = ANY($2::text[]) LIMIT 50",
+                    key[0], item_ids(*key)) if e["metadata"]), {})
             g_ok = genres and {x.lower() for x in md.get("genres", []) or []} & set(genres)
             a_ok = artists and (md.get("artist") or "").lower() in artists
             i_ok = f"{key[0]}:{key[1]}" in items

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 import numpy as np
 
-from conftest import ROOT
+from muse_testkit import ROOT
 
 sys.path.insert(0, str(ROOT / "services" / "embedding-worker"))
 import ranker_training as R  # noqa: E402

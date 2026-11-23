@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import time
 
-from .engine import WEIGHTS
+from .multispace import WEIGHTS
 
 _cache: dict[str, tuple[float, dict | None]] = {}
 TTL = 600

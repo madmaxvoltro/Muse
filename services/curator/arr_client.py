@@ -14,6 +14,7 @@ import os
 from dataclasses import dataclass
 
 import httpx
+from muse_schema.config import secret
 
 logger = logging.getLogger("muse.curator.arr")
 
@@ -33,9 +34,9 @@ class ArrConfig:
     def from_env(cls) -> "ArrConfig":
         return cls(
             radarr_url=os.environ.get("RADARR_URL", ""),
-            radarr_api_key=os.environ.get("RADARR_API_KEY", ""),
+            radarr_api_key=secret("RADARR_API_KEY", "") or "",
             sonarr_url=os.environ.get("SONARR_URL", ""),
-            sonarr_api_key=os.environ.get("SONARR_API_KEY", ""),
+            sonarr_api_key=secret("SONARR_API_KEY", "") or "",
             radarr_quality_profile_name=os.environ.get("RADARR_QUALITY_PROFILE_NAME") or None,
             radarr_root_folder=os.environ.get("RADARR_ROOT_FOLDER") or None,
             sonarr_quality_profile_name=os.environ.get("SONARR_QUALITY_PROFILE_NAME") or None,

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from muse_schema.audio import key_compatibility, tempo_compatibility
 
-from .engine import Item
+from .multispace import Item
 
 W = {"taste": 0.32, "sound": 0.18, "text": 0.06, "key": 0.10, "tempo": 0.10, "energy": 0.10, "after": 0.12, "behavior": 0.02}
 # When the session should change (build up, wind down, peak), following the energy curve matters

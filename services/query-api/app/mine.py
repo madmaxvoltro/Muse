@@ -14,6 +14,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from muse_schema import RATED_WEIGHTS, identity_group, taste_point_id
 from muse_schema import context as C
+from muse_schema.crypto import P_DEDUPE, get_vault
+from muse_schema.storage import event_row, fetch_open, insert_event, open_event
 from pydantic import BaseModel, Field
 from qdrant_client.http.models import FieldCondition, Filter, FilterSelector, MatchValue
 
@@ -123,9 +125,11 @@ async def import_history(user: str, kind: str, files: list[UploadFile] = File(..
     pool = await get_pool()
     async with pool.acquire() as conn:
         uid = await resolve_user(conn, p, user)
+        # dedupe keys are stored as blind indexes (muse_schema.storage), compared the same way
         existing = {r["k"] for r in await conn.fetch(
             "SELECT metadata->>'dedupe_key' AS k FROM event WHERE user_id = $1 AND source = $2 AND metadata ? 'dedupe_key'", uid, kind)}
-        fresh = [e for e in events if e["metadata"]["dedupe_key"] not in existing]
+        vault = get_vault()
+        fresh = [e for e in events if vault.bid(f"{kind}:{e['metadata']['dedupe_key']}", P_DEDUPE) not in existing]
         seen_keys: set[str] = set()
         records = []
         for e in fresh:
@@ -134,8 +138,10 @@ async def import_history(user: str, kind: str, files: list[UploadFile] = File(..
                 continue
             seen_keys.add(k)
             weight = e["action_weight"] if e["action_weight"] is not None else _default_weight(e["action"])
-            records.append((uid, kind, e["source_item_id"], e["item_type"], e["action"], weight, e["timestamp"], e["duration_ms"],
-                            e["progress_pct"], json.dumps(e["metadata"])))
+            args, dedupe = event_row(vault, user_id=uid, source=kind, source_item_id=e["source_item_id"], item_type=e["item_type"],
+                                     action=e["action"], action_weight=weight, timestamp=e["timestamp"], duration_ms=e["duration_ms"],
+                                     progress_pct=e["progress_pct"], metadata=e["metadata"])
+            records.append((*args[:9], json.dumps(args[9])))
         async with conn.transaction():
             for i in range(0, len(records), 5000):
                 await conn.executemany(
@@ -177,7 +183,10 @@ async def export(user: str, p: Principal = Depends(current_principal)) -> dict:
 
         async def rows(sql: str, *args) -> list[dict]:
             out = []
-            for r in await conn.fetch(sql, *args):
+            fetched = await conn.fetch(sql, *args)
+            if "FROM event" in sql:  # the export is readable: events are opened (muse_schema.storage)
+                fetched = [{k: v for k, v in open_event(r).items() if k != "blind_item_id"} for r in fetched]
+            for r in fetched:
                 d = {k: (v.isoformat() if isinstance(v, datetime) else str(v) if isinstance(v, uuid.UUID) else v) for k, v in dict(r).items()}
                 out.append(d)
             return out
@@ -328,8 +337,8 @@ async def _like_this(user: str, body: ItemRef, p: Principal, more: bool) -> dict
             raise HTTPException(404, "Muse has never seen this item")
         title = d["metadata"].get("title") or body.source_item_id
         md = {k: v for k, v in d["metadata"].items() if k != "dedupe_key"} | {"value": 1 if more else -1, "via": p.source or p.kind}
-        await conn.execute("INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, metadata) VALUES ($1,$2,$3,$4,'rated',$5,$6)",
-                           uid, body.source, body.source_item_id, d["item_type"], RATED_WEIGHTS[1 if more else -1], md)
+        await insert_event(conn, user_id=uid, source=body.source, source_item_id=body.source_item_id, item_type=d["item_type"],
+                           action="rated", action_weight=RATED_WEIGHTS[1 if more else -1], metadata=md)
         fact = await add_fact(conn, uid, f"{'More' if more else 'Less'} like {title}", "likes" if more else "dislikes", d["item_type"],
                               None, 0.6 if more else -0.6, 0.8, "user" if p.kind == "adapter" else "assistant")
     return {"title": title, "fact": fact, "note": "takes effect on the next taste update (minutes)"}
@@ -432,15 +441,21 @@ async def year_review(user: str, year: int | None = None, p: Principal = Depends
     async with pool.acquire() as conn:
         uid = await resolve_user(conn, p, user)
         _, group = await identity_group(conn, uid)
-        rows = await conn.fetch(
+        # metadata is sealed at rest (muse_schema.storage): read the events, open them, and fill
+        # in plays without metadata from the item's other events.
+        rows = await fetch_open(
+            conn,
             """
-            SELECT e.item_type, e.source, e.source_item_id, e.action, e.action_weight, e."timestamp", e.duration_ms, e.device_context,
-                   COALESCE(NULLIF(e.metadata, '{}'::jsonb), (SELECT m.metadata FROM event m WHERE m.source = e.source AND m.source_item_id = e.source_item_id
-                                                             AND m.metadata <> '{}'::jsonb LIMIT 1)) AS md
+            SELECT e.item_type, e.source, e.source_item_id, e.action, e.action_weight, e."timestamp", e.duration_ms, e.device_context, e.metadata
             FROM event e WHERE e.user_id = ANY($1::uuid[]) AND e."timestamp" >= $2 AND e."timestamp" < $3 AND e.action <> 'cataloged'
             """, group, start, end)
-        earlier_artists = {r["a"] for r in await conn.fetch(
-            "SELECT DISTINCT metadata->>'artist' AS a FROM event WHERE user_id = ANY($1::uuid[]) AND \"timestamp\" < $2 AND metadata ? 'artist'", group, start)}
+        missing = list({(r["source"], r["source_item_id"]) for r in rows if not r["metadata"] and r["source_item_id"]})
+        details = await item_details(conn, missing) if missing else {}
+        for r in rows:
+            r["md"] = r["metadata"] or (details.get((r["source"], r["source_item_id"])) or {}).get("metadata") or {}
+        earlier_artists = {r["metadata"].get("artist") for r in await fetch_open(
+            conn, "SELECT source, source_item_id, metadata FROM event WHERE user_id = ANY($1::uuid[]) AND \"timestamp\" < $2 "
+                  "AND item_type = 'track'", group, start) if r["metadata"].get("artist")}
     by_type: dict[str, dict[str, Any]] = defaultdict(lambda: {"events": 0, "minutes": 0.0, "items": Counter(), "genres": Counter(), "artists": Counter(),
                                                              "months": Counter(), "dayparts": Counter(), "new_artists": set(), "titles": {}})
     for r in rows:
@@ -461,7 +476,6 @@ async def year_review(user: str, year: int | None = None, p: Principal = Depends
                     d["new_artists"].add(md["artist"])
         d["months"][r["timestamp"].strftime("%B")] += 1
         dc = r["device_context"]
-        dc = json.loads(dc) if isinstance(dc, str) else dc
         for b in C.buckets(dc, r["timestamp"])[:1]:
             d["dayparts"][b] += 1
     out = {}

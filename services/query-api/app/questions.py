@@ -33,6 +33,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from muse_schema import RATED_WEIGHTS, identity_group
+from muse_schema.storage import fetch_open, insert_event
 
 from . import recclient
 from .identity import mark_dirty
@@ -128,26 +129,30 @@ async def _cold_start(conn, user_id, group) -> list[dict]:
 
 async def _mixed_signals(conn, user_id, group) -> list[dict]:
     """Genres (and, for music, artists) with substantial positive *and* negative weight."""
-    rows = await conn.fetch(
+    # genres and artists are in the sealed metadata (muse_schema.storage): aggregate in Python
+    acc: dict[tuple[str, str, str], list[float]] = {}
+    for e in await fetch_open(
+        conn,
         """
-        WITH ev AS (
-            SELECT item_type, action_weight AS w, metadata FROM event
-            WHERE user_id = ANY($1::uuid[]) AND action NOT IN ('cataloged', 'searched') AND action_weight <> 0
-              AND "timestamp" > now() - interval '365 days'
-        ), facets AS (
-            SELECT item_type, 'genre' AS facet, g AS value, w FROM ev,
-                jsonb_array_elements_text(CASE WHEN jsonb_typeof(metadata->'genres') = 'array' THEN metadata->'genres' ELSE '[]'::jsonb END) g
-            UNION ALL
-            SELECT item_type, 'artist', metadata->>'artist', w FROM ev WHERE item_type = 'track' AND metadata ? 'artist'
-        )
-        SELECT item_type, facet, value, sum(w) FILTER (WHERE w > 0) AS pos, -sum(w) FILTER (WHERE w < 0) AS neg, count(*) AS n
-        FROM facets GROUP BY 1, 2, 3
-        HAVING count(*) >= 4 AND sum(w) FILTER (WHERE w > 0) >= 1.5 AND -sum(w) FILTER (WHERE w < 0) >= 1.0
-        ORDER BY least(sum(w) FILTER (WHERE w > 0), -sum(w) FILTER (WHERE w < 0)) DESC
-        LIMIT 4
+        SELECT item_type, source, source_item_id, action_weight AS w, metadata FROM event
+        WHERE user_id = ANY($1::uuid[]) AND action NOT IN ('cataloged', 'searched') AND action_weight <> 0
+          AND "timestamp" > now() - interval '365 days'
         """,
         group,
-    )
+    ):
+        md, w = e["metadata"] or {}, float(e["w"])
+        keys = [(e["item_type"], "genre", g) for g in (md.get("genres") if isinstance(md.get("genres"), list) else [])]
+        if e["item_type"] == "track" and md.get("artist"):
+            keys.append((e["item_type"], "artist", md["artist"]))
+        for k in keys:
+            a = acc.setdefault(k, [0.0, 0.0, 0])
+            a[0 if w > 0 else 1] += abs(w)
+            a[2] += 1
+    rows = sorted(
+        ({"item_type": t, "facet": f, "value": v, "pos": a[0], "neg": a[1], "n": a[2]}
+         for (t, f, v), a in acc.items() if a[2] >= 4 and a[0] >= 1.5 and a[1] >= 1.0),
+        key=lambda r: -min(r["pos"], r["neg"]),
+    )[:4]
     out = []
     for r in rows:
         label = DOMAIN_LABELS.get(r["item_type"], r["item_type"])
@@ -309,11 +314,8 @@ async def _rate(conn, user_id: uuid.UUID, item: dict, value: int, question_id: u
     md = dict((details.get((item["source"], item["source_item_id"])) or {}).get("metadata") or {"title": item.get("title", "")})
     md.pop("dedupe_key", None)
     md.update({"value": value, "via": f"muse-question:{via}", "question_id": str(question_id)})
-    await conn.execute(
-        "INSERT INTO event (user_id, source, source_item_id, item_type, action, action_weight, metadata) "
-        "VALUES ($1, $2, $3, $4, 'rated', $5, $6)",
-        user_id, item["source"], item["source_item_id"], item["item_type"], RATED_WEIGHTS.get(value, 0.0), md,
-    )
+    await insert_event(conn, user_id=user_id, source=item["source"], source_item_id=item["source_item_id"], item_type=item["item_type"],
+                       action="rated", action_weight=RATED_WEIGHTS.get(value, 0.0), metadata=md)
 
 
 async def _apply(conn, user_id, q, effects: list[dict], text: str, via: str) -> list[str]:

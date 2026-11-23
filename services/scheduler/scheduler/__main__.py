@@ -2,10 +2,10 @@
 
 import asyncio
 import logging
-import os
 import time
 
 import asyncpg
+from muse_schema.config import database_url
 import httpx
 
 from . import jobs
@@ -23,7 +23,7 @@ EVERY = {  # seconds
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     log = logging.getLogger("muse.scheduler")
-    pool = await asyncpg.create_pool(dsn=os.environ["MUSE_DATABASE_URL"], min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(dsn=database_url(), min_size=1, max_size=3)
     last: dict[str, float] = {}
     async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "MuseScheduler/0.1"}) as http:
         while True:

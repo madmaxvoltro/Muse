@@ -11,8 +11,9 @@ import asyncpg
 import numpy as np
 import pytest
 from qdrant_client import QdrantClient
+from muse_schema.vectors import SealedQdrant
 
-from conftest import ROOT
+from muse_testkit import ROOT
 
 sys.path.insert(0, str(ROOT / "services" / "audio-analyzer"))
 pytest.importorskip("librosa")
@@ -87,7 +88,7 @@ async def test_worker_cycle(db, monkeypatch):
                     return {"preview": "https://cdn/p.mp3"}
             return R()
 
-    qd = QdrantClient(":memory:")
+    qd = SealedQdrant(QdrantClient(":memory:"))  # payloads sealed at rest, as in production
     S.ensure_collection(qd)
     pool = await asyncpg.create_pool(db, min_size=1, max_size=2)
     stats = await S.run_cycle(pool, qd, Http(), FakeClap(), decoder)
