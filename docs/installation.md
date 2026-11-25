@@ -155,7 +155,8 @@ MONO_MUSE_READ_KEY=<the query: key in secrets/read_keys, or a key of its own add
 [`services/mcp-server/README.md`](../services/mcp-server/README.md).
 
 **Vesper** uses the recommendation API with a read key from `secrets/read_keys` (`vesper:`), the
-ingestion API with the `jellyfin:` key, and a control key for profile actions; see
+ingestion API with the `jellyfin:` key, and the query API with that same key plus `X-Muse-User`
+for linking profiles and watching together; see
 [`vesper.md`](vesper.md).
 
 `./muse setup` creates every secret these parts need, also on an install that predates them

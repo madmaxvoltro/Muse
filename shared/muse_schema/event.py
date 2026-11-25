@@ -19,6 +19,7 @@ class Source(str, Enum):
     NAVIDROME = "navidrome"
     AUDIOBOOKSHELF = "audiobookshelf"
     MONO = "mono"  # self-hosted music server (github.com/madmaxvoltro/mono), item_type "track"
+    VESPER = "vesper"  # reserved; Vesper sends video events as "jellyfin" so ids join (docs/vesper.md)
     # Muse itself: answers to its questions (onboarding, this-or-that, abandon reasons) and
     # things an assistant told it (query API / MCP)
     MUSE = "muse"
@@ -70,6 +71,7 @@ class Action(str, Enum):
     TRAILER_PLAYED = "trailer_played"
     REQUESTED = "requested"  # asked for a title to be added to the library
     RATED = "rated"  # explicit thumbs (Vesper, via the Jellyfin user rating); metadata.value -1/1/2
+    IMPRESSION = "impression"  # shown in a recommendation row; weight 0, read as fatigue (shown often, never picked)
     CATALOGED = "cataloged"  # item exists in a library, no user signal attached — for backfilling
     # content embeddings from a library the adapter didn't watch the user acquire (see jellyfin adapter).
     UNFAVORITED = "unfavorited"  # took a favourite back; cancels the favourite's pull on the taste vector
@@ -105,6 +107,7 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.ABANDON_REASON: 0.0,  # interpreted by muse_taste.signals from metadata.reason
     Action.INTEREST_FEEDBACK: 0.0,  # interpreted by muse_taste.evolution, never a per-title signal
     Action.REASON_FEEDBACK: 0.0,  # interpreted by muse_taste.signals.feedback_overrides
+    Action.IMPRESSION: 0.0,  # never part of taste; fatigue only
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.

@@ -31,7 +31,7 @@ from muse_schema.config import key_list, secret
 from muse_schema.crypto import get_vault
 from qdrant_client import QdrantClient
 
-from . import questions, rows, status_page
+from . import prefetch as prefetch_mod, questions, ratings, rows, status_page
 from . import routes_multispace as MS
 from . import soon_gone as soon_gone_repo
 from .db import close_pool, get_pool
@@ -146,11 +146,30 @@ async def recommendations(
     room: str | None = Query(None, description="room for room-level context (Home Assistant)"),
     use_context: bool = Query(True, description="apply stored context signals (mood, activity, weather, calendar)"),
     engine_name: str | None = Query(None, alias="engine", description="taste | multispace (default: chosen by item type and parameters)"),
+    max_age: int | None = Query(None, ge=0, le=21, description="kids profiles: only titles rated for this age or younger"),
+    allow_unrated: bool = Query(False, description="with max_age: also titles without a known rating"),
 ) -> dict:
     """Ranked, explained recommendations. Films and series come from the taste engine
     (canonical titles, calibrated lists); music, YouTube and books, and any request that names a
     source, room, device or another domain's taste, from the multi-space engine. Both answer
     with `why` (readable reasons) and `explanation` (weighted terms)."""
+    if max_age is None:
+        return await _recommend(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at, source,
+                                taste_from, blend, tz, device, device_class, room, use_context, engine_name)
+    # Over-fetch, then keep what the profile may see (unknown ratings only with allow_unrated).
+    body = await _recommend(user_id, item_type, min(100, limit * 3), explore_ratio, mood, surface, include_unavailable, False, at,
+                            source, taste_from, blend, tz, device, device_class, room, use_context, engine_name)
+    body["recommendations"] = filter_age(body.get("recommendations") or [], max_age, allow_unrated)[:limit]
+    body["max_age"] = max_age
+    return body
+
+
+def filter_age(items: list[dict], max_age: int | None, allow_unrated: bool = False) -> list[dict]:
+    return [r for r in items if ratings.within(r.get("certification") or r.get("official_rating"), max_age, allow_unrated)]
+
+
+async def _recommend(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at, source, taste_from,
+                     blend, tz, device, device_class, room, use_context, engine_name) -> dict:
     _check_type(item_type)
     if engine_name not in (None, "taste", "multispace"):
         raise HTTPException(status_code=400, detail="engine must be taste or multispace")
@@ -206,6 +225,8 @@ async def home_rows(
     max_rows: int = Query(8, ge=1, le=15),
     at: datetime | None = Query(None, description="ISO time to use as 'now' for rhythms"),
     log: bool = Query(True),
+    max_age: int | None = Query(None, ge=0, le=21, description="kids profiles: only titles rated for this age or younger"),
+    allow_unrated: bool = Query(False),
 ) -> dict:
     """A home screen: themed rows whose titles are their explanations (Top picks, Because you
     watched X, More <interest>, For your weekend evenings, Watch again, From your watchlist,
@@ -214,7 +235,46 @@ async def home_rows(
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
         return {"user_id": user_id, "item_type": item_type, "rows": [], "note": "Muse is still building its catalog (first start)"}
-    return await rows.build(eng, user_id, item_type, per_row, max_rows, at, log)
+    res = await rows.build(eng, user_id, item_type, per_row, max_rows, at, log and max_age is None)
+    if max_age is not None:
+        for row in res.get("rows") or []:
+            row["items"] = filter_age(row.get("items") or [], max_age, allow_unrated)
+        res["rows"] = [r for r in res.get("rows") or [] if r["items"]]
+        res["max_age"] = max_age
+    return res
+
+
+@app.get("/prefetch/{user_id}")
+async def prefetch(
+    user_id: str,
+    horizon_hours: int = Query(24, ge=1, le=168),
+    tz: str | None = Query(None, description="IANA time zone of the household, e.g. Europe/Amsterdam"),
+    limit: int = Query(10, ge=1, le=50),
+    max_age: int | None = Query(None, ge=0, le=21),
+) -> dict:
+    """What this person will likely start in the next hours (in-progress titles, the series they
+    follow, a few top picks), each with a likelihood: Vesper promotes these to fast storage and
+    to smart downloads on phones."""
+    zone = prefetch_mod.tzinfo(tz)
+    now = prefetch_mod.now_utc()
+    uid, acts, history = await prefetch_mod.load(await get_pool(), user_id)
+    p_active = prefetch_mod.active_probability(prefetch_mod.slot_rates(acts, zone, now), now, horizon_hours, zone)
+    items = prefetch_mod.rank_items(history, now)
+    if len(items) < limit:
+        try:
+            recs = await _recommend(uid, "movie", limit * 3, 0.0, None, "prefetch", False, False, None, None, None, None, tz,
+                                    None, None, None, True, "taste")
+            for r in filter_age(recs.get("recommendations") or [], max_age)[:3]:
+                if r.get("available") is False:
+                    continue
+                items.append({"source": r["source"], "source_item_id": r["source_item_id"], "item_type": r.get("item_type") or "movie",
+                              "title": r.get("title") or "", "reason": "recommended", "base": 0.25 * float(r.get("confidence") or 0.5)})
+        except Exception:  # noqa: BLE001 - prefetch must not fail on a cold profile or an unbuilt catalog
+            pass
+    for it in items:
+        it["likelihood"] = round(it.pop("base") * max(p_active, 0.15), 4)
+    items.sort(key=lambda x: -x["likelihood"])
+    return {"user_id": uid, "horizon_hours": horizon_hours, "active_probability": round(p_active, 4), "items": items[:limit]}
 
 
 @app.get("/profile/{user_id}")

@@ -144,8 +144,14 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
     return {"status": "accepted"}
 
 
+class EventBatch(BaseModel):
+    events: list[Event]
+
+
 @app.post("/events/batch", status_code=202)
-async def ingest_batch(events: list[Event], source: str = Depends(require_adapter_key)) -> dict:
+async def ingest_batch(body: list[Event] | EventBatch, source: str = Depends(require_adapter_key)) -> dict:
+    """A JSON list of events, or {"events": [...]} (the form Vesper and Mono send)."""
+    events = body if isinstance(body, list) else body.events
     if len(events) > 1000:
         raise HTTPException(status_code=413, detail="at most 1000 events per batch")
     for e in events:

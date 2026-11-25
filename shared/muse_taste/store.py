@@ -45,6 +45,7 @@ def payload_for(row: dict[str, Any]) -> dict[str, Any]:
         "vote_average": d.get("vote_average"),
         "vote_count": d.get("vote_count"),
         "library_refs": d.get("library_refs") or [],
+        "certification": d.get("certification"),
     }
     return {
         "ck": row["canon_key"],

@@ -78,11 +78,19 @@ def test_http_routes(db_dsn):
             p = await c.get(f"/profile/{USER_A}")
             q = await c.get(f"/questions/{USER_A}/next", params={"item_type": "movie"})
             bad = await c.get(f"/recommendations/{USER_A}", params={"item_type": "nope"})
+            # kids profile: unrated titles only with allow_unrated
+            kids = await c.get(f"/recommendations/{USER_A}", params={"item_type": "movie", "limit": 5, "max_age": 6})
+            kids_unrated = await c.get(f"/recommendations/{USER_A}", params={"item_type": "movie", "limit": 5, "max_age": 6, "allow_unrated": True})
+            pre = await c.get(f"/prefetch/{USER_A}", params={"tz": "Europe/Amsterdam"})
         main._engine = None
         await pool.close()
-        return r, p, q, bad
+        return r, p, q, bad, kids, kids_unrated, pre
 
-    r, p, q, bad = asyncio.run(go())
+    r, p, q, bad, kids, kids_unrated, pre = asyncio.run(go())
+    assert kids.status_code == 200 and kids.json()["max_age"] == 6
+    assert all(x.get("certification") for x in kids.json()["recommendations"])
+    assert kids_unrated.json()["recommendations"]
+    assert pre.status_code == 200 and "active_probability" in pre.json(), pre.text
     assert r.status_code == 200 and r.json()["recommendations"][0]["canon_key"] == B("tmdb:movie:105")
     assert {"source", "source_item_id", "score", "confidence", "explanation"} <= set(r.json()["recommendations"][0])  # plugin contract
     assert p.status_code == 200 and p.json()["interests"] and p.json()["stats"]["liked"] > 0

@@ -235,8 +235,9 @@ series from canonical titles with calibrated lists, taste evolution and question
 **multi-space engine** (`services/recommendation-api/app/multispace.py`, its routes in
 `routes_multispace.py`, fed by `services/embedding-worker/vector_worker.py`) serves music,
 YouTube and books, next-track and radio, groups and context-aware lists; `/recommendations`
-picks the engine by item type and parameters (`engine=` forces one). Vesper's rows use the
-multi-space vectors too (`funnel.py`, see [`vesper.md`](vesper.md)).
+picks the engine by item type and parameters (`engine=` forces one). Vesper's home rows come
+from the taste engine (`rows.py`); its group sessions from the query API (see
+[`vesper.md`](vesper.md)).
 
 `multispace.py`: generators (taste, facets, sound, behaviour,
 co-occurrence, new arrivals, mood, goals) -> features in every space -> hand weights or a learned

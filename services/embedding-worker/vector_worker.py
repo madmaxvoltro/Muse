@@ -38,6 +38,16 @@ from muse_schema.vectors import qdrant_client
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
 
+try:
+    import content
+except ImportError:  # loaded by path (tests): content.py sits next to this file
+    import importlib.util as _ilu
+    import pathlib as _pl
+
+    _spec = _ilu.spec_from_file_location("muse_vector_content", _pl.Path(__file__).with_name("content.py"))
+    content = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(content)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("muse.embedding_worker")
 
@@ -58,20 +68,10 @@ VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dim
 
 
 def item_text(metadata: dict) -> str:
-    """Builds the text blob to embed for an item. v1: metadata fields only.
-    TODO (see docs/architecture.md): incorporate transcripts/subtitles where available.
-    """
-    parts = [
-        metadata.get("title", ""),
-        metadata.get("artist", "") if metadata.get("artist", "") not in metadata.get("title", "") else "",
-        metadata.get("album", ""),
-        metadata.get("description", ""),
-        " ".join(metadata.get("genres", []) or []),
-        " ".join(metadata.get("tags", []) or []),
-        metadata.get("mood", ""),
-        metadata.get("query", ""),  # search_query items
-    ]
-    return " ".join(str(p) for p in parts if p).strip()
+    """The text blob to embed for an item: title, people, genres, tagline, description... from
+    any source's metadata shape (Jellyfin/Vesper people lists, Mono artist/album, search
+    queries), see content.item_text."""
+    return content.item_text(metadata or {})
 
 
 def fact_text(fact: dict) -> str:
@@ -171,7 +171,7 @@ async def recompute_taste_vectors(
             canonical, group = await identity_group(conn, user_id)
             rows = await conn.fetch(
                 """
-                SELECT source, source_item_id, item_type, action_weight, "timestamp", device_context, metadata
+                SELECT source, source_item_id, item_type, action, action_weight, "timestamp", device_context, metadata
                 FROM event
                 WHERE user_id = ANY($1::uuid[])
                   AND source_item_id IS NOT NULL
@@ -193,8 +193,14 @@ async def recompute_taste_vectors(
 
             # Group weighted content-vector lookups per item_type, plus one combined bucket.
             per_type: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
+            opened = []
             for row in map(open_event, rows):
-                w = row["action_weight"] * decay_weight(row["timestamp"], now)
+                md = row.get("metadata") or {}
+                opened.append({**row, "co_viewer": bool(md.get("co_viewer"))})
+            # Duplicate reports (Vesper and the Jellyfin poll), state-like actions and co-viewing
+            # are collapsed first (content.collapse_events), then decayed by age.
+            for row, weight in content.collapse_events(opened):
+                w = weight * decay_weight(row["timestamp"], now)
                 if w == 0:
                     continue
                 per_type[row["item_type"]].append((row["source"], row["source_item_id"], w))

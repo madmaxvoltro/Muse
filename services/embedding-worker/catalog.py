@@ -224,6 +224,7 @@ async def rebuild_canon(conn: asyncpg.Connection, model_name: str, limit: int = 
             "vote_average": _f((enrichment or {}).get("vote_average") or md.get("vote_average") or md.get("community_rating")),
             "vote_count": _f((enrichment or {}).get("vote_count") or md.get("vote_count")),
             "popularity": _f((enrichment or {}).get("popularity") or md.get("popularity")),
+            "certification": f.get("certification"),  # kids profiles (max_age) filter on it
             "library_refs": [{"source": r["source"], "source_item_id": r["metadata"].get("_sid")} for r in avail if r["metadata"].get("_sid")],
             "document": doc,
         }

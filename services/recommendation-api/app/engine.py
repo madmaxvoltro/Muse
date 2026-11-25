@@ -433,6 +433,7 @@ class Engine:
             "year": s.payload.get("year"),
             "item_type": s.payload.get("item_type"),
             "available": bool(s.payload.get("available")),
+            "certification": s.payload.get("certification"),
             "score": round(s.score, 4),
             "confidence": round(s.confidence, 4),
             "explore": s.explore,
