@@ -1,32 +1,12 @@
-# Navidrome setup
+# navidrome adapter setup
 
-Status: implemented (`adapters/navidrome`, polls the Subsonic API).
+Status: not yet implemented.
 
-What it captures:
+Once built, this will document:
+- How the adapter authenticates to navidrome
+- Which events it captures and how they map to the Muse event schema
+- The `.env` variables it needs
+- Verification steps
 
-| Navidrome | Muse |
-|---|---|
-| every song (daily) | `cataloged` (artist, album, year, genres, duration) |
-| a song appears in "now playing" | `played` (device = player name) |
-| it gets replaced after >= 80% / the last 30 s | `completed` |
-| it gets replaced before 50% | `skipped` |
-| starred / unstarred (per-user credentials) | `favorited` / `unfavorited` |
-
-`.env`:
-
-```bash
-MUSE_ADAPTER_KEYS=...,navidrome:<key>
-MUSE_NAVIDROME_ADAPTER_KEY=<key>
-NAVIDROME_URL=http://navidrome:4533
-NAVIDROME_USER=admin            # sees everyone's "now playing"
-NAVIDROME_PASSWORD=...
-NAVIDROME_USERS=alice:pw,bob:pw # optional, for each person's stars
-```
-
-Start: `docker compose --profile navidrome up -d navidrome-adapter`. The audio analyzer uses the
-same credentials to listen to Navidrome songs.
-
-Users appear in Muse as `uuid5("navidrome:<username>")`. Link each to the person's other
-accounts (a link code from Mono or an assistant) so it's one profile.
-
-Verify: `SELECT action, count(*) FROM event WHERE source = 'navidrome' GROUP BY 1;`
+See `adapters/searxng.md` for the shape this doc will take, and
+`../architecture.md` for what data points this adapter is expected to capture.

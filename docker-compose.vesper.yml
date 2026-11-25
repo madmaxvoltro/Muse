@@ -1,39 +1,14 @@
-# Muse as Vesper's recommender, on the same machine. Use with the base file:
-#   docker compose -f docker-compose.yml -f docker-compose.vesper.yml up -d --build \
-#     postgres qdrant ingestion-api recommendation-api embedding-worker jellyfin-adapter \
-#     query-api mcp-server
+# Muse next to Vesper and Jellyfin on the same machine. Use with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.vesper.yml up -d
+# (./muse setup with mode "local" writes COMPOSE_FILE so plain `docker compose` / `./muse up` do this.)
 #
-# Only those services: the curator, arr-adapter and searxng-adapter need Radarr/Sonarr/
-# SearxNG and are started separately once configured. The two APIs listen on 127.0.0.1
-# only (vesper-server runs with host networking); nothing is reachable from the LAN.
-# The Jellyfin adapter uses host networking too, so it reaches a Jellyfin bound to localhost.
-
+# The two APIs already listen on 127.0.0.1 only (MUSE_BIND). The Jellyfin adapter uses host
+# networking here so it reaches a Jellyfin bound to localhost, and then reaches the ingestion
+# API on its localhost port.
 services:
-  ingestion-api:
-    ports: ["127.0.0.1:${MUSE_INGEST_PORT:-8771}:8000"]
-
-  recommendation-api:
-    ports: ["127.0.0.1:${MUSE_RECO_PORT:-8770}:8001"]
-    environment:
-      MUSE_READ_KEYS: ${MUSE_READ_KEYS:-}
-
-  embedding-worker:
-    volumes: [hf_cache:/root/.cache/huggingface]
-
-  # Query API (search, profile, questions, linking, tokens) and the MCP endpoint for assistants.
-  query-api:
-    ports: ["127.0.0.1:${MUSE_QUERY_PORT:-8772}:8002"]
-    volumes: [hf_cache:/root/.cache/huggingface]
-
-  mcp-server:
-    ports: ["127.0.0.1:${MUSE_MCP_PORT:-8773}:8003"]
-
   jellyfin-adapter:
     network_mode: host
     networks: !reset []
+    depends_on: !reset []
     environment:
       MUSE_INGESTION_URL: http://127.0.0.1:${MUSE_INGEST_PORT:-8771}
-      MUSE_WATCH_POLL_INTERVAL_SECONDS: ${MUSE_WATCH_POLL_INTERVAL_SECONDS:-120}
-
-volumes:
-  hf_cache:

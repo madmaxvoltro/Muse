@@ -1,1 +1,0 @@
-"""Muse MCP server."""

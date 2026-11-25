@@ -1,21 +1,12 @@
-# Audiobookshelf setup
+# audiobookshelf adapter setup
 
-Status: implemented (`adapters/audiobookshelf`, polls the Audiobookshelf API).
+Status: not yet implemented.
 
-What it captures: every book (`cataloged`, with author, narrator, series, genres and
-description, so recommendations work on content), and per user `played` (once a day while
-listening) and `completed` (when finished). Podcasts are not handled yet.
+Once built, this will document:
+- How the adapter authenticates to audiobookshelf
+- Which events it captures and how they map to the Muse event schema
+- The `.env` variables it needs
+- Verification steps
 
-`.env`:
-
-```bash
-MUSE_ADAPTER_KEYS=...,audiobookshelf:<key>
-MUSE_AUDIOBOOKSHELF_ADAPTER_KEY=<key>
-AUDIOBOOKSHELF_URL=http://audiobookshelf:80
-AUDIOBOOKSHELF_TOKEN=<admin user's API token: Settings -> Users -> (admin) -> API token>
-```
-
-Start: `docker compose --profile audiobookshelf up -d audiobookshelf-adapter`.
-
-Users appear as `uuid5("audiobookshelf:<user id>")`; link them with link codes.
-Verify: `SELECT action, count(*) FROM event WHERE source = 'audiobookshelf' GROUP BY 1;`
+See `adapters/searxng.md` for the shape this doc will take, and
+`../architecture.md` for what data points this adapter is expected to capture.

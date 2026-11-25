@@ -1,59 +1,21 @@
-# Muse MCP server
+# Muse MCP server (optional)
 
-Lets an AI assistant (Claude, or any MCP client) know a person's taste, search everything Muse
-has seen, get recommendations, ask the questions Muse has, and tell Muse what it learns. It
-calls the [query API](../query-api/README.md) with the connection's token, so a personal token
-can only ever see and teach that one person.
+Lets an assistant you already use (Open WebUI, Claude Desktop, any MCP client) ask you Muse's
+questions in conversation, record your answers, and fetch recommendations, your taste profile
+and how your taste is evolving. Muse works exactly the same without it.
 
-## Get a token
-
-* In **Mono**: Settings → Muse → "Connect an AI assistant" (Mono asks Muse for a token for
-  your account and shows a ready-to-paste config).
-* Or as household admin:
-
-      curl -X POST http://127.0.0.1:8772/v1/tokens -H "Authorization: Bearer $MUSE_ADMIN_TOKEN" \
-           -H 'content-type: application/json' -d '{"user": "<user id>", "label": "Claude"}'
-
-  `GET /v1/users` lists user ids. `{"user": null}` makes a household token (all users).
-
-## Connect
-
-Local (stdio), e.g. Claude Desktop / Claude Code config:
-
-```json
-{
-  "mcpServers": {
-    "muse": {
-      "command": "muse-mcp",
-      "env": { "MUSE_QUERY_URL": "http://127.0.0.1:8772", "MUSE_TOKEN": "muse_..." }
-    }
-  }
-}
-```
-
-(`pip install ./services/mcp-server` provides `muse-mcp`; `python -m muse_mcp` works too.)
-
-Shared HTTP endpoint (the `mcp-server` compose service, `127.0.0.1:8773` with the Vesper
-override): `http://<host>:8773/mcp` with header `Authorization: Bearer muse_...`. Each client
-sends its own token. Expose it only over your tailnet, like the rest of Muse.
-
-## Tools
-
-| Area | Tools |
+| tool | does |
 |---|---|
-| Who | `whoami`, `list_users`, `capabilities`, `list_identities`, `create_link_code`, `link_account`, `unlink_account` |
-| Know | `get_taste_profile`, `get_taste_portrait`, `search`, `search_by_sound`, `similar_items`, `get_item`, `get_history`, `year_review` |
-| Recommend | `recommend` (mood, `taste_from`), `radio` (energy arcs), `next_up`, `why_not` |
-| Together | `start_group`, `list_groups`, `group_recommendations`, `record_group_pick`, `end_group` |
-| Right now | `list_moods`, `set_mood`, `clear_mood`, `set_activity`, `get_context` |
-| Teach | `remember`, `list_facts`, `forget`, `rate_item`, `more_like_this`, `less_like_this`, `update_settings`, `add_goal`, `list_goals` |
-| Ask | `get_questions`, `answer_question`, `skip_question`, `ask_later` |
-| Music to get | `new_releases`, `wanted`, `want` |
-| Privacy | `set_incognito`, `forget_history`, `access_log` |
-| Muse itself | `suggest_feature`, `list_feature_suggestions` |
+| `muse_pending_questions` | the question queue, most valuable first, with the exact answer body |
+| `muse_answer_question` | records an answer (ingestion API `/answers`, `muse` key) |
+| `muse_dismiss_question` | closes a question without writing taste data |
+| `muse_recommendations` | explained picks (`item_type`, optional `mood`) |
+| `muse_taste_profile` / `muse_taste_evolution` | what Muse thinks your taste is / how it's changing |
 
-Prompts: `taste_interview`, `use_my_taste` (e.g. films for your music taste), `watch_together`.
+Run: `docker compose --profile mcp up -d mcp-server`, then point your MCP client at
+`http://127.0.0.1:8002/mcp` (streamable HTTP). Or locally over stdio:
+`MUSE_RECO_URL=http://127.0.0.1:8770 MUSE_INGEST_URL=http://127.0.0.1:8771 python server.py`.
 
-The server's instructions tell the assistant to ask one question at a time, only when it fits,
-to store only taste and listening/viewing context (nothing sensitive), to say what it stored,
-and never to mix household members' data.
+Env: `MUSE_RECO_URL`, `MUSE_INGEST_URL`, `MUSE_READ_KEY`, `MUSE_ANSWER_KEY` (empty = read-only),
+`MUSE_MCP_USER_ID` (default user), `MUSE_MCP_TRANSPORT` (`stdio` | `streamable-http`),
+`MUSE_MCP_HOST`, `MUSE_MCP_PORT`. Built on the official MCP Python SDK 2.x (`MCPServer`).

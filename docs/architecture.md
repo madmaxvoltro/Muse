@@ -71,24 +71,28 @@ an audit/anomaly-detection base (see Security model).
 
 ## Recommendation algorithm — 3-stage funnel
 
-Not a single similarity search. Chosen deliberately for "Google-level" recommendation quality:
+Full design, the research each stage builds on, and how to evaluate it:
+[`recommender.md`](recommender.md). In short:
 
-1. **Candidate generation** (~200 candidates, optimizes recall): multiple parallel generators —
-   Qdrant vector similarity, item-item co-occurrence within the user's own history (substitutes
-   for collaborative filtering since it's effectively single-household), cross-source backlog
-   signal (searched-but-not-watched), trending/new-arrival injection for cold-start.
-2. **Ranking** (optimizes precision): every candidate scored individually with a **hand-weighted,
-   explainable scoring function** (similarity + recency-decay + within-user popularity +
-   completion-rate of similar content + confidence) — not a learned model, chosen for
-   explainability and because a learned model needs feedback volume Muse won't have early on.
-3. **Re-ranking/policy**: diversity constraints (cap per genre/franchise), explore-dial allocation,
-   user-overlay controls applied here, confidence affecting placement.
+1. **Candidate generation** (recall): eight generators fused with Reciprocal Rank Fusion:
+   one ANN query per *interest* (multi-interest profiles after PinnerSage instead of one
+   averaged taste vector), short-term intent, item-to-item from your strongest titles, TMDB
+   "fans also liked" (collaborative signal a single household can't produce itself),
+   household CF, backlog (watchlist/requested), mood text, and quality for cold start.
+2. **Ranking** (precision): an explainable linear model over named features (interest
+   affinity, exact tag matches such as director/keywords, repulsion from disliked titles,
+   related support, intent, Bayesian rating, freshness, fatigue...). It started hand-weighted
+   and is re-fitted daily from logged impressions, with a prior that keeps the hand-set
+   weights until there's enough data. Every candidate also gets an uncertainty from how much
+   judged evidence sits near it.
+3. **Re-ranking/policy**: the list is calibrated to your interest proportions (Steck 2018),
+   penalises redundancy (MMR), keeps one entry per franchise (the next unseen part), and
+   fills explore slots by Thompson sampling over uncertain-but-promising candidates. User
+   overlay controls apply here and in signal aggregation.
 
-**Confidence is a first-class scoring input, not just a UI label.**
-`confidence = f(interaction count with similar content, variance, signal age, cross-source agreement)`.
-High-confidence+high-score → shown as a strong match. Low-confidence+high-score → deliberately
-routed into the explore slots rather than dropped, so the system actively collects feedback on
-uncertain-but-promising items (lightweight multi-armed-bandit pattern).
+**Confidence is a first-class scoring input, not just a UI label.** It's computed per
+candidate from nearby evidence and its agreement. Low-confidence + high-score items are
+routed into explore slots on purpose: showing them is how Muse learns.
 
 ## User control overlay
 
@@ -144,46 +148,6 @@ exactly across services.
 - **Cold-start profiles** (e.g. a profile with only Jellyfin data) are handled entirely by the
   existing confidence mechanism — no separate cold-start logic needed.
 
-**Linked identities (implemented).** One person is one canonical `user_id` plus any number of
-aliases (`user_alias`): the Jellyfin GUID, the Mono account, a SearxNG id. Linking is explicit,
-never inferred: a single-use code made on one account and redeemed on the other (query API /
-MCP / Mono's settings), or an admin call. Events keep the id they were written with — the store
-stays append-only and unlinking is a row delete — and readers resolve at read time
-(`shared/muse_schema/identity.py`): the embedding worker builds one taste vector per person over
-all their ids, the recommendation API excludes what any of their ids has seen, profiles and
-search cover them all.
-
-## What Muse is told (facts, questions)
-
-Behaviour is ambiguous; people and their assistants can say what it means. Three tables
-(`db/migrations/007_people_and_knowledge.sql`), all written through the query API:
-
-- **Facts** (`profile_fact`): "loves slow Dutch ballads", "never suggest musicals". Facts with a
-  sentiment are embedded and averaged into the taste vector like items (so a fact can create a
-  domain's vector from nothing — cold start by interview); facts that name a `subject` are also
-  applied exactly at ranking time (`avoid` filters, `likes`/`dislikes` move the score, and the
-  reason shows up in `why`). Retracting one undoes it on the next worker cycle.
-- **Questions** (`question`): Muse generates them where behaviour can't answer — a domain the
-  household uses but this person hasn't touched, genres/artists with mixed signals, uncertain
-  recommendations, how adventurous to be, whether one domain's taste may steer another.
-  Options carry effects (a `rated` event, a fact, an overlay setting). Assistants ask them in
-  conversation via MCP; Mono shows them in its Muse screen.
-- **Feature suggestions** (`feature_suggestion`): assistants propose improvements to Muse
-  itself while helping someone; duplicates become votes.
-
-The overlay gained `preferences.taste_blend`: how much of the cross-domain (`_combined`) taste is
-mixed into each domain's own, and the recommendation API accepts `taste_from=<domain>` to rank one
-domain with another's taste (music taste → films).
-
-## Query API and MCP
-
-`services/query-api` is the read-and-teach API for apps and assistants: search (semantic +
-keyword, personalised), profile, history, recommendations, facts, questions, identities, tokens.
-Per-person bearer tokens limit an assistant to one person; a source server can act for its own
-users with its ingestion key. `services/mcp-server` exposes it as MCP tools (stdio or shared
-streamable HTTP), with instructions that keep assistants to taste-only facts, one question at a
-time, and one person's data per conversation.
-
 ## Jellyfin plugin scope
 
 Deliberately scoped to the official `IHomeScreenSection` plugin API (Jellyfin 10.9+) rather than
@@ -199,48 +163,11 @@ Anime separation is already native to Jellyfin (library views) — no custom top
 
 ## Security model
 
-Threat model: the main risk is **lateral movement within the home network**, not external
-attackers (Tailscale/VLAN already covers that). Principles:
-
-- Muse runs on its own VLAN segment, isolated from the rest of the homelab.
-- Encryption at rest (LUKS) on the Muse DB volume.
-- No direct external exposure — Tailscale-only access, no ports published to the host.
-- Adapters are write-only with minimal, per-adapter credentials (see `services/ingestion-api/app/auth.py`)
-  — a compromised adapter can inject rate-limited bad events, but can never read the event store back.
-- The vector store (Qdrant) is secured at the same level as raw data — embeddings can leak/reconstruct
-  sensitive signal, they are not "safe just because they're numbers."
-- Backups (Proxmox Backup Server) must carry the same encryption requirement as the live DB.
-- Anomaly detection on the event store itself (unusual query volume/time) is a candidate future
-  feature — an IDS-like layer on top of the append-only log.
-
-## Understanding taste (beyond metadata)
-
-Text embeddings of titles, genres and lyrics only know what tags say. Muse also uses:
-- **Sound**: the audio analyzer decodes parts of each track (intro, body, outro; or a 30 s
-  preview) and computes tempo, key/Camelot, energy, danceability, acousticness... plus a CLAP
-  embedding of how it sounds. Taste in sound is averaged from what is finished/loved vs skipped.
-- **Facets**: spherical k-means per person and domain, in text and sound space, so a person with
-  two tastes gets two centres; each facet gets room in every list. Sound facets are named from a
-  descriptor vocabulary embedded with CLAP's text encoder (the taste portrait).
-- **Behaviour**: items played together in sessions (PPMI + SVD) and A->B transitions with how they
-  ended; relations that no metadata contains.
-- **Preference models**: logistic regression on a person's likes vs skips over audio features,
-  kept only when it predicts on held-out data.
-- **Context tastes**: per daypart, weekend, device class.
-
-## Engine
-
-`services/recommendation-api/app/engine.py`: generators (taste, facets, sound, behaviour,
-co-occurrence, new arrivals, mood, goals) -> features in every space -> hand weights or a learned
-ranker (activated only when it beats them on holdout, trained from logged impressions and their
-outcomes) -> facts, ignored-impression penalty -> re-rank with facet quotas, artist/genre caps,
-explore slots. `/next` and `/radio` score transitions (sound, Camelot key, tempo incl. half/double
-time, energy arc, played-after) with beam search. `/group-recommendations` combines per-member
-scores (mean + least misery, fairness memory, vetoes).
-
-## Outside the library, and outside the house
-
-The catalog worker uses MusicBrainz (ids, genres, release groups), ListenBrainz (listening
-similarity) and Deezer (related artists, previews, BPM): catalog tracks become recommendable as
-discoveries, new releases of loved artists and good discoveries become the wanted list. What
-leaves the house is listed in `docs/security-audit.md`.
+Threat model and implementation: [`../SECURITY.md`](../SECURITY.md). In short: Muse encrypts
+every personal field itself (AES-256-GCM; blind HMAC indexes for searchable identifiers), so
+dumps, backups and copied volumes are unreadable without the key file; adapters are write-only
+with per-adapter keys; every service has its own least-privilege database role; data stores sit
+on an internal network with no internet; the APIs listen on localhost (HTTPS proxy for other
+machines); secrets are Docker secret files; containers run non-root and read-only; logs carry no
+personal data. Remaining exposure (activity timestamps, catalog vectors, a compromised running
+host) is documented there.

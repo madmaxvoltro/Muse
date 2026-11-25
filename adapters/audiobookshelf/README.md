@@ -1,8 +1,7 @@
-# Audiobookshelf adapter
+# Muse adapter: audiobookshelf
 
-Status: implemented (polling the Audiobookshelf API with an admin token). Setup:
-[`docs/adapters/audiobookshelf.md`](../../docs/adapters/audiobookshelf.md).
+Status: not yet implemented — see `../searxng/` for the reference adapter pattern
+(one FastAPI service, POSTs `Event` objects to the ingestion API, own API key,
+write-only).
 
-Emits `cataloged` for every book (title, author, narrator, series, genres, description),
-`played` (once per book per day while listening) and `completed` from each user's media
-progress. Podcasts are skipped for now.
+Setup tutorial: `../../docs/adapters/audiobookshelf.md`

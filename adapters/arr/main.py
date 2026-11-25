@@ -31,12 +31,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("muse.arr_adapter")
 
 RADARR_URL = os.environ.get("RADARR_URL", "").rstrip("/")
-RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "")
+def _secret(name: str, default: str = "") -> str:
+    """NAME_FILE (a Docker secret) wins over NAME; secrets don't belong in environment variables."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        with open(path) as f:
+            return f.read().strip()
+    return os.environ.get(name, default)
+
+
+RADARR_API_KEY = _secret("RADARR_API_KEY")
 SONARR_URL = os.environ.get("SONARR_URL", "").rstrip("/")
-SONARR_API_KEY = os.environ.get("SONARR_API_KEY", "")
+SONARR_API_KEY = _secret("SONARR_API_KEY")
 
 INGESTION_URL = os.environ["MUSE_INGESTION_URL"]
-ADAPTER_KEY = os.environ["MUSE_ADAPTER_KEY"]
+ADAPTER_KEY = _secret("MUSE_ADAPTER_KEY")
 DEFAULT_USER_ID = os.environ["MUSE_DEFAULT_USER_ID"]
 
 POLL_INTERVAL_SECONDS = int(os.environ.get("MUSE_ARR_POLL_INTERVAL_SECONDS", "900"))

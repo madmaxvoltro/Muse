@@ -1,63 +1,99 @@
-"""Scores discovery candidates and owned items against active users' taste vectors.
-Multi-profile combination rule (decided, see docs/architecture.md):
-  - ADD uses the averaged similarity across active profiles.
-  - REMOVE requires a low score from ALL active profiles (max-score-wins for keeping).
+"""Curator scoring with the same engine the recommendation API uses (muse_taste), so what
+the curator downloads is what Muse would recommend, and what it removes is what no profile
+would miss.
+
+Multi-profile rule (docs/architecture.md):
+  - ADD: averaged score across active profiles.
+  - REMOVE: removal-eligible only if *every* active profile scores it low (max < threshold).
 """
 
-from muse_schema import taste_point_id
+from __future__ import annotations
+
+import os
+import uuid
+
+import asyncpg
+import numpy as np
+from muse_schema import canon_point_id
+from muse_taste.profile import TasteProfile
+from muse_taste.ranking import CandidateInput, Scored, score_candidates
+from muse_schema.crypto import P_PROFILE, get_vault
+from muse_taste.store import ITEMS_COLLECTION, blind_canon
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 
-CONTENT_COLLECTION = "content_items"
-TASTE_COLLECTION = "taste_vectors"
-REMOVE_SCORE_THRESHOLD = 0.2  # below this similarity for every active profile -> removal-eligible
+ADD_SCORE_THRESHOLD = float(os.environ.get("MUSE_CURATOR_ADD_SCORE", "0.55"))
+REMOVE_SCORE_THRESHOLD = float(os.environ.get("MUSE_CURATOR_REMOVE_SCORE", "0.10"))
 
-
-def embed_text(model: SentenceTransformer, text: str) -> list[float]:
-    return model.encode(text, normalize_embeddings=True).tolist()
+# arr item types -> canonical TMDB kind
+ARR_KIND = {"movie": "movie", "series_episode": "tv", "series": "tv"}
 
 
-def _taste_vectors_for(qdrant: QdrantClient, user_ids: list[str], item_type: str) -> list[list[float]]:
-    vectors = []
-    for user_id in user_ids:
-        points = qdrant.retrieve(collection_name=TASTE_COLLECTION, ids=[taste_point_id(user_id, item_type)], with_vectors=True)
-        if not points:
-            points = qdrant.retrieve(collection_name=TASTE_COLLECTION, ids=[taste_point_id(user_id, "_combined")], with_vectors=True)
-        if points:
-            vectors.append(points[0].vector)
-    return vectors
+def real_canon_for(arr_item_type: str, tmdb_id: str) -> str:
+    return f"tmdb:{ARR_KIND.get(arr_item_type, 'movie')}:{tmdb_id}"
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(y * y for y in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+def canon_for(arr_item_type: str, tmdb_id: str) -> str:
+    """The stored (blind) canonical key, as used in profiles and the vector store."""
+    return blind_canon(real_canon_for(arr_item_type, tmdb_id))
 
 
-def score_candidate_avg(qdrant: QdrantClient, candidate_vector: list[float], active_user_ids: list[str], item_type: str) -> float:
-    """ADD decision: averaged similarity across active profiles."""
-    tastes = _taste_vectors_for(qdrant, active_user_ids, item_type)
-    if not tastes:
-        return 0.0
-    scores = [_cosine(candidate_vector, t) for t in tastes]
-    return sum(scores) / len(scores)
+class ProfileScorer:
+    def __init__(self, qdrant: QdrantClient, profiles: dict[str, TasteProfile]):
+        self.qdrant = qdrant
+        self.profiles = profiles
+        self._anchors: dict[str, dict[str, np.ndarray]] = {}
+
+    @classmethod
+    async def load(cls, pool: asyncpg.Pool, qdrant: QdrantClient, user_ids: list[str], domain: str = "video") -> "ProfileScorer":
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, profile FROM taste_profile WHERE domain = $1 AND user_id = ANY($2::uuid[])",
+                domain,
+                [uuid.UUID(u) for u in user_ids],
+            )
+        profiles = {}
+        for r in rows:
+            profiles[str(r["user_id"])] = TasteProfile.from_json(get_vault().open_json(r["profile"], P_PROFILE))
+        return cls(qdrant, profiles)
+
+    def vectors(self, keys: list[str]) -> dict[str, np.ndarray]:
+        ids = {canon_point_id(k): k for k in keys}
+        out = {}
+        idl = list(ids)
+        for i in range(0, len(idl), 256):
+            for p in self.qdrant.retrieve(ITEMS_COLLECTION, ids=idl[i : i + 256], with_vectors=True):
+                out[ids[str(p.id)]] = np.asarray(p.vector, dtype=np.float32)
+        return out
+
+    def _anchor_vecs(self, uid: str) -> dict[str, np.ndarray]:
+        if uid not in self._anchors:
+            self._anchors[uid] = self.vectors([a.key for a in self.profiles[uid].anchors[:300]])
+        return self._anchors[uid]
+
+    def seen_by_anyone(self) -> set[str]:
+        return {k for p in self.profiles.values() for k in p.seen}
+
+    def score(self, cands: list[CandidateInput]) -> dict[str, dict[str, Scored]]:
+        """-> {canon_key: {user_id: Scored}}"""
+        out: dict[str, dict[str, Scored]] = {c.key: {} for c in cands}
+        for uid, prof in self.profiles.items():
+            rel = {r["key"]: r for r in prof.related}
+            per_user = [
+                CandidateInput(
+                    key=c.key, vector=c.vector, tags=c.tags, vote_average=c.vote_average, vote_count=c.vote_count,
+                    related_support=float(rel.get(c.key, {}).get("support", 0.0)), related_via=list(rel.get(c.key, {}).get("via", [])),
+                    payload=c.payload,
+                )
+                for c in cands
+            ]
+            for s in score_candidates(prof, per_user, anchor_vectors=self._anchor_vecs(uid)):
+                out[s.key][uid] = s
+        return out
 
 
-def score_owned_item_max(qdrant: QdrantClient, source: str, source_item_id: str, active_user_ids: list[str], item_type: str) -> float | None:
-    """REMOVE decision input: the MAX similarity across active profiles — an item is
-    only removal-eligible if even its best-matching profile scores it low.
-    Returns None if the item has no content embedding yet (can't score it).
-    """
-    from muse_schema import content_point_id
+def add_score(per_user: dict[str, Scored]) -> float:
+    return float(np.mean([s.score for s in per_user.values()])) if per_user else 0.0
 
-    points = qdrant.retrieve(collection_name=CONTENT_COLLECTION, ids=[content_point_id(source, source_item_id)], with_vectors=True)
-    if not points:
-        return None
-    vector = points[0].vector
-    tastes = _taste_vectors_for(qdrant, active_user_ids, item_type)
-    if not tastes:
-        return None
-    return max(_cosine(vector, t) for t in tastes)
+
+def remove_score(per_user: dict[str, Scored]) -> float | None:
+    return max((s.score for s in per_user.values()), default=None)
