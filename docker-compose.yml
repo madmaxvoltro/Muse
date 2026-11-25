@@ -1,127 +1,311 @@
-# All services are attached only to the internal `muse-net` network, no ports published
-# to the host except via Tailscale/reverse-proxy — see docs/installation.md for the
-# network isolation this assumes (dedicated VLAN segment).
+# Muse. Set up with `./muse setup` (creates .env and ./secrets/), then `./muse up`.
+# See SECURITY.md for the threat model this file implements:
+#
+#  * Three networks. `data` (internal, no internet): Postgres, Qdrant and the services that
+#    use them. `edge` (internal): adapters can reach the ingestion API and nothing else of
+#    Muse. `egress`: outbound internet only for what needs it (model downloads, TMDB, your
+#    Jellyfin/arr/SearxNG). `public`: the two APIs, published on MUSE_BIND (127.0.0.1 by
+#    default; never 0.0.0.0, use the `tls` profile to serve other machines).
+#  * Secrets are files under ./secrets (mode 0700 dir), mounted as Docker secrets, never env.
+#  * Every service runs as uid 10001, read-only root filesystem, no capabilities, no
+#    privilege escalation, small log files. Postgres and Qdrant keep their own users.
+#  * Each service has its own database role with only the grants it needs (services/admin).
+#  * Qdrant requires an API key; readers get a read-only key. Telemetry off everywhere.
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs: ["/tmp:size=64m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+x-db: &db
+  MUSE_DB_HOST: postgres
+  MUSE_DB_NAME: muse
+  MUSE_MASTER_KEY_FILE: /run/secrets/muse_master_key
+
+# Embedding settings shared by everything that embeds text: the worker (catalog), the curator
+# (trending candidates) and the recommendation API (?mood= queries). They MUST match.
+x-embedding-env: &embedding-env
+  MUSE_EMBED_PROVIDER: ${MUSE_EMBED_PROVIDER:-local}
+  MUSE_EMBEDDING_MODEL: ${MUSE_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+  MUSE_EMBED_DEVICE: ${MUSE_EMBED_DEVICE:-auto}
+  MUSE_EMBED_DIM: ${MUSE_EMBED_DIM:-}
+  MUSE_EMBED_BASE_URL: ${MUSE_EMBED_BASE_URL:-}
+  MUSE_EMBED_API_KEY_FILE: /run/secrets/embed_api_key
+  MUSE_EMBED_ALLOW_EXTERNAL: ${MUSE_EMBED_ALLOW_EXTERNAL:-false}
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  DO_NOT_TRACK: "1"
+
+x-llm-env: &llm-env
+  MUSE_LLM_PROVIDER: ${MUSE_LLM_PROVIDER:-none}
+  MUSE_LLM_BASE_URL: ${MUSE_LLM_BASE_URL:-}
+  MUSE_LLM_API_KEY_FILE: /run/secrets/llm_api_key
+  MUSE_LLM_MODEL: ${MUSE_LLM_MODEL:-}
+  MUSE_LLM_ALLOW_EXTERNAL: ${MUSE_LLM_ALLOW_EXTERNAL:-false}
+  MUSE_LLM_PERSONAL_TASKS: ${MUSE_LLM_PERSONAL_TASKS:-true}
 
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: ${MUSE_POSTGRES_IMAGE:-timescale/timescaledb:2.17.2-pg16}
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_DB: muse
       POSTGRES_USER: muse
-      POSTGRES_PASSWORD: ${MUSE_POSTGRES_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d
-    networks: [muse-net]
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+      TIMESCALEDB_TELEMETRY: "off"
+    # Never log statement parameters (they'd be plaintext search queries if anything ever bypassed encryption).
+    command: ["postgres", "-c", "password_encryption=scram-sha-256", "-c", "log_parameter_max_length=0",
+              "-c", "log_parameter_max_length_on_error=0", "-c", "timescaledb.telemetry_level=off"]
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U muse -d muse -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    networks: [data]
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: ${MUSE_QDRANT_IMAGE:-qdrant/qdrant:v1.12.4}
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
     volumes:
       - qdrant_data:/qdrant/storage
-    networks: [muse-net]
+      # API keys (read-write + read-only) live in a config file, not in env (./muse setup writes it)
+      - ./secrets/qdrant.yaml:/qdrant/config/local.yaml:ro
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    networks: [data]
+
+  # One-shot on every start: migrations, database roles, encrypting any legacy rows.
+  admin:
+    <<: *hardening
+    build: {context: ., dockerfile: services/admin/Dockerfile}
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse
+      MUSE_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      MUSE_DB_PASSWORD_MUSE_INGEST_FILE: /run/secrets/db_muse_ingest
+      MUSE_DB_PASSWORD_MUSE_RECO_FILE: /run/secrets/db_muse_reco
+      MUSE_DB_PASSWORD_MUSE_WORKER_FILE: /run/secrets/db_muse_worker
+      MUSE_DB_PASSWORD_MUSE_CURATOR_FILE: /run/secrets/db_muse_curator
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+    secrets: [muse_master_key, postgres_password, db_muse_ingest, db_muse_reco, db_muse_worker, db_muse_curator, qdrant_api_key]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [data]
 
   ingestion-api:
-    build:
-      context: .
-      dockerfile: services/ingestion-api/Dockerfile
-    restart: unless-stopped
+    <<: *hardening
+    build: {context: ., dockerfile: services/ingestion-api/Dockerfile}
     environment:
-      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
-      MUSE_ADAPTER_KEYS: ${MUSE_ADAPTER_KEYS}
-    depends_on: [postgres]
-    networks: [muse-net]
+      <<: *db
+      MUSE_DB_USER: muse_ingest
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_ingest
+      MUSE_ADAPTER_KEYS_FILE: /run/secrets/adapter_keys
+    secrets: [muse_master_key, db_muse_ingest, adapter_keys]
+    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_INGEST_PORT:-8771}:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      retries: 12
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, edge, public]
 
   recommendation-api:
-    build:
-      context: .
-      dockerfile: services/recommendation-api/Dockerfile
-    restart: unless-stopped
+    <<: *hardening
+    build: {context: ., dockerfile: services/recommendation-api/Dockerfile}
     environment:
-      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      <<: [*db, *embedding-env]
+      MUSE_DB_USER: muse_reco
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_reco
+      MUSE_READ_KEYS_FILE: /run/secrets/read_keys
+      MUSE_STATUS_TOKEN_FILE: /run/secrets/status_token
       MUSE_QDRANT_URL: http://qdrant:6333
-    depends_on: [postgres, qdrant]
-    networks: [muse-net]
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_read_key  # read-only
+    secrets: [muse_master_key, db_muse_reco, read_keys, status_token, qdrant_read_key, embed_api_key]
+    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_RECO_PORT:-8770}:8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
+      interval: 10s
+      retries: 12
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, public]
 
   embedding-worker:
-    build:
-      context: .
-      dockerfile: services/embedding-worker/Dockerfile
-    restart: unless-stopped
+    <<: *hardening
+    build: {context: ., dockerfile: services/embedding-worker/Dockerfile}
     environment:
-      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      <<: [*db, *embedding-env, *llm-env]
+      MUSE_DB_USER: muse_worker
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_worker
       MUSE_QDRANT_URL: http://qdrant:6333
-    depends_on: [postgres, qdrant]
-    networks: [muse-net]
-
-  searxng-adapter:
-    build:
-      context: .
-      dockerfile: adapters/searxng/Dockerfile
-    restart: unless-stopped
-    environment:
-      SEARXNG_UPSTREAM_URL: ${SEARXNG_UPSTREAM_URL}
-      MUSE_INGESTION_URL: http://ingestion-api:8000
-      MUSE_ADAPTER_KEY: ${MUSE_SEARXNG_ADAPTER_KEY}
-      MUSE_DEFAULT_USER_ID: ${MUSE_DEFAULT_USER_ID}
-    depends_on: [ingestion-api]
-    networks: [muse-net]
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      TMDB_API_KEY_FILE: /run/secrets/tmdb_api_key
+      MUSE_TMDB_LANGUAGE: ${MUSE_TMDB_LANGUAGE:-en-US}
+      MUSE_TIMEZONE: ${MUSE_TIMEZONE:-UTC}
+    secrets: [muse_master_key, db_muse_worker, qdrant_api_key, tmdb_api_key, embed_api_key, llm_api_key]
+    volumes: [hf_cache:/cache/hf]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, egress]
 
   curator:
-    build:
-      context: .
-      dockerfile: services/curator/Dockerfile
-    restart: unless-stopped
+    <<: *hardening
+    build: {context: ., dockerfile: services/curator/Dockerfile}
+    profiles: [curator]
     environment:
-      MUSE_DATABASE_URL: postgresql://muse:${MUSE_POSTGRES_PASSWORD}@postgres:5432/muse
+      <<: [*db, *embedding-env]
+      MUSE_DB_USER: muse_curator
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_curator
       MUSE_QDRANT_URL: http://qdrant:6333
-      TMDB_API_KEY: ${TMDB_API_KEY}
-      TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID}
-      RADARR_URL: ${RADARR_URL}
-      RADARR_API_KEY: ${RADARR_API_KEY}
-      SONARR_URL: ${SONARR_URL}
-      SONARR_API_KEY: ${SONARR_API_KEY}
-      RADARR_QUALITY_PROFILE_NAME: ${RADARR_QUALITY_PROFILE_NAME}
-      RADARR_ROOT_FOLDER: ${RADARR_ROOT_FOLDER}
-      SONARR_QUALITY_PROFILE_NAME: ${SONARR_QUALITY_PROFILE_NAME}
-      SONARR_ROOT_FOLDER: ${SONARR_ROOT_FOLDER}
-    depends_on: [postgres, qdrant]
-    networks: [muse-net]
-
-  arr-adapter:
-    build:
-      context: .
-      dockerfile: adapters/arr/Dockerfile
-    restart: unless-stopped
-    environment:
-      RADARR_URL: ${RADARR_URL}
-      RADARR_API_KEY: ${RADARR_API_KEY}
-      SONARR_URL: ${SONARR_URL}
-      SONARR_API_KEY: ${SONARR_API_KEY}
-      MUSE_INGESTION_URL: http://ingestion-api:8000
-      MUSE_ADAPTER_KEY: ${MUSE_ARR_ADAPTER_KEY}
-      MUSE_DEFAULT_USER_ID: ${MUSE_DEFAULT_USER_ID}
-    depends_on: [ingestion-api]
-    networks: [muse-net]
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_read_key
+      TMDB_API_KEY_FILE: /run/secrets/tmdb_api_key
+      TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID:-}
+      RADARR_URL: ${RADARR_URL:-}
+      RADARR_API_KEY_FILE: /run/secrets/radarr_api_key
+      SONARR_URL: ${SONARR_URL:-}
+      SONARR_API_KEY_FILE: /run/secrets/sonarr_api_key
+      RADARR_QUALITY_PROFILE_NAME: ${RADARR_QUALITY_PROFILE_NAME:-}
+      RADARR_ROOT_FOLDER: ${RADARR_ROOT_FOLDER:-}
+      SONARR_QUALITY_PROFILE_NAME: ${SONARR_QUALITY_PROFILE_NAME:-}
+      SONARR_ROOT_FOLDER: ${SONARR_ROOT_FOLDER:-}
+      MUSE_CURATOR_ADD_SCORE: ${MUSE_CURATOR_ADD_SCORE:-0.55}
+      MUSE_CURATOR_REMOVE_SCORE: ${MUSE_CURATOR_REMOVE_SCORE:-0.10}
+    secrets: [muse_master_key, db_muse_curator, qdrant_read_key, tmdb_api_key, radarr_api_key, sonarr_api_key, embed_api_key]
+    volumes: [hf_cache:/cache/hf]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, egress]
 
   jellyfin-adapter:
-    build:
-      context: .
-      dockerfile: adapters/jellyfin/Dockerfile
-    restart: unless-stopped
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/jellyfin/Dockerfile}
     environment:
       JELLYFIN_URL: ${JELLYFIN_URL}
-      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY}
+      JELLYFIN_API_KEY_FILE: /run/secrets/jellyfin_api_key
       MUSE_INGESTION_URL: http://ingestion-api:8000
-      MUSE_ADAPTER_KEY: ${MUSE_JELLYFIN_ADAPTER_KEY}
-    depends_on: [ingestion-api]
-    networks: [muse-net]
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_jellyfin
+      MUSE_WATCH_POLL_INTERVAL_SECONDS: ${MUSE_WATCH_POLL_INTERVAL_SECONDS:-120}
+    secrets: [jellyfin_api_key, adapter_key_jellyfin]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
+  arr-adapter:
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/arr/Dockerfile}
+    profiles: [arr]
+    environment:
+      RADARR_URL: ${RADARR_URL:-}
+      RADARR_API_KEY_FILE: /run/secrets/radarr_api_key
+      SONARR_URL: ${SONARR_URL:-}
+      SONARR_API_KEY_FILE: /run/secrets/sonarr_api_key
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_arr
+      MUSE_DEFAULT_USER_ID: ${MUSE_DEFAULT_USER_ID:-}
+    secrets: [radarr_api_key, sonarr_api_key, adapter_key_arr]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
+  searxng-adapter:
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/searxng/Dockerfile}
+    profiles: [searxng]
+    environment:
+      SEARXNG_UPSTREAM_URL: ${SEARXNG_UPSTREAM_URL:-}
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_searxng
+      MUSE_DEFAULT_USER_ID: ${MUSE_DEFAULT_USER_ID:-}
+    secrets: [adapter_key_searxng]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
+  # Optional: MCP server (questions, answers, recommendations for an assistant). --profile mcp
+  mcp-server:
+    <<: *hardening
+    build: {context: ., dockerfile: services/mcp-server/Dockerfile}
+    profiles: [mcp]
+    environment:
+      MUSE_RECO_URL: http://recommendation-api:8001
+      MUSE_INGEST_URL: http://ingestion-api:8000
+      MUSE_READ_KEY_FILE: /run/secrets/mcp_read_key
+      MUSE_ANSWER_KEY_FILE: /run/secrets/mcp_answer_key
+      MUSE_MCP_USER_ID: ${MUSE_MCP_USER_ID:-}
+    secrets: [mcp_read_key, mcp_answer_key]
+    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_MCP_PORT:-8002}:8002"]
+    depends_on: [recommendation-api, ingestion-api]
+    networks: [public]
+
+  # Optional: HTTPS for other machines (LAN or Tailscale). --profile tls. Serves the two APIs
+  # (and the MCP server) under one TLS port with Caddy's internal CA; `./muse ca` prints the
+  # root certificate to trust on the client.
+  tls-proxy:
+    image: ${MUSE_CADDY_IMAGE:-caddy:2.8.4}
+    profiles: [tls]
+    restart: unless-stopped
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      MUSE_TLS_HOST: ${MUSE_TLS_HOST:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    ports: ["${MUSE_TLS_BIND:-127.0.0.1}:${MUSE_TLS_PORT:-8443}:8443"]
+    depends_on: [recommendation-api, ingestion-api]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    networks: [public]
 
 networks:
-  muse-net:
-    internal: false  # adapters need outbound access to their upstream services; still no published ports
+  data:
+    internal: true
+  edge:
+    internal: true
+  egress: {}
+  public: {}
 
 volumes:
   postgres_data:
   qdrant_data:
+  hf_cache:
+  caddy_data:
+
+secrets:
+  muse_master_key: {file: ./secrets/muse_master_key}
+  postgres_password: {file: ./secrets/postgres_password}
+  db_muse_ingest: {file: ./secrets/db_muse_ingest}
+  db_muse_reco: {file: ./secrets/db_muse_reco}
+  db_muse_worker: {file: ./secrets/db_muse_worker}
+  db_muse_curator: {file: ./secrets/db_muse_curator}
+  qdrant_api_key: {file: ./secrets/qdrant_api_key}
+  qdrant_read_key: {file: ./secrets/qdrant_read_key}
+  adapter_keys: {file: ./secrets/adapter_keys}
+  adapter_key_jellyfin: {file: ./secrets/adapter_key_jellyfin}
+  adapter_key_arr: {file: ./secrets/adapter_key_arr}
+  adapter_key_searxng: {file: ./secrets/adapter_key_searxng}
+  read_keys: {file: ./secrets/read_keys}
+  status_token: {file: ./secrets/status_token}
+  mcp_read_key: {file: ./secrets/mcp_read_key}
+  mcp_answer_key: {file: ./secrets/mcp_answer_key}
+  tmdb_api_key: {file: ./secrets/tmdb_api_key}
+  jellyfin_api_key: {file: ./secrets/jellyfin_api_key}
+  radarr_api_key: {file: ./secrets/radarr_api_key}
+  sonarr_api_key: {file: ./secrets/sonarr_api_key}
+  embed_api_key: {file: ./secrets/embed_api_key}
+  llm_api_key: {file: ./secrets/llm_api_key}

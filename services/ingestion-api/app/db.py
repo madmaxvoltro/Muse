@@ -1,6 +1,5 @@
-import os
-
 import asyncpg
+from muse_schema.config import database_url
 
 _pool: asyncpg.Pool | None = None
 
@@ -9,7 +8,7 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         _pool = await asyncpg.create_pool(
-            dsn=os.environ["MUSE_DATABASE_URL"],
+            dsn=database_url(),
             min_size=1,
             max_size=10,
         )

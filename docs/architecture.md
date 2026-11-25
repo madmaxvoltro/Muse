@@ -71,24 +71,28 @@ an audit/anomaly-detection base (see Security model).
 
 ## Recommendation algorithm — 3-stage funnel
 
-Not a single similarity search. Chosen deliberately for "Google-level" recommendation quality:
+Full design, the research each stage builds on, and how to evaluate it:
+[`recommender.md`](recommender.md). In short:
 
-1. **Candidate generation** (~200 candidates, optimizes recall): multiple parallel generators —
-   Qdrant vector similarity, item-item co-occurrence within the user's own history (substitutes
-   for collaborative filtering since it's effectively single-household), cross-source backlog
-   signal (searched-but-not-watched), trending/new-arrival injection for cold-start.
-2. **Ranking** (optimizes precision): every candidate scored individually with a **hand-weighted,
-   explainable scoring function** (similarity + recency-decay + within-user popularity +
-   completion-rate of similar content + confidence) — not a learned model, chosen for
-   explainability and because a learned model needs feedback volume Muse won't have early on.
-3. **Re-ranking/policy**: diversity constraints (cap per genre/franchise), explore-dial allocation,
-   user-overlay controls applied here, confidence affecting placement.
+1. **Candidate generation** (recall): eight generators fused with Reciprocal Rank Fusion:
+   one ANN query per *interest* (multi-interest profiles after PinnerSage instead of one
+   averaged taste vector), short-term intent, item-to-item from your strongest titles, TMDB
+   "fans also liked" (collaborative signal a single household can't produce itself),
+   household CF, backlog (watchlist/requested), mood text, and quality for cold start.
+2. **Ranking** (precision): an explainable linear model over named features (interest
+   affinity, exact tag matches such as director/keywords, repulsion from disliked titles,
+   related support, intent, Bayesian rating, freshness, fatigue...). It started hand-weighted
+   and is re-fitted daily from logged impressions, with a prior that keeps the hand-set
+   weights until there's enough data. Every candidate also gets an uncertainty from how much
+   judged evidence sits near it.
+3. **Re-ranking/policy**: the list is calibrated to your interest proportions (Steck 2018),
+   penalises redundancy (MMR), keeps one entry per franchise (the next unseen part), and
+   fills explore slots by Thompson sampling over uncertain-but-promising candidates. User
+   overlay controls apply here and in signal aggregation.
 
-**Confidence is a first-class scoring input, not just a UI label.**
-`confidence = f(interaction count with similar content, variance, signal age, cross-source agreement)`.
-High-confidence+high-score → shown as a strong match. Low-confidence+high-score → deliberately
-routed into the explore slots rather than dropped, so the system actively collects feedback on
-uncertain-but-promising items (lightweight multi-armed-bandit pattern).
+**Confidence is a first-class scoring input, not just a UI label.** It's computed per
+candidate from nearby evidence and its agreement. Low-confidence + high-score items are
+routed into explore slots on purpose: showing them is how Muse learns.
 
 ## User control overlay
 
@@ -159,16 +163,11 @@ Anime separation is already native to Jellyfin (library views) — no custom top
 
 ## Security model
 
-Threat model: the main risk is **lateral movement within the home network**, not external
-attackers (Tailscale/VLAN already covers that). Principles:
-
-- Muse runs on its own VLAN segment, isolated from the rest of the homelab.
-- Encryption at rest (LUKS) on the Muse DB volume.
-- No direct external exposure — Tailscale-only access, no ports published to the host.
-- Adapters are write-only with minimal, per-adapter credentials (see `services/ingestion-api/app/auth.py`)
-  — a compromised adapter can inject rate-limited bad events, but can never read the event store back.
-- The vector store (Qdrant) is secured at the same level as raw data — embeddings can leak/reconstruct
-  sensitive signal, they are not "safe just because they're numbers."
-- Backups (Proxmox Backup Server) must carry the same encryption requirement as the live DB.
-- Anomaly detection on the event store itself (unusual query volume/time) is a candidate future
-  feature — an IDS-like layer on top of the append-only log.
+Threat model and implementation: [`../SECURITY.md`](../SECURITY.md). In short: Muse encrypts
+every personal field itself (AES-256-GCM; blind HMAC indexes for searchable identifiers), so
+dumps, backups and copied volumes are unreadable without the key file; adapters are write-only
+with per-adapter keys; every service has its own least-privilege database role; data stores sit
+on an internal network with no internet; the APIs listen on localhost (HTTPS proxy for other
+machines); secrets are Docker secret files; containers run non-root and read-only; logs carry no
+personal data. Remaining exposure (activity timestamps, catalog vectors, a compromised running
+host) is documented there.

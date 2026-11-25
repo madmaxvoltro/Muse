@@ -1,38 +1,32 @@
 # Embedding worker
 
-Status: implemented (v1 — metadata-only text embeddings; transcripts/subtitles are a
-follow-up, see `docs/architecture.md`).
+The background half of the taste engine (see [`docs/recommender.md`](../../docs/recommender.md)).
+A loop, every `MUSE_EMBEDDING_INTERVAL_SECONDS` (default 300s):
 
-Standalone loop (not a web service) that every `MUSE_EMBEDDING_INTERVAL_SECONDS` (default 300s):
+| step | module | what |
+|---|---|---|
+| catalog | `catalog.py` | new events → `item` rows with canonical keys; episodes linked to their series |
+| enrich | `enrich.py` | TMDB keywords/credits/collection/recommendations (`TMDB_API_KEY`), optional LLM tone/themes |
+| canon | `catalog.py` | rebuild document + tags for titles whose items changed (`canon_item`) |
+| vectors | `embed.py` | embed changed documents into Qdrant `muse_items`; payload-only updates; drop superseded keys |
+| profiles | `profiles.py` | per-title signals → multi-interest profiles per domain (`taste_profile`), TMDB-related and household candidates, optional LLM interest names + summary |
+| ranker | `ranker_fit.py` | daily: label impressions, re-fit ranker weights (`ranker_model`) |
 
-1. Reads events written since its last run, builds a text blob per distinct item from
-   `metadata` (title/description/genres/query), embeds it with a local
-   `sentence-transformers` model (`all-MiniLM-L6-v2` by default — no external API calls),
-   and upserts into the Qdrant `content_items` collection.
-2. For every user touched by those new events, recomputes their taste vector(s): a
-   weighted average of the content vectors of everything they interacted with in the last
-   `MUSE_TASTE_LOOKBACK_DAYS`, weighted by `action_weight * exp(-age_days / MUSE_TASTE_DECAY_HALFLIFE_DAYS)`.
-   Computed per `item_type` plus one `_combined` cross-domain vector, written to the Qdrant
-   `taste_vectors` collection.
+`evaluate.py` replays your history offline and prints Recall/nDCG/diversity/calibration per
+strategy (`docker compose exec embedding-worker python evaluate.py`).
 
-Progress is tracked in the `embedding_worker_state` table (`db/migrations/002_embedding_state.sql`)
-so each cycle only processes events since the last one.
+Embedder and LLM are pluggable (local CPU/GPU, Ollama, vLLM, any OpenAI-compatible server,
+Claude); see `.env.example` and `docs/recommender.md`. A model or dimension change re-embeds
+the catalog automatically.
 
-## Env vars
-
-| var | default | meaning |
+| env | default | |
 |---|---|---|
 | `MUSE_DATABASE_URL` | — | required |
 | `MUSE_QDRANT_URL` | `http://qdrant:6333` | |
-| `MUSE_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | any local sentence-transformers model |
 | `MUSE_EMBEDDING_INTERVAL_SECONDS` | `300` | |
-| `MUSE_TASTE_DECAY_HALFLIFE_DAYS` | `60` | how fast old interactions stop mattering |
-| `MUSE_TASTE_LOOKBACK_DAYS` | `730` | hard cutoff, mostly a query-cost bound |
-
-## Known v1 limitations
-
-- Items with no text in `metadata` (title/description/genres/query all empty) are skipped —
-  an adapter needs to send at least a title for its items to ever get recommended.
-- Taste-vector recompute re-reads a user's full lookback window every cycle rather than
-  incrementally updating — fine at personal-library scale, would need revisiting if this were
-  ever multi-tenant at real scale.
+| `MUSE_EMBED_PROVIDER` / `MUSE_EMBEDDING_MODEL` / `MUSE_EMBED_DEVICE` / `MUSE_EMBED_DIM` | `local` / `Qwen/Qwen3-Embedding-0.6B` / `auto` / native | |
+| `MUSE_LLM_PROVIDER` | `none` | `ollama`, `vllm`, `openai`, `anthropic`, ... |
+| `TMDB_API_KEY` | — | enrichment off without it |
+| `MUSE_TASTE_LOOKBACK_DAYS` | `3650` | hard cutoff for events considered |
+| `MUSE_FULL_PROFILE_HOURS` | `24` | everyone's profile refreshed (time decay) |
+| `MUSE_RANKER_FIT_HOURS` | `24` | |

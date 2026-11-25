@@ -19,7 +19,16 @@ from fastapi import FastAPI, Request, Response
 
 SEARXNG_UPSTREAM = os.environ["SEARXNG_UPSTREAM_URL"]  # e.g. http://searxng:8080
 INGESTION_URL = os.environ["MUSE_INGESTION_URL"]  # e.g. http://ingestion-api:8000
-ADAPTER_KEY = os.environ["MUSE_ADAPTER_KEY"]
+def _secret(name: str, default: str = "") -> str:
+    """NAME_FILE (a Docker secret) wins over NAME; secrets don't belong in environment variables."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        with open(path) as f:
+            return f.read().strip()
+    return os.environ.get(name, default)
+
+
+ADAPTER_KEY = _secret("MUSE_ADAPTER_KEY")
 DEFAULT_USER_ID = os.environ["MUSE_DEFAULT_USER_ID"]  # fallback until identity resolution is wired up
 
 app = FastAPI(title="Muse SearxNG Adapter")

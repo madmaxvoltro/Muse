@@ -1,0 +1,39 @@
+# TLS front for Muse when other machines connect (./muse setup, mode "lan" or "tailscale").
+# Caddy's internal CA issues the certificate; `./muse ca` prints the root to trust on clients.
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$MUSE_TLS_HOST}:8443 {
+	tls internal
+	encode gzip
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+	# Recommendation API (read keys) and ingestion API (write keys) under one origin.
+	handle_path /reco/* {
+		reverse_proxy recommendation-api:8001
+	}
+	handle_path /ingest/* {
+		request_body {
+			max_size 512MB
+		}
+		reverse_proxy ingestion-api:8000
+	}
+	handle /mcp* {
+		reverse_proxy mcp-server:8002
+	}
+	handle {
+		respond "Not found" 404
+	}
+	log {
+		output discard
+	}
+}
