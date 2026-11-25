@@ -85,7 +85,7 @@ top films and series, genres, when they watch. `kids=true` leaves out the time s
 
 ## Kids profiles
 
-`/recommendations/{u}`, `/rows/{u}` and the query API's `/v1/search` take `max_age` (0-21): only titles whose official rating
+`/recommendations/{u}`, `/rows/{u}` and the query API's `/v1/search` and `/v1/users/{u}/similar` take `max_age` (0-21): only titles whose official rating
 (US, NL Kijkwijzer, DE FSK, UK BBFC, FR, AU) allows that age. Unrated titles are left out unless
 `allow_unrated=true`.
 

@@ -320,11 +320,13 @@ async def get_item(source: str, source_item_id: str, user: str | None = "me", p:
 
 @app.get("/v1/users/{user}/similar")
 async def similar(user: str, source: str, source_item_id: str, item_type: list[str] | None = Query(None),
-                  limit: int = Query(10, ge=1, le=50), p: Principal = Depends(current_principal)) -> dict:
+                  limit: int = Query(10, ge=1, le=50), max_age: int | None = Query(None, ge=0, le=21), allow_unrated: bool = False,
+                  p: Principal = Depends(current_principal)) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         uid = await resolve_user(conn, p, user)
-        return await search.similar(conn, qdrant(), source, source_item_id, item_types=_types(item_type), limit=limit, user_id=uid)
+        return await search.similar(conn, qdrant(), source, source_item_id, item_types=_types(item_type), limit=limit, user_id=uid,
+                                    max_age=max_age, allow_unrated=allow_unrated)
 
 
 @app.get("/v1/users/{user}/profile")

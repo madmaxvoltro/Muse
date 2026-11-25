@@ -151,15 +151,20 @@ async def search(
 
 
 async def similar(conn, qdrant, source: str, source_item_id: str, *, item_types: list[str] | None = None,
-                  limit: int = 10, user_id: uuid.UUID | None = None) -> dict[str, Any]:
+                  limit: int = 10, user_id: uuid.UUID | None = None, max_age: int | None = None,
+                  allow_unrated: bool = False) -> dict[str, Any]:
     pts = qdrant.retrieve(collection_name="content_items", ids=[content_point_id(source, source_item_id)], with_vectors=True)
     if not pts:
         return {"results": [], "note": "item not embedded yet (unknown, or the embedding worker hasn't seen it)"}
     hits = qdrant.query_points(collection_name="content_items", query=list(pts[0].vector),
-                               query_filter=_filter(item_types, None), limit=limit + 1).points
+                               query_filter=_filter(item_types, None), limit=(limit + 1) * (3 if max_age is not None else 1)).points
     keys = [((h.payload or {}).get("source", ""), (h.payload or {}).get("source_item_id", "")) for h in hits]
-    keys_scores = [(k, h.score) for k, h in zip(keys, hits) if k != (source, source_item_id)][:limit]
+    keys_scores = [(k, h.score) for k, h in zip(keys, hits) if k != (source, source_item_id)]
     details = await item_details(conn, [k for k, _ in keys_scores])
+    if max_age is not None:  # kids profiles: only titles rated for their age
+        keys_scores = [(k, s) for k, s in keys_scores
+                       if ratings.within(((details.get(k) or {}).get("metadata") or {}).get("official_rating"), max_age, allow_unrated)]
+    keys_scores = keys_scores[:limit]
     seen = {}
     if user_id is not None:
         _, group = await identity_group(conn, user_id)
