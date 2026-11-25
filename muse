@@ -48,7 +48,7 @@ TTY = sys.stdout.isatty()
 
 SECRET_FILES = [
     "muse_master_key", "postgres_password", "db_muse_ingest", "db_muse_reco", "db_muse_worker", "db_muse_curator",
-    "qdrant_api_key", "qdrant_read_key", "adapter_keys", "adapter_key_jellyfin", "adapter_key_arr", "adapter_key_searxng",
+    "db_muse_query", "admin_token", "qdrant_api_key", "qdrant_read_key", "adapter_keys", "adapter_key_jellyfin", "adapter_key_arr", "adapter_key_searxng",
     "read_keys", "status_token", "mcp_read_key", "mcp_answer_key", "tmdb_api_key", "jellyfin_api_key",
     "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key",
     "adapter_key_navidrome", "adapter_key_audiobookshelf", "navidrome_password", "navidrome_users", "audiobookshelf_token",
@@ -192,6 +192,8 @@ def ensure_secrets(provided: dict[str, str]) -> list[str]:
         "db_muse_reco": _token(),
         "db_muse_worker": _token(),
         "db_muse_curator": _token(),
+        "db_muse_query": _token(),
+        "admin_token": _token(),
         "qdrant_api_key": _token(),
         "qdrant_read_key": _token(),
         "adapter_key_jellyfin": _token(),
@@ -537,13 +539,16 @@ def summary(mode: str, tls_host: str) -> None:
     else:
         reco = f"http://127.0.0.1:{env.get('MUSE_RECO_PORT', '8770')}"
         ingest = f"http://127.0.0.1:{env.get('MUSE_INGEST_PORT', '8771')}"
+    query = f"{base_url()}/query" if mode in ("lan", "tailscale") else f"http://127.0.0.1:{env.get('MUSE_QUERY_PORT', '8772')}"
     step("Done. Connect your clients:")
     print(f"    Recommendation API   {reco}")
     print(f"    Ingestion API        {ingest}")
+    print(f"    Query API            {query}  (docs: {query}/docs)")
     print(f"    Vesper               read key: {first_key('read_keys', 'vesper')}")
     print(f"                         answer key: {first_key('adapter_keys', 'muse')}")
     print(f"    Jellyfin plugin      read key: {first_key('read_keys', 'jellyfin-plugin')}")
     print(f"    Mono                 MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
+    print(f"                         MONO_MUSE_QUERY_URL={query}")
     print(f"    Status page          {reco}/status?token={read_secret('status_token')}")
     if mode in ("lan", "tailscale"):
         print("    TLS                  clients must trust Muse's certificate: ./muse ca > muse-ca.crt")
@@ -680,6 +685,7 @@ def cmd_keys(a) -> None:
     print(f"Mono                     MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"MCP server               read: {read_secret('mcp_read_key')}  answer: {read_secret('mcp_answer_key')}")
     print(f"Status token             {read_secret('status_token')}")
+    print(f"Query API admin token    {read_secret('admin_token')}  (household-wide; give people their own tokens)")
 
 
 def cmd_ca(a) -> None:

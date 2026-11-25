@@ -16,7 +16,7 @@ from fixtures import USER_A, FakeTMDB, seed
 sys.path.insert(0, str(ROOT / "services" / "admin"))
 sys.path.insert(0, str(ROOT / "services" / "embedding-worker"))
 
-PASSWORDS = {r: f"pw-{r}-{uuid.uuid4().hex[:8]}" for r in ("muse_ingest", "muse_reco", "muse_worker", "muse_curator")}
+PASSWORDS = {r: f"pw-{r}-{uuid.uuid4().hex[:8]}" for r in ("muse_ingest", "muse_reco", "muse_worker", "muse_curator", "muse_query")}
 
 
 def _role_dsn(dsn: str, role: str) -> str:
@@ -37,7 +37,9 @@ def admin_env(db_dsn, monkeypatch):
 
 def test_migrate_roles_and_least_privilege(admin_env):
     admin, dsn = admin_env
-    host_dsn = dsn.replace("postgresql://postgres@/", "postgresql://postgres@127.0.0.1:5433/").split("?")[0]
+    # roles log in with a password over TCP: a socket DSN (host=/tmp&port=N) becomes 127.0.0.1:N
+    port = re.search(r"[?&]port=(\d+)", dsn)
+    host_dsn = re.sub(r"postgresql://([^@]*)@/", rf"postgresql://\1@127.0.0.1:{port.group(1) if port else 5432}/", dsn).split("?")[0]
 
     async def go():
         conn = await admin.connect()
@@ -53,7 +55,7 @@ def test_migrate_roles_and_least_privilege(admin_env):
         from qdrant_client import QdrantClient
 
         def role_dsn(role):
-            return f"postgresql://{role}:{PASSWORDS[role]}@127.0.0.1:5433/{host_dsn.rsplit('/', 1)[1]}"
+            return re.sub(r"postgresql://[^@]*@", f"postgresql://{role}:{PASSWORDS[role]}@", host_dsn)
 
         wpool = await asyncpg.create_pool(role_dsn("muse_worker"), min_size=1, max_size=3, init=_json_codecs)
         w = worker_mod.Worker(wpool, QdrantClient(":memory:"), FakeEmbedder(), tmdb=FakeTMDB())
@@ -65,7 +67,11 @@ def test_migrate_roles_and_least_privilege(admin_env):
         for role, sql in (("muse_ingest", "SELECT * FROM taste_profile"), ("muse_ingest", "SELECT * FROM item"),
                           ("muse_reco", "DELETE FROM event"), ("muse_reco", "UPDATE taste_profile SET profile = '{}'"),
                           ("muse_curator", "INSERT INTO event (user_id, source, item_type, action) VALUES (gen_random_uuid(), 'x', 'movie', 'played')"),
-                          ("muse_worker", "DROP TABLE event"), ("muse_worker", "CREATE TABLE x (a int)")):
+                          ("muse_worker", "DROP TABLE event"), ("muse_worker", "CREATE TABLE x (a int)"),
+                          ("muse_query", "SELECT metadata FROM event"), ("muse_query", "UPDATE taste_profile SET profile = '{}'"),
+                          ("muse_query", "INSERT INTO event (user_id, source, item_type, action) VALUES (gen_random_uuid(), 'x', 'movie', 'played')"),
+                          ("muse_ingest", "SELECT * FROM profile_fact"), ("muse_reco", "SELECT * FROM api_token"),
+                          ("muse_worker", "SELECT * FROM api_token")):
             c = await asyncpg.connect(role_dsn(role))
             try:
                 await c.execute(sql)

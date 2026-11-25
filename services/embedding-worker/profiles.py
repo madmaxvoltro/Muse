@@ -23,7 +23,8 @@ from muse_taste.profile import TasteProfile, build_profile, estimate_baseline
 from muse_taste.retrieval import household_support, related_support
 from muse_taste.reconsume import candidates as reconsume_candidates
 from muse_taste.signals import ItemSignal, SignalEvent, aggregate, feedback_overrides, from_rows
-from muse_schema.crypto import P_OVERLAY, P_PROFILE, get_vault
+from muse_schema import identity
+from muse_schema.crypto import P_FACT, P_OVERLAY, P_PROFILE, get_vault
 from muse_taste.store import ITEMS_COLLECTION, open_canon_data
 from qdrant_client import QdrantClient
 
@@ -41,7 +42,7 @@ SELECT e.source, e.source_item_id, e.item_type, e.action, e.action_weight, e."ti
 FROM event e
 LEFT JOIN item i ON i.item_key = e.source || ':' || e.source_item_id
 LEFT JOIN item p ON p.item_key = i.parent_key
-WHERE e.user_id = $1 AND e.source_item_id IS NOT NULL AND e.action <> 'cataloged'
+WHERE e.user_id = ANY($1::uuid[]) AND e.source_item_id IS NOT NULL AND e.action <> 'cataloged'
   AND e."timestamp" > now() - make_interval(days => $2::int)
 """
 
@@ -101,10 +102,30 @@ async def load_overlay(conn: asyncpg.Connection, user_id: str) -> dict:
 
 async def user_signals(conn: asyncpg.Connection, user_id: str, now: datetime) -> tuple[dict[str, ItemSignal], dict, list[SignalEvent]]:
     overlay = await load_overlay(conn, user_id)
-    rows = await conn.fetch(EVENTS_SQL, uuid.UUID(user_id), LOOKBACK_DAYS)
+    rows = await conn.fetch(EVENTS_SQL, await identity.members(conn, user_id), LOOKBACK_DAYS)  # linked ids too
     events = [e for e in to_signal_events(rows) if e.source not in set(overlay["disabled_sources"])]
     sig = aggregate(events, now=now, source_weights=overlay["source_weights"])
     return sig, overlay, events
+
+
+async def liked_facts(conn: asyncpg.Connection, user_ids: set[str]) -> dict[str, dict[str, list[str]]]:
+    """user -> domain -> statements of active `likes` facts (migration 011; sealed text)."""
+    if not user_ids:
+        return {}
+    try:
+        rows = await conn.fetch(
+            "SELECT user_id, domain, statement FROM profile_fact WHERE user_id = ANY($1::uuid[]) AND kind = 'likes' "
+            "AND retracted_at IS NULL ORDER BY confidence DESC, created_at DESC",
+            [uuid.UUID(u) for u in user_ids],
+        )
+    except asyncpg.UndefinedTableError:
+        return {}
+    out: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        text = get_vault().open_json(r["statement"], P_FACT)
+        if isinstance(text, str) and text.strip():
+            out[str(r["user_id"])][r["domain"]].append(text.strip())
+    return out
 
 
 async def stretch_stats(conn: asyncpg.Connection, user_id: str, events: list[SignalEvent]) -> tuple[int, int]:
@@ -112,11 +133,11 @@ async def stretch_stats(conn: asyncpg.Connection, user_id: str, events: list[Sig
     rows = await conn.fetch(
         """
         SELECT DISTINCT ON (canon_key) canon_key, shown_at FROM impression
-        WHERE user_id = $1 AND (features->>'stretch')::float > 0.2
+        WHERE user_id = ANY($1::uuid[]) AND (features->>'stretch')::float > 0.2
           AND shown_at > now() - interval '120 days' AND shown_at < now() - interval '2 days'
         ORDER BY canon_key, shown_at
         """,
-        uuid.UUID(user_id),
+        await identity.members(conn, user_id),
     )
     by_key: dict[str, list[SignalEvent]] = defaultdict(list)
     for e in events:
@@ -142,8 +163,11 @@ async def recompute_users(
     overlays: dict[str, dict] = {}
     all_events: dict[str, list[SignalEvent]] = {}
     async with pool.acquire() as conn:
-        everyone = [str(r["user_id"]) for r in await conn.fetch("SELECT DISTINCT user_id FROM event WHERE action <> 'cataloged'")]
-        for uid in set(everyone) | user_ids:
+        aliases = await identity.alias_map(conn)  # linked ids are read as part of their person
+        user_ids = {aliases.get(u, u) for u in user_ids}
+        everyone = {aliases.get(str(r["user_id"]), str(r["user_id"])) for r in await conn.fetch("SELECT DISTINCT user_id FROM event WHERE action <> 'cataloged'")}
+        facts = await liked_facts(conn, user_ids)
+        for uid in everyone | user_ids:
             all_signals[uid], overlays[uid], all_events[uid] = await user_signals(conn, uid, now)
         old_profiles = {
             (str(r["user_id"]), r["domain"]): get_vault().open_json(r["profile"], P_PROFILE)
@@ -160,6 +184,10 @@ async def recompute_users(
         pinned_topics = [t for t in overlays[uid]["pinned_topics"] if isinstance(t, str) and t.strip()]
         if pinned_topics and "video" not in by_domain:
             by_domain["video"] = {}
+        told = facts.get(uid, {})  # "likes" facts an assistant or the person told Muse
+        for d in told:
+            if d != "general":
+                by_domain.setdefault(d, {})
         for domain, dsig in by_domain.items():
             if domain == "search_query" or domain == "chat":
                 continue
@@ -172,8 +200,9 @@ async def recompute_users(
             related_of = {k: list(d.get("related") or []) for k, d in cdata.items()}
             vectors = await asyncio.to_thread(fetch_vectors, qdrant, keys)
             pinned = []
-            if embedder is not None and domain in PINNED_DOMAINS:
-                for t in pinned_topics[:5]:
+            topics = (pinned_topics[:5] if domain in PINNED_DOMAINS else []) + (told.get(domain, []) + told.get("general", []))[:5]
+            if embedder is not None and topics:
+                for t in topics:
                     if t not in pinned_vecs:
                         pinned_vecs[t] = await asyncio.to_thread(embedder.embed_query, t)
                     pinned.append((t, pinned_vecs[t]))

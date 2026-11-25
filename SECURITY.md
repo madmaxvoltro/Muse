@@ -52,10 +52,16 @@ keyword, person or TMDB key appears.
 * **Read keys** for clients (Vesper, the Jellyfin plugin, MCP). Without read keys configured the
   recommendation API refuses every request (secure by default); `MUSE_ALLOW_OPEN_READ=true` is
   for development only. Keys are compared in constant time.
+* **Query API** (`services/query-api`, docs/api/query-api.md): per-person bearer tokens
+  (random, shown once, stored as a keyed digest, expiring, revocable, optionally read-only) act
+  for one person and their linked ids only. Apps use their own ingestion key plus the user id,
+  and are refused for ids that carry another source's events. Linking accounts needs a
+  single-use code that expires in 15 minutes. Facts, goals, mood and labels are sealed.
+  Incognito drops a person's playback events in the ingestion API while it lasts.
 * **Least-privilege database roles** (`services/admin/admin.py`): every service connects as its
   own role. The ingestion API can insert events but can't read profiles. The recommendation
   API can read but can't delete or change events or profiles. The worker can't drop or create
-  tables. A compromised service is limited to its own job. Tested in
+  tables. The query API can't write events or profiles and can't read event metadata. A compromised service is limited to its own job. Tested in
   `tests/integration/test_admin_security.py`.
 * **Qdrant API keys**: read-write for the worker, a read-only key for the recommendation API
   and the curator.

@@ -26,15 +26,22 @@ from pathlib import Path
 import asyncpg
 from muse_schema.config import database_url, secret
 from muse_schema.crypto import (
+    P_ALIAS,
     P_ANSWER,
     P_CANON_DATA,
     P_DEDUPE,
+    P_CONTEXT,
     P_EVENT_METADATA,
+    P_FACT,
+    P_GOAL,
     P_ITEM_DATA,
     P_OVERLAY,
     P_PAYLOAD,
+    P_PERSON,
     P_PROFILE,
     P_QUESTION,
+    P_SUGGESTION,
+    P_TOKEN_LABEL,
     event_item_bid,
     get_vault,
     is_blind,
@@ -51,6 +58,8 @@ ROLES: dict[str, list[str]] = {
         "GRANT INSERT ON event TO {r}",
         "GRANT SELECT (user_id, source, metadata) ON event TO {r}",  # idempotent inserts
         "GRANT SELECT, UPDATE ON question_log TO {r}",
+        "GRANT SELECT ON user_alias TO {r}",  # incognito: linked ids
+        "GRANT SELECT (user_id, preferences) ON user_overlay TO {r}",
     ],
     "muse_reco": [
         "GRANT SELECT ON event, item, canon_item, taste_profile, user_overlay, ranker_model, question_log, soon_gone, embedding_worker_state, schema_migrations TO {r}",
@@ -60,11 +69,20 @@ ROLES: dict[str, list[str]] = {
         "GRANT INSERT, UPDATE ON question_log TO {r}",
         "GRANT UPDATE ON soon_gone TO {r}",
         "GRANT INSERT ON event TO {r}",  # Soon Gone whitelist writes a favourite
+        "GRANT SELECT ON user_alias, user_context TO {r}",  # linked identities, the current mood
     ],
     "muse_worker": [
         "GRANT SELECT ON event, impression, user_overlay TO {r}",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON item, canon_item, taste_profile, question_log, ranker_model, embedding_worker_state TO {r}",
         "GRANT USAGE ON SEQUENCE ranker_model_id_seq TO {r}",
+        "GRANT SELECT ON user_alias, profile_fact TO {r}",
+        "GRANT SELECT, DELETE ON taste_dirty TO {r}",
+    ],
+    "muse_query": [  # the query API: people, tokens, facts, goals, context; reads for answers
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON muse_user, user_alias, link_code, api_token, profile_fact, user_goal, user_context, feature_suggestion, taste_dirty TO {r}",
+        "GRANT SELECT (user_id, source, source_item_id, action, item_type, \"timestamp\", ingested_at) ON event TO {r}",
+        "GRANT SELECT ON question_log, taste_profile TO {r}",
+        "GRANT SELECT, INSERT, UPDATE ON user_overlay TO {r}",
     ],
     "muse_curator": [
         "GRANT SELECT ON event, item, taste_profile, user_overlay TO {r}",
@@ -192,6 +210,8 @@ def _qdrant():
 # ---- people ---------------------------------------------------------------------------------
 
 PERSONAL_TABLES = ["event", "taste_profile", "impression", "question_log", "user_overlay", "curator_download_log"]
+# migration 011: what the person told Muse, their tokens and links (deleted with them too)
+PEOPLE_TABLES = ["profile_fact", "user_goal", "user_context", "api_token", "link_code", "feature_suggestion", "taste_dirty", "muse_user"]
 
 
 async def forget_user(conn: asyncpg.Connection, user_id: str) -> dict:
@@ -201,6 +221,19 @@ async def forget_user(conn: asyncpg.Connection, user_id: str) -> dict:
         for t in PERSONAL_TABLES:
             res = await conn.execute(f"DELETE FROM {t} WHERE user_id = $1", uid)
             counts[t] = int(res.split()[-1])
+        for t in PEOPLE_TABLES:
+            try:
+                async with conn.transaction():
+                    res = await conn.execute(f"DELETE FROM {t} WHERE user_id = $1", uid)
+                counts[t] = int(res.split()[-1])
+            except asyncpg.UndefinedTableError:
+                pass
+        try:
+            async with conn.transaction():
+                res = await conn.execute("DELETE FROM user_alias WHERE user_id = $1 OR alias_id = $1", uid)
+            counts["user_alias"] = int(res.split()[-1])
+        except asyncpg.UndefinedTableError:
+            pass
         res = await conn.execute("UPDATE soon_gone SET whitelisted_by = NULL WHERE whitelisted_by = $1", uid)
         # Others' profiles used this person for household recommendations: refresh everyone.
         await conn.execute("UPDATE embedding_worker_state SET last_full_profile_at = NULL")
@@ -232,8 +265,20 @@ async def export_user(conn: asyncpg.Connection, user_id: str) -> dict:
         overlay["pinned_topics"] = vault.open_json(overlay.get("pinned_topics"), P_OVERLAY)
         overlay = {k: (v.isoformat() if hasattr(v, "isoformat") else str(v) if isinstance(v, uuid.UUID) else v) for k, v in overlay.items()}
     impressions = await conn.fetchval("SELECT count(*) FROM impression WHERE user_id = $1", uid)
+    told: dict = {}
+    try:
+        told["facts"] = [{"kind": r["kind"], "domain": r["domain"], "statement": vault.open_json(r["statement"], P_FACT),
+                          "created_at": r["created_at"].isoformat(), "retracted": r["retracted_at"] is not None}
+                         for r in await conn.fetch("SELECT * FROM profile_fact WHERE user_id = $1 ORDER BY created_at", uid)]
+        told["goals"] = [vault.open_json(r["data"], P_GOAL) for r in await conn.fetch("SELECT data FROM user_goal WHERE user_id = $1", uid)]
+        ctx = await conn.fetchrow("SELECT mood, signals FROM user_context WHERE user_id = $1", uid)
+        told["context"] = {"mood": vault.open_json(ctx["mood"], P_CONTEXT), "signals": vault.open_json(ctx["signals"], P_CONTEXT)} if ctx else None
+        told["linked_ids"] = [str(r["alias_id"]) for r in await conn.fetch("SELECT alias_id FROM user_alias WHERE user_id = $1", uid)]
+        told["tokens"] = await conn.fetchval("SELECT count(*) FROM api_token WHERE user_id = $1", uid)
+    except asyncpg.UndefinedTableError:
+        pass
     return {"user_id": user_id, "events": events, "taste_profiles": profiles, "questions": questions, "overlay": overlay,
-            "impressions_logged": impressions}
+            "impressions_logged": impressions, **told}
 
 
 # ---- key rotation ---------------------------------------------------------------------------
@@ -246,6 +291,13 @@ SEALED_COLUMNS = [
     ("question_log", ["payload"], P_QUESTION, ("id",)),
     ("question_log", ["answer"], P_ANSWER, ("id",)),
     ("user_overlay", ["pinned_topics"], P_OVERLAY, ("user_id",)),
+    ("muse_user", ["display_name"], P_PERSON, ("user_id",)),
+    ("user_alias", ["label"], P_ALIAS, ("alias_id",)),
+    ("api_token", ["label"], P_TOKEN_LABEL, ("id",)),
+    ("profile_fact", ["statement"], P_FACT, ("id",)),
+    ("user_goal", ["data"], P_GOAL, ("id",)),
+    ("user_context", ["mood", "signals"], P_CONTEXT, ("user_id",)),
+    ("feature_suggestion", ["data"], P_SUGGESTION, ("id",)),
 ]
 
 

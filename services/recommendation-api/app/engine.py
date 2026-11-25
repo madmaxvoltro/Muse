@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 import numpy as np
-from muse_schema import canon_point_id
+from muse_schema import canon_point_id, identity
 from muse_taste.canon import domain_of
 from muse_taste.evolution import Adjustment, adjustment, apply_importance, stretch_score
 from muse_taste.profile import Anchor, Prototype, TasteProfile, apply_tag_overrides, unit
@@ -52,7 +52,7 @@ SELECT e.source, e.source_item_id, e.item_type, e.action, e.action_weight, e."ti
 FROM event e
 LEFT JOIN item i ON i.item_key = e.source || ':' || e.source_item_id
 LEFT JOIN item p ON p.item_key = i.parent_key
-WHERE e.user_id = $1 AND e.ingested_at > $2 AND e.source_item_id IS NOT NULL AND e.action <> 'cataloged'
+WHERE e.user_id = ANY($1::uuid[]) AND e.ingested_at > $2 AND e.source_item_id IS NOT NULL AND e.action <> 'cataloged'
 """
 
 
@@ -156,7 +156,7 @@ class Engine:
         exactly this 'responsiveness')."""
         since = datetime.fromisoformat(prof.computed_at)
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(RECENT_EVENTS_SQL, uuid.UUID(user_id), since)
+            rows = await conn.fetch(RECENT_EVENTS_SQL, await identity.members(conn, user_id), since)  # linked ids too
         if not rows:
             return
         recent = [e for e in from_rows(rows) if domain_of(e.item_type) == domain]

@@ -53,11 +53,13 @@ Full design rationale: [`docs/architecture.md`](docs/architecture.md).
 Core pipeline implemented and tested (`pytest tests` — unit tests for the engine, integration
 tests against Postgres + in-memory Qdrant): event schema, ingestion API, embedding worker,
 taste engine (`shared/muse_taste`, see `docs/recommender.md`), recommendation API, curator
-(300GB budget + Soon Gone), and the SearxNG/Jellyfin/arr adapters. A local `docker compose build` succeeded for the Python
+(300GB budget + Soon Gone), the query API (people, linked accounts, tokens, facts, questions
+as cards, mood/context, incognito, goals; `docs/api/query-api.md`), the MCP server (household
+and personal mode), and the SearxNG/Jellyfin/arr/Navidrome/Audiobookshelf adapters plus Mono
+as a music source (next-track and radio on `/next` and `/radio`). A local `docker compose build` succeeded for the Python
 services; a full `up` wasn't completed in the dev sandbox (Docker Hub rate-limited image
 pulls there) — verify on your actual host. The Jellyfin plugin (C#/.NET) is written but not
-yet compiled/tested against a real Jellyfin instance. Still not started: Open WebUI,
-Navidrome, and Audiobookshelf adapters. See `docs/architecture.md` for the full design, and
+yet compiled/tested against a real Jellyfin instance. Still not started: the Open WebUI adapter. See `docs/architecture.md` for the full design, and
 the `README.md` in each `services/*`/`adapters/*`/`jellyfin-plugin/` directory for
 per-component status and known gaps.
 
@@ -71,6 +73,7 @@ services/ingestion-api/  write-only endpoint all adapters POST events to
 services/recommendation-api/  the 3-stage recommendation funnel
 services/embedding-worker/    content + taste embedding computation
 services/curator/             autonomous storage-budget manager
+services/query-api/           people, linked accounts, tokens, facts, questions, context, goals (docs/api)
 services/mcp-server/          optional MCP server: questions, answers, recommendations, profile, evolution
 adapters/                one subdirectory per source, each a small standalone service (+ importer CLI)
 tests/                   engine unit tests + integration tests (Postgres, in-memory Qdrant)

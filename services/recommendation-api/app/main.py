@@ -19,12 +19,15 @@ taste data, only impressions and question bookkeeping.
 import asyncio
 import hmac
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from muse_schema.config import key_list, secret
-from muse_schema.crypto import get_vault, item_key
+import asyncpg
+from muse_schema import identity
+from muse_schema.crypto import P_CONTEXT, get_vault, item_key
 from qdrant_client import QdrantClient
 
 from . import questions, rows, sequencing as seq, status_page
@@ -109,6 +112,27 @@ async def status_json():
     return await status_page.page_json(await get_pool())
 
 
+async def _who(user_id: str) -> str:
+    """Canonical id of the person `user_id` belongs to (linked identities, migration 011)."""
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id must be a UUID") from None
+    async with (await engine()).pool.acquire() as conn:
+        return str(await identity.canonical(conn, uid))
+
+
+async def _stored_mood(user_id: str) -> str | None:
+    """The mood the person (or an assistant, via the query API) set, while it lasts."""
+    async with (await engine()).pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow("SELECT mood FROM user_context WHERE user_id = $1 AND mood IS NOT NULL AND mood_until > now()", uuid.UUID(user_id))
+        except (asyncpg.UndefinedTableError, asyncpg.InsufficientPrivilegeError):
+            return None
+    mood = get_vault().open_json(row["mood"], P_CONTEXT) if row else None
+    return mood if isinstance(mood, str) and mood.strip() else None
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -126,19 +150,25 @@ async def recommendations(
     log: bool = Query(True, description="log impressions (turn off for previews)"),
     at: datetime | None = Query(None, description="ISO time to use as 'now' for rhythms (default: now)"),
 ) -> dict:
+    user_id = await _who(user_id)  # a linked id reads as its person
     _check_type(item_type)
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
         return {"user_id": user_id, "item_type": item_type, "recommendations": [],
                 "note": "Muse is still building its catalog (first start); see ./muse status"}
+    stored = await _stored_mood(user_id) if mood is None else None
     try:
-        res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at))
+        res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, mood or stored, surface, include_unavailable, log, at))
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not stored:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # a stored mood needs the embedder; without one, recommend as if no mood was set
+        res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, None, surface, include_unavailable, log, at))
     body = {
         "user_id": user_id,
         "item_type": item_type,
         "request_id": res.request_id,
+        **({"mood": stored} if stored else {}),
         "recommendations": [eng.describe(s, res.profile, res.titles) for s in res.items],
     }
     if res.cold_start:
@@ -216,6 +246,7 @@ async def next_up(
     playable_source: list[str] | None = Query(None, description="only songs these players can play, e.g. mono"),
 ) -> dict:
     """What should follow this song for this person: fits their taste and flows from it."""
+    user_id = await _who(user_id)  # a linked id reads as its person
     eng = await engine()
     cur_keys = await _canon_for(eng, [f"{source}:{source_item_id}"])
     if not cur_keys:
@@ -241,6 +272,7 @@ async def radio(
     playable_source: list[str] | None = Query(None),
 ) -> dict:
     """A listening session: each song fits the person and flows from the one before."""
+    user_id = await _who(user_id)  # a linked id reads as its person
     eng = await engine()
     seed = None
     if seed_source and seed_id:
@@ -280,6 +312,7 @@ async def home_rows(
     """A home screen: themed rows whose titles are their explanations (Top picks, Because you
     watched X, More <interest>, For your weekend evenings, Watch again, From your watchlist,
     New in your library, Something different). A title appears once per page."""
+    user_id = await _who(user_id)  # a linked id reads as its person
     _check_type(item_type)
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
@@ -289,6 +322,7 @@ async def home_rows(
 
 @app.get("/profile/{user_id}")
 async def profile(user_id: str, domain: str = Query("video", description="video | youtube | music | books")) -> dict:
+    user_id = await _who(user_id)  # a linked id reads as its person
     eng = await engine()
     prof = await eng.profile(user_id, domain)
     if prof is None:
@@ -325,6 +359,7 @@ async def evolution(user_id: str, domain: str = Query("video", description="vide
     """How your taste is changing (muse_taste.evolution): per interest its lifecycle state,
     trend, satiation, rediscovery pull and rhythms; a monthly timeline with breadth and drift;
     milestones; how far Muse currently stretches; and (with an LLM) a short narrative."""
+    user_id = await _who(user_id)  # a linked id reads as its person
     eng = await engine()
     prof = await eng.profile(user_id, domain)
     if prof is None or not prof.evolution:
@@ -385,11 +420,13 @@ async def question_queue(
 ) -> dict:
     """Questions the worker queued in the background, most valuable first. Each entry includes
     the exact body to POST to the ingestion API's /answers. Optional: nothing waits for it."""
+    user_id = await _who(user_id)  # a linked id reads as its person
     return await questions.queue(await engine(), user_id, limit, domain, kind, mark_served, include_served)
 
 
 @app.get("/questions/{user_id}/next")
 async def question_next(user_id: str, item_type: str = Query("movie")) -> dict:
+    user_id = await _who(user_id)  # a linked id reads as its person
     _check_type(item_type)
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
@@ -399,6 +436,7 @@ async def question_next(user_id: str, item_type: str = Query("movie")) -> dict:
 
 @app.get("/questions/{user_id}/onboarding")
 async def question_onboarding(user_id: str, item_type: str = Query("movie"), n: int = Query(24, ge=4, le=60)) -> dict:
+    user_id = await _who(user_id)  # a linked id reads as its person
     _check_type(item_type)
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
@@ -408,6 +446,7 @@ async def question_onboarding(user_id: str, item_type: str = Query("movie"), n: 
 
 @app.get("/questions/{user_id}/this-or-that")
 async def question_pair(user_id: str, item_type: str = Query("movie")) -> dict:
+    user_id = await _who(user_id)  # a linked id reads as its person
     _check_type(item_type)
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
@@ -417,6 +456,7 @@ async def question_pair(user_id: str, item_type: str = Query("movie")) -> dict:
 
 @app.get("/questions/{user_id}/abandoned")
 async def question_abandoned(user_id: str, item_type: str = Query("movie")) -> dict:
+    user_id = await _who(user_id)  # a linked id reads as its person
     _check_type(item_type)
     return await questions.abandoned(await engine(), user_id, item_type)
 

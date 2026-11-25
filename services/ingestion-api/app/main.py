@@ -14,6 +14,8 @@ may post answers and imports; `import` may post imports and events claiming an i
 
 import json
 import logging
+import time
+import uuid
 
 import asyncpg
 from datetime import datetime, timezone
@@ -99,6 +101,42 @@ async def _insert(events: list[Event]) -> int:
     return len(events)
 
 
+_INCOGNITO: dict[uuid.UUID, tuple[float, bool]] = {}
+
+
+async def _incognito(user_ids: set[uuid.UUID]) -> set[uuid.UUID]:
+    """Users in incognito mode right now (set through the query API): what they do isn't
+    learned from. Cached for 30 s; a database without migration 011 has nobody incognito."""
+    now = time.monotonic()
+    todo = [u for u in user_ids if _INCOGNITO.get(u, (0.0, False))[0] < now]
+    if todo:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT u.id FROM unnest($1::uuid[]) AS u(id)
+                    LEFT JOIN user_alias a ON a.alias_id = u.id
+                    JOIN user_overlay o ON o.user_id = coalesce(a.user_id, u.id)
+                    WHERE (o.preferences->>'incognito_until')::timestamptz > now()
+                    """,
+                    todo,
+                )
+                hidden = {r["id"] for r in rows}
+            except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError, asyncpg.InsufficientPrivilegeError):
+                hidden = set()
+        for u in todo:
+            _INCOGNITO[u] = (now + 30, u in hidden)
+    return {u for u in user_ids if _INCOGNITO[u][1]}
+
+
+async def _learnable(events: list[Event]) -> list[Event]:
+    """Drops what an incognito user does; `cataloged` events (the library itself) always stay."""
+    users = {e.user_id for e in events if e.action.value != "cataloged"}
+    hidden = await _incognito(users) if users else set()
+    return [e for e in events if e.action.value == "cataloged" or e.user_id not in hidden]
+
+
 @app.post("/events", status_code=202)
 async def ingest_event(event: Event, source: str = Depends(require_adapter_key)) -> dict[str, str]:
     """Adapters POST here, authenticated with their own X-Muse-Api-Key.
@@ -110,6 +148,8 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
     """
     _effective_source(event, source)
     check_rate_limit(source)
+    if not await _learnable([event]):
+        return {"status": "accepted"}  # incognito: dropped, and the adapter can't tell
     await _insert([event])
     # No user ids, items or actions in logs: logs are files too.
     logger.debug("ingested 1 event from %s", event.source.value)
@@ -123,8 +163,10 @@ async def ingest_batch(events: list[Event], source: str = Depends(require_adapte
     for e in events:
         _effective_source(e, source)
     check_rate_limit(source, len(events))
-    n = await _insert(events)
-    return {"status": "accepted", "count": n}
+    kept = await _learnable(events)
+    if kept:
+        await _insert(kept)
+    return {"status": "accepted", "count": len(events)}
 
 
 # ---- answers to Muse's questions --------------------------------------------------------------

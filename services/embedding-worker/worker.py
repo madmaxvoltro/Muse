@@ -98,6 +98,11 @@ class Worker:
         now = datetime.now(timezone.utc)
         full = st["last_full_profile_at"] is None or now - st["last_full_profile_at"] > timedelta(hours=FULL_PROFILE_HOURS)
         users = set(touched)
+        async with self.pool.acquire() as conn:
+            try:  # told something (a fact) or linked identities: rebuild without waiting for an event
+                users |= {str(r["user_id"]) for r in await conn.fetch("DELETE FROM taste_dirty RETURNING user_id")}
+            except asyncpg.UndefinedTableError:  # database without migration 011
+                pass
         if full:
             async with self.pool.acquire() as conn:
                 users |= {str(r["user_id"]) for r in await conn.fetch("SELECT DISTINCT user_id FROM event WHERE action <> 'cataloged'")}

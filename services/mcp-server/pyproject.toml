@@ -1,0 +1,16 @@
+[project]
+name = "muse-mcp"
+version = "0.2.0"
+description = "MCP server: lets an assistant ask Muse's questions, remember what you tell it and fetch recommendations"
+requires-python = ">=3.11"
+dependencies = ["mcp>=2.3,<3", "httpx>=0.27"]
+
+[project.scripts]
+muse-mcp = "server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["server"]

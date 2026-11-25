@@ -99,9 +99,10 @@ services:
       MUSE_DB_PASSWORD_MUSE_RECO_FILE: /run/secrets/db_muse_reco
       MUSE_DB_PASSWORD_MUSE_WORKER_FILE: /run/secrets/db_muse_worker
       MUSE_DB_PASSWORD_MUSE_CURATOR_FILE: /run/secrets/db_muse_curator
+      MUSE_DB_PASSWORD_MUSE_QUERY_FILE: /run/secrets/db_muse_query
       MUSE_QDRANT_URL: http://qdrant:6333
       MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
-    secrets: [muse_master_key, postgres_password, db_muse_ingest, db_muse_reco, db_muse_worker, db_muse_curator, qdrant_api_key]
+    secrets: [muse_master_key, postgres_password, db_muse_ingest, db_muse_reco, db_muse_worker, db_muse_curator, db_muse_query, qdrant_api_key]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [data]
@@ -267,6 +268,35 @@ services:
       ingestion-api: {condition: service_healthy}
     networks: [edge, egress]
 
+  # Query API: people, linked accounts, tokens for assistants, facts, questions as cards,
+  # mood/context, incognito, goals (docs/api/query-api.md). Apps such as Mono use it with their
+  # ingestion key; assistants with a per-person token. Reads via the recommendation API,
+  # answers via the ingestion API.
+  query-api:
+    <<: *hardening
+    build: {context: ., dockerfile: services/query-api/Dockerfile}
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse_query
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_query
+      MUSE_ADAPTER_KEYS_FILE: /run/secrets/adapter_keys
+      MUSE_ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      MUSE_RECO_URL: http://recommendation-api:8001
+      MUSE_INGEST_URL: http://ingestion-api:8000
+      MUSE_READ_KEY_FILE: /run/secrets/mcp_read_key
+      MUSE_ANSWER_KEY_FILE: /run/secrets/mcp_answer_key
+    secrets: [muse_master_key, db_muse_query, adapter_keys, admin_token, mcp_read_key, mcp_answer_key]
+    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_QUERY_PORT:-8772}:8003"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/healthz', timeout=3)"]
+      interval: 10s
+      retries: 12
+    depends_on:
+      admin: {condition: service_completed_successfully}
+      recommendation-api: {condition: service_healthy}
+      ingestion-api: {condition: service_healthy}
+    networks: [data, public]
+
   # Optional: MCP server (questions, answers, recommendations for an assistant). --profile mcp
   mcp-server:
     <<: *hardening
@@ -275,6 +305,7 @@ services:
     environment:
       MUSE_RECO_URL: http://recommendation-api:8001
       MUSE_INGEST_URL: http://ingestion-api:8000
+      MUSE_QUERY_URL: http://query-api:8003  # personal mode: clients send their own Bearer token
       MUSE_READ_KEY_FILE: /run/secrets/mcp_read_key
       MUSE_ANSWER_KEY_FILE: /run/secrets/mcp_answer_key
       MUSE_MCP_USER_ID: ${MUSE_MCP_USER_ID:-}
@@ -299,7 +330,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     ports: ["${MUSE_TLS_BIND:-127.0.0.1}:${MUSE_TLS_PORT:-8443}:8443"]
-    depends_on: [recommendation-api, ingestion-api]
+    depends_on: [recommendation-api, ingestion-api, query-api]
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
     networks: [public]
 
@@ -324,6 +355,8 @@ secrets:
   db_muse_reco: {file: ./secrets/db_muse_reco}
   db_muse_worker: {file: ./secrets/db_muse_worker}
   db_muse_curator: {file: ./secrets/db_muse_curator}
+  db_muse_query: {file: ./secrets/db_muse_query}
+  admin_token: {file: ./secrets/admin_token}
   qdrant_api_key: {file: ./secrets/qdrant_api_key}
   qdrant_read_key: {file: ./secrets/qdrant_read_key}
   adapter_keys: {file: ./secrets/adapter_keys}

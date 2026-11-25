@@ -295,6 +295,15 @@ P_IMPRESSION_ITEM = "impression.item"
 P_OVERLAY = "user_overlay.pinned_topics"
 P_DOWNLOAD_ITEM = "curator_download_log.item"
 P_IDENTITY = "identity_mapping.username"
+P_PERSON = "muse_user.display_name"
+P_ALIAS = "user_alias.label"
+P_LINK_CODE = "link_code.code"
+P_TOKEN = "api_token.token"
+P_TOKEN_LABEL = "api_token.label"
+P_FACT = "profile_fact.statement"
+P_GOAL = "user_goal.data"
+P_CONTEXT = "user_context.data"
+P_SUGGESTION = "feature_suggestion.data"
 
 
 def event_item_bid(vault: Vault | NullVault, source: str, source_item_id: str | None) -> str | None:
