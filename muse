@@ -53,7 +53,8 @@ SECRET_FILES = [
     "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key",
     # multi-space engine services: query API, vector worker, catalog, audio analyzer, scheduler
     "db_muse_query", "db_muse_vector", "db_muse_catalog", "db_muse_audio", "db_muse_scheduler",
-    "admin_token", "adapter_key_mono", "query_read_key", "mono_stream_token", "navidrome_password",
+    "admin_token", "adapter_key_mono", "query_read_key", "mono_stream_token",
+    "adapter_key_navidrome", "adapter_key_audiobookshelf", "navidrome_password", "navidrome_users", "audiobookshelf_token",
 ]
 
 
@@ -199,6 +200,8 @@ def ensure_secrets(provided: dict[str, str]) -> list[str]:
         "adapter_key_jellyfin": _token(),
         "adapter_key_arr": _token(),
         "adapter_key_searxng": _token(),
+        "adapter_key_navidrome": _token(),
+        "adapter_key_audiobookshelf": _token(),
         "status_token": _token(),
         "mcp_read_key": _token(),
         "mcp_answer_key": _token(),
@@ -216,7 +219,7 @@ def ensure_secrets(provided: dict[str, str]) -> list[str]:
         if _write_secret(name, value):
             created.append(name)
     for name in ("tmdb_api_key", "jellyfin_api_key", "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key",
-                 "navidrome_password"):
+                 "navidrome_password", "navidrome_users", "audiobookshelf_token"):
         if name in provided:
             _write_secret(name, provided[name], overwrite=True)
         elif not (SECRETS / name).exists():
@@ -224,9 +227,18 @@ def ensure_secrets(provided: dict[str, str]) -> list[str]:
     if not (SECRETS / "adapter_keys").exists():
         keys = (f"jellyfin:{read_secret('adapter_key_jellyfin')}\narr:{read_secret('adapter_key_arr')}\n"
                 f"searxng:{read_secret('adapter_key_searxng')}\nmuse:{_token()}\nmuse:{read_secret('mcp_answer_key')}\nimport:{_token()}\n"
-                f"mono:{read_secret('adapter_key_mono')}\nnavidrome:{_token()}\naudiobookshelf:{_token()}\n")
+                f"mono:{read_secret('adapter_key_mono')}\nnavidrome:{read_secret('adapter_key_navidrome')}\n"
+                f"audiobookshelf:{read_secret('adapter_key_audiobookshelf')}\n")
         _write_secret("adapter_keys", keys)
         created.append("adapter_keys")
+    else:
+        # Installs from before Mono / Navidrome / Audiobookshelf: add their lines once.
+        for src, val in (("mono", read_secret("adapter_key_mono")), ("navidrome", read_secret("adapter_key_navidrome")),
+                         ("audiobookshelf", read_secret("adapter_key_audiobookshelf"))):
+            if not first_key("adapter_keys", src):
+                _write_secret("adapter_keys", read_secret("adapter_keys") + f"\n{src}:{val or _token()}\n", overwrite=True)
+    if (SECRETS / "read_keys").exists():
+        ensure_key("read_keys", "mono")
     if not (SECRETS / "read_keys").exists():
         _write_secret("read_keys", f"vesper:{_token()}\njellyfin-plugin:{_token()}\nmcp:{read_secret('mcp_read_key')}\nmono:{_token()}\n")
         created.append("read_keys")
@@ -568,6 +580,7 @@ def need_setup() -> None:
 
 def cmd_up(a) -> None:
     need_setup()
+    ensure_secrets({})  # secrets added by newer versions (idempotent)
     compose("up", "-d", "--build")
     wait_healthy()
 
@@ -671,6 +684,7 @@ def cmd_upgrade(a) -> None:
     need_setup()
     if (ROOT / ".git").exists():
         subprocess.run(["git", "pull", "--ff-only"], cwd=ROOT, check=True)
+    ensure_secrets({})
     compose("build", "--pull")
     compose("up", "-d")
     wait_healthy()

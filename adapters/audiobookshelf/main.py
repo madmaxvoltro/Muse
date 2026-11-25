@@ -26,7 +26,7 @@ log = logging.getLogger("muse.audiobookshelf_adapter")
 def _secret(name: str, default: str = "") -> str:
     """NAME_FILE (a Docker secret) wins over NAME; secrets don't belong in environment variables."""
     path = os.environ.get(f"{name}_FILE")
-    if path:
+    if path and os.path.exists(path):
         with open(path) as f:
             return f.read().strip()
     return os.environ.get(name, default)

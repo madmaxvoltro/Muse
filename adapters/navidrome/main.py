@@ -31,7 +31,7 @@ log = logging.getLogger("muse.navidrome_adapter")
 def _secret(name: str, default: str = "") -> str:
     """NAME_FILE (a Docker secret) wins over NAME; secrets don't belong in environment variables."""
     path = os.environ.get(f"{name}_FILE")
-    if path:
+    if path and os.path.exists(path):
         with open(path) as f:
             return f.read().strip()
     return os.environ.get(name, default)
@@ -41,7 +41,7 @@ ND_URL = os.environ.get("NAVIDROME_URL", "").rstrip("/")
 ND_USER = os.environ.get("NAVIDROME_USER", "")
 ND_PASSWORD = _secret("NAVIDROME_PASSWORD")
 # Optional "alice:pw,bob:pw" for per-user stars (Subsonic answers starred songs per account).
-ND_USERS = [tuple(p.split(":", 1)) for p in os.environ.get("NAVIDROME_USERS", "").split(",") if ":" in p]
+ND_USERS = [tuple(p.split(":", 1)) for p in _secret("NAVIDROME_USERS").replace("\n", ",").split(",") if ":" in p]
 INGESTION_URL = os.environ.get("MUSE_INGESTION_URL", "").rstrip("/")
 ADAPTER_KEY = _secret("MUSE_ADAPTER_KEY")
 NOW_PLAYING_SECONDS = int(os.environ.get("MUSE_NOW_PLAYING_INTERVAL_SECONDS", "20"))

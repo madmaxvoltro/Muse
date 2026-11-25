@@ -314,6 +314,37 @@ services:
       ingestion-api: {condition: service_healthy}
     networks: [edge, egress]
 
+  # Optional music/book sources: ./muse up --profile navidrome / --profile audiobookshelf
+  navidrome-adapter:
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/navidrome/Dockerfile}
+    profiles: [navidrome]
+    environment:
+      NAVIDROME_URL: ${NAVIDROME_URL:-}
+      NAVIDROME_USER: ${NAVIDROME_USER:-}
+      NAVIDROME_PASSWORD_FILE: /run/secrets/navidrome_password
+      NAVIDROME_USERS_FILE: /run/secrets/navidrome_users
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_navidrome
+    secrets: [navidrome_password, navidrome_users, adapter_key_navidrome]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
+  audiobookshelf-adapter:
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/audiobookshelf/Dockerfile}
+    profiles: [audiobookshelf]
+    environment:
+      AUDIOBOOKSHELF_URL: ${AUDIOBOOKSHELF_URL:-}
+      AUDIOBOOKSHELF_TOKEN_FILE: /run/secrets/audiobookshelf_token
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_audiobookshelf
+    secrets: [audiobookshelf_token, adapter_key_audiobookshelf]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
   arr-adapter:
     <<: *hardening
     build: {context: ., dockerfile: adapters/arr/Dockerfile}
@@ -362,36 +393,6 @@ services:
     depends_on: [query-api, recommendation-api, ingestion-api]
     networks: [public]
 
-  # Optional adapters for music and audiobooks: --profile navidrome / --profile audiobookshelf.
-  navidrome-adapter:
-    <<: *hardening
-    build: {context: ., dockerfile: adapters/navidrome/Dockerfile}
-    profiles: [navidrome]
-    environment:
-      NAVIDROME_URL: ${NAVIDROME_URL:-}
-      NAVIDROME_USER: ${NAVIDROME_USER:-}
-      NAVIDROME_PASSWORD_FILE: /run/secrets/navidrome_password
-      NAVIDROME_USERS: ${NAVIDROME_USERS:-}
-      MUSE_INGESTION_URL: http://ingestion-api:8000
-      MUSE_ADAPTER_KEY: ${MUSE_NAVIDROME_ADAPTER_KEY:-}
-    secrets: [navidrome_password]
-    depends_on:
-      ingestion-api: {condition: service_healthy}
-    networks: [edge, egress]
-
-  audiobookshelf-adapter:
-    <<: *hardening
-    build: {context: ., dockerfile: adapters/audiobookshelf/Dockerfile}
-    profiles: [audiobookshelf]
-    environment:
-      AUDIOBOOKSHELF_URL: ${AUDIOBOOKSHELF_URL:-}
-      AUDIOBOOKSHELF_TOKEN: ${AUDIOBOOKSHELF_TOKEN:-}
-      MUSE_INGESTION_URL: http://ingestion-api:8000
-      MUSE_ADAPTER_KEY: ${MUSE_AUDIOBOOKSHELF_ADAPTER_KEY:-}
-    depends_on:
-      ingestion-api: {condition: service_healthy}
-    networks: [edge, egress]
-
   # Optional: HTTPS for other machines (LAN or Tailscale). --profile tls. Serves the two APIs
   # (and the MCP server) under one TLS port with Caddy's internal CA; `./muse ca` prints the
   # root certificate to trust on the client.
@@ -439,6 +440,11 @@ secrets:
   adapter_key_jellyfin: {file: ./secrets/adapter_key_jellyfin}
   adapter_key_arr: {file: ./secrets/adapter_key_arr}
   adapter_key_searxng: {file: ./secrets/adapter_key_searxng}
+  adapter_key_navidrome: {file: ./secrets/adapter_key_navidrome}
+  adapter_key_audiobookshelf: {file: ./secrets/adapter_key_audiobookshelf}
+  navidrome_password: {file: ./secrets/navidrome_password}
+  navidrome_users: {file: ./secrets/navidrome_users}
+  audiobookshelf_token: {file: ./secrets/audiobookshelf_token}
   read_keys: {file: ./secrets/read_keys}
   status_token: {file: ./secrets/status_token}
   mcp_read_key: {file: ./secrets/mcp_read_key}
@@ -457,4 +463,3 @@ secrets:
   admin_token: {file: ./secrets/admin_token}
   query_read_key: {file: ./secrets/query_read_key}
   mono_stream_token: {file: ./secrets/mono_stream_token}
-  navidrome_password: {file: ./secrets/navidrome_password}
