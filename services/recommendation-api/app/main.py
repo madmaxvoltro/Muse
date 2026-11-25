@@ -28,10 +28,11 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from muse_schema.config import key_list, secret
-from muse_schema.crypto import get_vault
+from muse_schema.crypto import get_vault, item_key
 from qdrant_client import QdrantClient
 
 from . import prefetch as prefetch_mod, questions, ratings, rows, status_page
+from . import taste_sequencing as tseq
 from . import routes_multispace as MS
 from . import soon_gone as soon_gone_repo
 from .db import close_pool, get_pool
@@ -215,6 +216,130 @@ async def _recommend(user_id, item_type, limit, explore_ratio, mood, surface, in
         body["note"] = "cold-start: no taste profile yet, showing well-rated titles; ask /questions/{user_id}/next"
         body["onboarding_suggested"] = True
     return body
+
+
+# --- music on the taste engine (fallback for /next and /radio) -----------------------------
+
+async def _canon_for(eng: Engine, refs: list[str]) -> list[str]:
+    """'source:id' (real ids, as players know them) -> blind canonical keys, in order."""
+    vault = get_vault()
+    keys = []
+    for r in refs:
+        if ":" not in r:
+            continue
+        source, sid = r.split(":", 1)
+        keys.append(item_key(vault, source, sid))
+    if not keys:
+        return []
+    async with eng.pool.acquire() as conn:
+        rows_ = await conn.fetch("SELECT item_key, canon_key FROM item WHERE item_key = ANY($1::text[])", keys)
+    by = {r["item_key"]: r["canon_key"] for r in rows_}
+    return [by[k] for k in keys if k in by]
+
+
+async def _track_pool(eng: Engine, user_id: str, discovery: float, exclude: set[str]) -> tuple[list[tseq.Track], object]:
+    """Unheard songs the engine likes for this person, plus their favourites (a radio plays those too)."""
+    res = await eng.recommend(RecoRequest(user_id, "track", limit=100, explore_ratio=0.0, surface="radio", log=False))
+    pool = [s for s in res.pool[:300] if s.key not in exclude]
+    top = max((s.score for s in pool), default=1.0) or 1.0
+    tracks = [tseq.Track(s.key, s.vector, s.payload, max(0.0, min(1.0, s.score / top)) * (0.7 + 0.3 * discovery), tseq.artist_of(s.payload))
+              for s in pool]
+    prof = res.profile
+    # Songs score lower than films per listen (muse_taste.signals: a few full listens ~ 0.5), so
+    # anything clearly liked counts as a favourite here.
+    loved = [a for a in (prof.anchors if prof else []) if a.preference > 0.35 and a.key not in exclude][:120]
+    if loved and discovery < 1.0:
+        got: dict = {}
+        await asyncio.to_thread(eng._by_keys, [a.key for a in loved], ["track"], False, got)
+        for a in loved:
+            if a.key in got:
+                vec, pl = got[a.key]
+                taste = (0.6 + 0.4 * min(a.preference, 1.0)) * (1.0 - 0.6 * discovery)
+                tracks.append(tseq.Track(a.key, vec, pl, taste, tseq.artist_of(pl)))
+    return tracks, prof
+
+
+async def _seed_track(eng: Engine, ck: str) -> tseq.Track | None:
+    got: dict = {}
+    await asyncio.to_thread(eng._by_keys, [ck], ["track"], True, got)
+    if ck not in got:
+        return None
+    vec, pl = got[ck]
+    return tseq.Track(ck, vec, pl, 0.5, tseq.artist_of(pl))
+
+
+def _track_json(t: tseq.Track, score: float, parts: dict, prev: tseq.Track, playable: list[str] | None) -> dict | None:
+    refs = t.payload.get("library_refs") or []
+    if playable:
+        refs = [r for r in refs if r.get("source") in playable]
+    if not refs:
+        return None
+    return {"source": refs[0]["source"], "source_item_id": refs[0]["source_item_id"], "canon_key": t.key, "title": t.title,
+            "transition": {"score": round(score, 4), **{k: round(v, 3) for k, v in parts.items()}}, "why": tseq.why(prev, parts)}
+
+
+async def taste_next_up(
+    user_id: str,
+    source: str,
+    source_item_id: str,
+    n: int = 5,
+    history: list[str] | None = None,
+    discovery: float = 0.3,
+    playable_source: list[str] | None = None,
+) -> dict:
+    """What should follow this song, from the taste engine: fits the person's taste and flows
+    from it (closeness of item vectors, artist spacing). /next uses it when the multi-space
+    engine has nothing for the song yet (no audio analysis or behaviour vectors)."""
+    eng = await engine()
+    cur_keys = await _canon_for(eng, [f"{source}:{source_item_id}"])
+    if not cur_keys:
+        raise HTTPException(404, "Muse doesn't know that song yet")
+    cur = await _seed_track(eng, cur_keys[0])
+    if cur is None:
+        raise HTTPException(404, "that song isn't in the catalog yet")
+    exclude = set(await _canon_for(eng, history or [])) | {cur.key}
+    tracks, _ = await _track_pool(eng, user_id, discovery, exclude)
+    hist_artists = [cur.artist]
+    picks = tseq.next_tracks(cur, tracks, n * 3, hist_artists)
+    out = [j for t, s, parts in picks if (j := _track_json(t, s, parts, cur, playable_source))][:n]
+    return {"user_id": user_id, "after": {"canon_key": cur.key, "title": cur.title}, "next": out}
+
+
+async def taste_radio(
+    user_id: str,
+    seed_source: str | None = None,
+    seed_id: str | None = None,
+    length: int = 25,
+    discovery: float = 0.3,
+    playable_source: list[str] | None = None,
+) -> dict:
+    """A listening session from the taste engine (beam search, favourites as radio material);
+    /radio uses it when the multi-space engine has nothing to play yet."""
+    eng = await engine()
+    seed = None
+    if seed_source and seed_id:
+        keys = await _canon_for(eng, [f"{seed_source}:{seed_id}"])
+        seed = await _seed_track(eng, keys[0]) if keys else None
+        if seed is None:
+            raise HTTPException(404, "Muse doesn't know that song yet")
+    tracks, _ = await _track_pool(eng, user_id, discovery, {seed.key} if seed else set())
+    if playable_source:
+        tracks = [t for t in tracks if any(r.get("source") in playable_source for r in t.payload.get("library_refs") or [])]
+    if not tracks:
+        return {"user_id": user_id, "tracks": [], "note": "nothing to play yet"}
+    lead = []
+    if seed is None:
+        seed = max(tracks, key=lambda t: t.taste)
+        tracks = [t for t in tracks if t.key != seed.key]
+        lead = [j for j in [_track_json(seed, seed.taste, {"taste": seed.taste}, seed, playable_source)] if j]
+    session = tseq.radio(seed, tracks, length - len(lead))
+    out, prev = list(lead), seed
+    for t, s, parts in session:
+        j = _track_json(t, s, parts, prev, playable_source)
+        if j:
+            out.append(j)
+        prev = t
+    return {"user_id": user_id, "seed": seed.key, "tracks": out}
 
 
 @app.get("/rows/{user_id}")
@@ -426,3 +551,19 @@ async def soon_gone_whitelist(source_item_id: str, user_id: str = Query(...)) ->
     pool = await get_pool()
     whitelisted = await soon_gone_repo.whitelist(pool, source_item_id, user_id)
     return {"source_item_id": source_item_id, "whitelisted": whitelisted}
+
+
+# /next and /radio fall back to the taste engine when the multi-space engine has nothing yet.
+async def _next_fallback(**kw):
+    if not await asyncio.to_thread((await engine()).catalog_ready):
+        return None
+    return await taste_next_up(**kw)
+
+
+async def _radio_fallback(**kw):
+    if not await asyncio.to_thread((await engine()).catalog_ready):
+        return None
+    return await taste_radio(**kw)
+
+
+MS.TASTE_FALLBACK.update(next=_next_fallback, radio=_radio_fallback)

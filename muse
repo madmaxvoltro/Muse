@@ -141,6 +141,17 @@ def first_key(name: str, client: str) -> str:
     return ""
 
 
+def ensure_key(name: str, client: str) -> str:
+    """Add a `client:<token>` line to a key list (adapter_keys, read_keys) if it has none, so
+    installs from before a client existed (e.g. Mono) pick it up without a fresh setup."""
+    have = first_key(name, client)
+    if have or not (SECRETS / name).exists():
+        return have
+    tok = _token()
+    _write_secret(name, read_secret(name) + f"\n{client}:{tok}\n", overwrite=True)
+    return tok
+
+
 # ---- secrets ------------------------------------------------------------------------------
 
 def _token() -> str:
@@ -212,11 +223,12 @@ def ensure_secrets(provided: dict[str, str]) -> list[str]:
             _write_secret(name, "")
     if not (SECRETS / "adapter_keys").exists():
         keys = (f"jellyfin:{read_secret('adapter_key_jellyfin')}\narr:{read_secret('adapter_key_arr')}\n"
-                f"searxng:{read_secret('adapter_key_searxng')}\nmuse:{_token()}\nmuse:{read_secret('mcp_answer_key')}\nimport:{_token()}\n")
+                f"searxng:{read_secret('adapter_key_searxng')}\nmuse:{_token()}\nmuse:{read_secret('mcp_answer_key')}\nimport:{_token()}\n"
+                f"mono:{read_secret('adapter_key_mono')}\nnavidrome:{_token()}\naudiobookshelf:{_token()}\n")
         _write_secret("adapter_keys", keys)
         created.append("adapter_keys")
     if not (SECRETS / "read_keys").exists():
-        _write_secret("read_keys", f"vesper:{_token()}\njellyfin-plugin:{_token()}\nmcp:{read_secret('mcp_read_key')}\n")
+        _write_secret("read_keys", f"vesper:{_token()}\njellyfin-plugin:{_token()}\nmcp:{read_secret('mcp_read_key')}\nmono:{_token()}\n")
         created.append("read_keys")
     # Installs from before the multi-space services: add their entries to the existing key lists.
     for name, prefix, line in (("adapter_keys", "mono:", f"mono:{read_secret('adapter_key_mono')}"),
@@ -538,6 +550,7 @@ def summary(mode: str, tls_host: str) -> None:
     print(f"    Vesper               read key: {first_key('read_keys', 'vesper')}")
     print(f"                         answer key: {first_key('adapter_keys', 'muse')}")
     print(f"    Jellyfin plugin      read key: {first_key('read_keys', 'jellyfin-plugin')}")
+    print(f"    Mono                 MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"    Status page          {reco}/status?token={read_secret('status_token')}")
     if mode in ("lan", "tailscale"):
         print("    TLS                  clients must trust Muse's certificate: ./muse ca > muse-ca.crt")
@@ -669,6 +682,7 @@ def cmd_keys(a) -> None:
     print(f"Vesper answer key        {first_key('adapter_keys', 'muse')}")
     print(f"Jellyfin plugin read key {first_key('read_keys', 'jellyfin-plugin')}")
     print(f"History import key       {first_key('adapter_keys', 'import')}")
+    print(f"Mono                     MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"MCP server               read: {read_secret('mcp_read_key')}  answer: {read_secret('mcp_answer_key')}")
     print(f"Status token             {read_secret('status_token')}")
 

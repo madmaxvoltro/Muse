@@ -439,6 +439,7 @@ class Engine:
             "explore": s.explore,
             "interest": (interest.label or ", ".join(t.split(":", 1)[-1] for t in interest.top_tags[:2])) if interest else None,
             "reasons": [r["text"] for r in details],
+            "why": [r["text"] for r in details],  # same as `reasons`: the name Mono and the v1 API use
             # each reason with its id and the corrections a client may offer (POST /answers kind "reason")
             "reason_details": details,
             # numeric per-feature contributions (kept as a flat map for the Jellyfin plugin)

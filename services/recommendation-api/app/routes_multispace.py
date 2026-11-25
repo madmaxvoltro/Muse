@@ -36,6 +36,9 @@ QDRANT_URL = os.environ.get("MUSE_QDRANT_URL", "http://qdrant:6333")
 ITEM_TYPES = ["movie", "series", "series_episode", "youtube_video", "track", "audiobook", "ebook"]
 TASTE_BUCKETS = ITEM_TYPES + ["_combined"]
 
+import logging
+
+log = logging.getLogger("muse.reco.multispace")
 router = APIRouter()
 _qdrant = None
 
@@ -245,6 +248,22 @@ def _seq_json(t: S.Track, s: float, parts: dict, prev: S.Track, facts, ctx) -> d
     return out
 
 
+# Set by main.py: the taste engine's next-track and radio, used when the multi-space engine has
+# no vectors for the song or the person yet (a fresh install, music without audio analysis).
+TASTE_FALLBACK: dict = {}
+
+
+async def _fallback(kind: str, **kw) -> dict | None:
+    fn = TASTE_FALLBACK.get(kind)
+    if fn is None:
+        return None
+    try:
+        res = await fn(**kw)
+    except HTTPException:
+        return None
+    return {**res, "engine": "taste"} if res else None
+
+
 @router.get("/next/{user_id}")
 async def next_item(
     user_id: str,
@@ -261,13 +280,26 @@ async def next_item(
     if arc not in S.ARCS:
         raise HTTPException(400, f"arc must be one of {S.ARCS}")
     pool = await get_pool()
-    p, ctx = await _person(pool, user_id, item_type, tz=tz, device=device, mood=mood, room=room)
     key = f"{source}:{source_item_id}"
-    async with pool.acquire() as conn:
-        cur = await _track(conn, key)
-    pool_tracks, after = await _sequence_pool(pool, p, ctx, [key], history or [], playable_source, discovery)
-    hist_artists = [t for t in (history or [])]
-    picks = S.next_tracks(cur, pool_tracks, n, after, arc=arc, history_artists=hist_artists)
+    try:
+        p, ctx = await _person(pool, user_id, item_type, tz=tz, device=device, mood=mood, room=room)
+        async with pool.acquire() as conn:
+            cur = await _track(conn, key)
+        pool_tracks, after = await _sequence_pool(pool, p, ctx, [key], history or [], playable_source, discovery)
+        hist_artists = [t for t in (history or [])]
+        picks = S.next_tracks(cur, pool_tracks, n, after, arc=arc, history_artists=hist_artists)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - no multi-space vectors yet (fresh install): the taste engine answers
+        log.warning("multi-space /next unavailable, using the taste engine", exc_info=True)
+        picks = None
+    if not picks:
+        fb = await _fallback("next", user_id=user_id, source=source, source_item_id=source_item_id, n=n, history=history,
+                             discovery=discovery, playable_source=playable_source)
+        if fb:
+            return fb
+        if picks is None:
+            raise HTTPException(503, "Muse has no vectors for music yet")
     return {"user_id": user_id, "after": {"key": key, "title": cur.title, "audio": {k: cur.audio.get(k) for k in ("bpm", "camelot", "energy") if k in cur.audio}},
             "context": ctx.summary(), "next": [_seq_json(t, s, parts, cur, p.facts, ctx) for t, s, parts in picks]}
 
@@ -287,11 +319,19 @@ async def radio(
     if arc not in S.ARCS:
         raise HTTPException(400, f"arc must be one of {S.ARCS}")
     pool = await get_pool()
-    p, ctx = await _person(pool, user_id, item_type, tz=tz, device=device, mood=mood, room=room)
     seed_keys = [f"{seed_source}:{seed_id}"] if seed_source and seed_id else []
-    pool_tracks, after = await _sequence_pool(pool, p, ctx, seed_keys, [], playable_source, discovery)
+    try:
+        p, ctx = await _person(pool, user_id, item_type, tz=tz, device=device, mood=mood, room=room)
+        pool_tracks, after = await _sequence_pool(pool, p, ctx, seed_keys, [], playable_source, discovery)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - no multi-space vectors yet (fresh install): the taste engine answers
+        log.warning("multi-space /radio unavailable, using the taste engine", exc_info=True)
+        pool_tracks = []
     if not pool_tracks:
-        return {"user_id": user_id, "tracks": [], "note": "nothing to play yet"}
+        fb = await _fallback("radio", user_id=user_id, seed_source=seed_source, seed_id=seed_id, length=length, discovery=discovery,
+                             playable_source=playable_source)
+        return fb or {"user_id": user_id, "tracks": [], "note": "nothing to play yet"}
     if seed_keys:
         async with pool.acquire() as conn:
             seed = await _track(conn, seed_keys[0])
