@@ -24,10 +24,10 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from muse_schema.config import key_list, secret
-from muse_schema.crypto import get_vault
+from muse_schema.crypto import get_vault, item_key
 from qdrant_client import QdrantClient
 
-from . import questions, rows, status_page
+from . import questions, rows, sequencing as seq, status_page
 from . import soon_gone as soon_gone_repo
 from .db import close_pool, get_pool
 from .engine import TARGET_TYPES, Engine, Request as RecoRequest
@@ -145,6 +145,127 @@ async def recommendations(
         body["note"] = "cold-start: no taste profile yet, showing well-rated titles; ask /questions/{user_id}/next"
         body["onboarding_suggested"] = True
     return body
+
+
+async def _canon_for(eng: Engine, refs: list[str]) -> list[str]:
+    """'source:id' (real ids, as players know them) -> blind canonical keys, in order."""
+    vault = get_vault()
+    keys = []
+    for r in refs:
+        if ":" not in r:
+            continue
+        source, sid = r.split(":", 1)
+        keys.append(item_key(vault, source, sid))
+    if not keys:
+        return []
+    async with eng.pool.acquire() as conn:
+        rows_ = await conn.fetch("SELECT item_key, canon_key FROM item WHERE item_key = ANY($1::text[])", keys)
+    by = {r["item_key"]: r["canon_key"] for r in rows_}
+    return [by[k] for k in keys if k in by]
+
+
+async def _track_pool(eng: Engine, user_id: str, discovery: float, exclude: set[str]) -> tuple[list[seq.Track], object]:
+    """Unheard songs the engine likes for this person, plus their favourites (a radio plays those too)."""
+    res = await eng.recommend(RecoRequest(user_id, "track", limit=100, explore_ratio=0.0, surface="radio", log=False))
+    pool = [s for s in res.pool[:300] if s.key not in exclude]
+    top = max((s.score for s in pool), default=1.0) or 1.0
+    tracks = [seq.Track(s.key, s.vector, s.payload, max(0.0, min(1.0, s.score / top)) * (0.7 + 0.3 * discovery), seq.artist_of(s.payload))
+              for s in pool]
+    prof = res.profile
+    # Songs score lower than films per listen (muse_taste.signals: a few full listens ~ 0.5), so
+    # anything clearly liked counts as a favourite here.
+    loved = [a for a in (prof.anchors if prof else []) if a.preference > 0.35 and a.key not in exclude][:120]
+    if loved and discovery < 1.0:
+        got: dict = {}
+        await asyncio.to_thread(eng._by_keys, [a.key for a in loved], ["track"], False, got)
+        for a in loved:
+            if a.key in got:
+                vec, pl = got[a.key]
+                taste = (0.6 + 0.4 * min(a.preference, 1.0)) * (1.0 - 0.6 * discovery)
+                tracks.append(seq.Track(a.key, vec, pl, taste, seq.artist_of(pl)))
+    return tracks, prof
+
+
+async def _seed_track(eng: Engine, ck: str) -> seq.Track | None:
+    got: dict = {}
+    await asyncio.to_thread(eng._by_keys, [ck], ["track"], True, got)
+    if ck not in got:
+        return None
+    vec, pl = got[ck]
+    return seq.Track(ck, vec, pl, 0.5, seq.artist_of(pl))
+
+
+def _track_json(t: seq.Track, score: float, parts: dict, prev: seq.Track, playable: list[str] | None) -> dict | None:
+    refs = t.payload.get("library_refs") or []
+    if playable:
+        refs = [r for r in refs if r.get("source") in playable]
+    if not refs:
+        return None
+    return {"source": refs[0]["source"], "source_item_id": refs[0]["source_item_id"], "canon_key": t.key, "title": t.title,
+            "transition": {"score": round(score, 4), **{k: round(v, 3) for k, v in parts.items()}}, "why": seq.why(prev, parts)}
+
+
+@app.get("/next/{user_id}")
+async def next_up(
+    user_id: str,
+    source: str = Query(..., description="what is playing now: its source (e.g. mono)"),
+    source_item_id: str = Query(..., max_length=300),
+    n: int = Query(5, ge=1, le=50),
+    history: list[str] | None = Query(None, description="'source:id' of the session so far, not repeated"),
+    discovery: float = Query(0.3, ge=0, le=1, description="0 = favourites, 1 = only new to you"),
+    playable_source: list[str] | None = Query(None, description="only songs these players can play, e.g. mono"),
+) -> dict:
+    """What should follow this song for this person: fits their taste and flows from it."""
+    eng = await engine()
+    cur_keys = await _canon_for(eng, [f"{source}:{source_item_id}"])
+    if not cur_keys:
+        raise HTTPException(404, "Muse doesn't know that song yet")
+    cur = await _seed_track(eng, cur_keys[0])
+    if cur is None:
+        raise HTTPException(404, "that song isn't in the catalog yet")
+    exclude = set(await _canon_for(eng, history or [])) | {cur.key}
+    tracks, _ = await _track_pool(eng, user_id, discovery, exclude)
+    hist_artists = [cur.artist]
+    picks = seq.next_tracks(cur, tracks, n * 3, hist_artists)
+    out = [j for t, s, parts in picks if (j := _track_json(t, s, parts, cur, playable_source))][:n]
+    return {"user_id": user_id, "after": {"canon_key": cur.key, "title": cur.title}, "next": out}
+
+
+@app.get("/radio/{user_id}")
+async def radio(
+    user_id: str,
+    seed_source: str | None = Query(None, description="start after this song (else from the person's taste)"),
+    seed_id: str | None = Query(None, max_length=300),
+    length: int = Query(25, ge=2, le=100),
+    discovery: float = Query(0.3, ge=0, le=1),
+    playable_source: list[str] | None = Query(None),
+) -> dict:
+    """A listening session: each song fits the person and flows from the one before."""
+    eng = await engine()
+    seed = None
+    if seed_source and seed_id:
+        keys = await _canon_for(eng, [f"{seed_source}:{seed_id}"])
+        seed = await _seed_track(eng, keys[0]) if keys else None
+        if seed is None:
+            raise HTTPException(404, "Muse doesn't know that song yet")
+    tracks, _ = await _track_pool(eng, user_id, discovery, {seed.key} if seed else set())
+    if playable_source:
+        tracks = [t for t in tracks if any(r.get("source") in playable_source for r in t.payload.get("library_refs") or [])]
+    if not tracks:
+        return {"user_id": user_id, "tracks": [], "note": "nothing to play yet"}
+    lead = []
+    if seed is None:
+        seed = max(tracks, key=lambda t: t.taste)
+        tracks = [t for t in tracks if t.key != seed.key]
+        lead = [j for j in [_track_json(seed, seed.taste, {"taste": seed.taste}, seed, playable_source)] if j]
+    session = seq.radio(seed, tracks, length - len(lead))
+    out, prev = list(lead), seed
+    for t, s, parts in session:
+        j = _track_json(t, s, parts, prev, playable_source)
+        if j:
+            out.append(j)
+        prev = t
+    return {"user_id": user_id, "seed": seed.key, "tracks": out}
 
 
 @app.get("/rows/{user_id}")

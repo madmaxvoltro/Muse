@@ -27,7 +27,9 @@ logger = logging.getLogger("muse.worker.catalog")
 
 # Keys that describe one event, not the item: never merged into item metadata.
 EVENT_ONLY_KEYS = {"dedupe_key", "value", "via", "reason", "question_id", "imported", "query_id", "canon_key", "response", "members", "subkind"}
-LIBRARY_SOURCES = {"jellyfin"}
+# Sources whose items are playable in the household's own libraries (Jellyfin for video,
+# Mono and Navidrome for music, Audiobookshelf for books).
+LIBRARY_SOURCES = {"jellyfin", "mono", "navidrome", "audiobookshelf"}
 
 
 def _clean(md: dict | None) -> dict:

@@ -18,6 +18,7 @@ class Source(str, Enum):
     OPENWEBUI = "openwebui"
     NAVIDROME = "navidrome"
     AUDIOBOOKSHELF = "audiobookshelf"
+    MONO = "mono"  # self-hosted music server (github.com/madmaxvoltro/mono), item_type "track"
     MUSE = "muse"  # answers to Muse's own questions (onboarding, this-or-that, abandon reasons)
     # History imports (see muse_taste.importers): written through the ingestion API by a key
     # whose source is `import`, which may claim exactly these sources and nothing else.
@@ -69,6 +70,8 @@ class Action(str, Enum):
     ABANDON_REASON = "abandon_reason"  # why a title was stopped early; metadata.reason
     INTEREST_FEEDBACK = "interest_feedback"  # answer about a whole interest (more/less/bring back...); metadata.response
     REASON_FEEDBACK = "reason_feedback"  # correction to a reason Muse gave (don't use this title / more or less of this tag)
+    UNFAVORITED = "unfavorited"  # took a favourite back (Mono unlike, Navidrome unstar)
+    ADDED_TO_PLAYLIST = "added_to_playlist"  # deliberate curation, stronger than a single play
 
 
 # Default action_weight per action — adapters may override, but this keeps
@@ -92,6 +95,8 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.ABANDON_REASON: 0.0,  # interpreted by muse_taste.signals from metadata.reason
     Action.INTEREST_FEEDBACK: 0.0,  # interpreted by muse_taste.evolution, never a per-title signal
     Action.REASON_FEEDBACK: 0.0,  # interpreted by muse_taste.signals.feedback_overrides
+    Action.UNFAVORITED: -1.5,  # cancels the favourite (muse_taste.signals reads the order)
+    Action.ADDED_TO_PLAYLIST: 0.8,
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.
