@@ -69,8 +69,13 @@ sessions per room on its own.
 picks, Because you watched X, More of an interest, Watch again, From your watchlist, New in
 your library, Something different). A "Because you watched" row carries `seed` with the
 title's `source` and `source_item_id`, so Vesper shows its own artwork. Every item has
-`reasons` (readable text) and `reason_details` (type, id and the corrections a client may offer
-through `POST /answers` kind `reason`). `/why/{u}/jellyfin/{id}` gives the same for one title.
+`reasons` (readable English text) and `reason_details`: per reason its `code` and `args` (for
+the client's own wording and translation: `similar_to {title}`, `interest {label}`,
+`same_director {value}`, `same_cast {value}`, `genre_affinity {value}`, `fans_also_liked {title}`,
+`on_your_list`, `highly_rated {value}`, `new_arrival`, `household`, `lately`, `mood`,
+`trend`/`rediscovery`/`steer`/`stretch {label}`, `context {label, when}`, `watch_again`,
+`explore_pick`, `uncertain`), its `type` and `id`, and the corrections a client may offer through
+`POST /answers` kind `reason`. `/why/{u}/jellyfin/{id}` gives the same for one title.
 
 ## Wrapped
 

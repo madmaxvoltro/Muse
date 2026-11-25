@@ -133,7 +133,8 @@ async def _reconsume_items(engine: Engine, prof, item_type: str) -> list[dict]:
             "source": refs[0]["source"], "source_item_id": refs[0]["source_item_id"], "canon_key": k,
             "title": pl.get("title"), "year": pl.get("year"), "item_type": pl.get("item_type"), "available": True,
             "reasons": [why[k][0].upper() + why[k][1:]],
-            "reason_details": [{"text": why[k][0].upper() + why[k][1:], "type": "reconsume", "id": "reconsume", "responses": []}],
+            "reason_details": [{"text": why[k][0].upper() + why[k][1:], "type": "reconsume", "id": "reconsume", "code": "watch_again",
+                                "args": {}, "responses": []}],
         })
     return out
 

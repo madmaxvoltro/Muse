@@ -336,6 +336,7 @@ def test_scrutable_reasons_feedback_loop(db_dsn, monkeypatch):
     target, r, bad, after, prof = asyncio.run(go())
     anchor_key = target["id"].split(":", 1)[1]
     assert target["responses"] == ["not_relevant", "more"]
+    assert target["code"] == "similar_to" and target["args"]["title"] in target["text"]  # clients word it themselves
     assert r.status_code == 202 and r.json()["events"] == 1
     assert bad.status_code == 422
     assert target["id"] not in after  # immediate, before any worker cycle

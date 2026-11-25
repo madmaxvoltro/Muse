@@ -291,7 +291,7 @@ def explain_structured(s: Scored, profile: TasteProfile, titles: dict[str, str],
     """Like explain(), with a reason id and the responses a client can offer for each:
     [{"text": "Similar to Arrival", "type": "anchor", "id": "anchor:<key>", "responses": ["not_relevant", "more"]}, ...].
     Faithful by construction: every reason is one of the score's actual top contributions."""
-    reasons: list[tuple[float, str, str, str]] = []
+    reasons: list[tuple[float, str, str, str, str, dict]] = []
     for k, v in sorted(s.contributions.items(), key=lambda kv: -kv[1]):
         if v <= 0.04:
             continue
@@ -299,53 +299,60 @@ def explain_structured(s: Scored, profile: TasteProfile, titles: dict[str, str],
             it = profile.interests[s.interest_id]
             label = it.label or ", ".join(_pretty_tag(t) for t in it.top_tags[:2]) or titles.get(it.medoid_key, "")
             if label:
-                reasons.append((v, f"Because you like {label}", "interest", f"interest:{it.medoid_key}"))
+                reasons.append((v, f"Because you like {label}", "interest", f"interest:{it.medoid_key}", "interest", {"label": label}))
         elif k == "item_sim" and s.nearest_anchor:
             t = titles.get(s.nearest_anchor)
             if t:
-                reasons.append((v, f"Similar to {t}", "anchor", f"anchor:{s.nearest_anchor}"))
+                reasons.append((v, f"Similar to {t}", "anchor", f"anchor:{s.nearest_anchor}", "similar_to", {"title": t}))
         elif k == "tags" and s.top_tags:
-            reasons.append((v, _tag_reason(s.top_tags[0]), "tag", f"tag:{s.top_tags[0]}"))
+            reasons.append((v, _tag_reason(s.top_tags[0]), "tag", f"tag:{s.top_tags[0]}", _tag_code(s.top_tags[0]), {"value": _pretty_tag(s.top_tags[0])}))
         elif k == "related" and s.payload.get("related_via"):
             via_keys = s.payload.get("related_via_keys") or []
-            reasons.append((v, f"Fans of {s.payload['related_via'][0]} also liked this", "related" if via_keys else "info", f"related:{via_keys[0]}" if via_keys else "related"))
+            reasons.append((v, f"Fans of {s.payload['related_via'][0]} also liked this", "related" if via_keys else "info", f"related:{via_keys[0]}" if via_keys else "related",
+                            "fans_also_liked", {"title": s.payload["related_via"][0]}))
         elif k == "intent":
-            reasons.append((v, "On your list", "info", "intent"))
+            reasons.append((v, "On your list", "info", "intent", "on_your_list", {}))
         elif k == "quality":
             r = s.payload.get("vote_average")
-            reasons.append((v, f"Highly rated ({r:.1f})" if r else "Highly rated", "info", "quality"))
+            reasons.append((v, f"Highly rated ({r:.1f})" if r else "Highly rated", "info", "quality", "highly_rated", {"value": round(float(r), 1)} if r else {}))
         elif k == "freshness":
-            reasons.append((v, "New in your library", "info", "freshness"))
+            reasons.append((v, "New in your library", "info", "freshness", "new_arrival", {}))
         elif k == "household":
-            reasons.append((v, "Liked by others in your household", "info", "household"))
+            reasons.append((v, "Liked by others in your household", "info", "household", "household", {}))
         elif k == "short_term":
-            reasons.append((v, "In line with what you've been watching lately", "info", "short_term"))
+            reasons.append((v, "In line with what you've been watching lately", "info", "short_term", "lately", {}))
         elif k == "mood":
-            reasons.append((v, "Fits your mood", "info", "mood"))
+            reasons.append((v, "Fits your mood", "info", "mood", "mood", {}))
         elif k == "trend" and s.interest_id is not None:
-            reasons.append((v, f"You've been watching more {_interest_name(profile, s.interest_id, titles)} lately", "interest", _iid(profile, s.interest_id)))
+            reasons.append((v, f"You've been watching more {_interest_name(profile, s.interest_id, titles)} lately", "interest", _iid(profile, s.interest_id),
+                            "trend", {"label": _interest_name(profile, s.interest_id, titles)}))
         elif k == "rediscovery" and s.interest_id is not None:
-            reasons.append((v, f"It's been a while since your {_interest_name(profile, s.interest_id, titles)} phase", "interest", _iid(profile, s.interest_id)))
+            reasons.append((v, f"It's been a while since your {_interest_name(profile, s.interest_id, titles)} phase", "interest", _iid(profile, s.interest_id),
+                            "rediscovery", {"label": _interest_name(profile, s.interest_id, titles)}))
         elif k == "context" and s.interest_id is not None and s.payload.get("context_label"):
-            reasons.append((v, f"You often pick {_interest_name(profile, s.interest_id, titles)} on {s.payload['context_label']}s", "interest", _iid(profile, s.interest_id)))
+            reasons.append((v, f"You often pick {_interest_name(profile, s.interest_id, titles)} on {s.payload['context_label']}s", "interest", _iid(profile, s.interest_id),
+                            "context", {"label": _interest_name(profile, s.interest_id, titles), "when": s.payload["context_label"]}))
         elif k == "steer" and s.interest_id is not None:
-            reasons.append((v, f"You asked for more {_interest_name(profile, s.interest_id, titles)}", "interest", _iid(profile, s.interest_id)))
+            reasons.append((v, f"You asked for more {_interest_name(profile, s.interest_id, titles)}", "interest", _iid(profile, s.interest_id),
+                            "steer", {"label": _interest_name(profile, s.interest_id, titles)}))
         elif k == "stretch" and s.payload.get("stretch_interest") is not None:
-            reasons.append((v, f"One step beyond {_interest_name(profile, s.payload['stretch_interest'], titles)}", "interest", _iid(profile, s.payload["stretch_interest"])))
+            reasons.append((v, f"One step beyond {_interest_name(profile, s.payload['stretch_interest'], titles)}", "interest", _iid(profile, s.payload["stretch_interest"]),
+                            "stretch", {"label": _interest_name(profile, s.payload["stretch_interest"], titles)}))
     out: list[dict] = []
     seen_text: set[str] = set()
-    for _, text, kind, rid in reasons:
+    for _, text, kind, rid, code, args in reasons:
         if text in seen_text:
             continue
         seen_text.add(text)
-        out.append({"text": text, "type": kind, "id": rid, "responses": REASON_RESPONSES.get(kind, [])})
+        # `text` is English; `code` and `args` let a client word and translate it itself.
+        out.append({"text": text, "type": kind, "id": rid, "code": code, "args": args, "responses": REASON_RESPONSES.get(kind, [])})
     out = out[:max_reasons]
     # Honesty about uncertainty builds more trust than a confident-sounding guess (Tintarev &
     # Masthoff, "Evaluating the effectiveness of explanations for recommender systems", 2012).
     if s.explore:
-        out.append({"text": "Something different, to learn your taste", "type": "explore", "id": "explore", "responses": []})
+        out.append({"text": "Something different, to learn your taste", "type": "explore", "id": "explore", "code": "explore_pick", "args": {}, "responses": []})
     elif s.confidence < 0.3 and out:
-        out.append({"text": "Muse isn't sure about this one yet", "type": "uncertainty", "id": "uncertainty", "responses": []})
+        out.append({"text": "Muse isn't sure about this one yet", "type": "uncertainty", "id": "uncertainty", "code": "uncertain", "args": {}, "responses": []})
     return out
 
 
@@ -382,6 +389,14 @@ def _interest_name(profile: TasteProfile, k: int, titles: dict[str, str]) -> str
 def _pretty_tag(tag: str) -> str:
     ns, _, v = tag.partition(":")
     return v.title() if ns in ("d", "w", "p", "s", "n", "a", "au", "ch") else v
+
+
+_TAG_CODES = {"d": "same_director", "w": "same_writer", "p": "same_cast", "s": "same_studio", "n": "same_network", "a": "same_artist",
+              "au": "same_author", "ch": "same_channel", "k": "about", "th": "about", "t": "tag", "g": "genre_affinity", "c": "collection"}
+
+
+def _tag_code(tag: str) -> str:
+    return _TAG_CODES.get(tag.partition(":")[0], "tag")
 
 
 def _tag_reason(tag: str) -> str:
