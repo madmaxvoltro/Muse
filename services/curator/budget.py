@@ -22,11 +22,21 @@ PROTECT_PROGRESS_MAX = 90.0
 
 
 async def get_active_users(pool: asyncpg.Pool, window_days: int = 30) -> list[str]:
+    """Active people, as canonical ids: linked accounts (user_alias) count as one person, whose
+    taste vector the embedding worker stores under the canonical id."""
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT DISTINCT user_id FROM event WHERE "timestamp" > now() - make_interval(days => $1::int)""",
-            window_days,
-        )
+        try:
+            rows = await conn.fetch(
+                """SELECT DISTINCT COALESCE(a.user_id, e.user_id) AS user_id FROM event e
+                   LEFT JOIN user_alias a ON a.alias_id = e.user_id
+                   WHERE e."timestamp" > now() - make_interval(days => $1::int)""",
+                window_days,
+            )
+        except asyncpg.UndefinedTableError:  # database from before migration 007
+            rows = await conn.fetch(
+                """SELECT DISTINCT user_id FROM event WHERE "timestamp" > now() - make_interval(days => $1::int)""",
+                window_days,
+            )
     return [str(r["user_id"]) for r in rows]
 
 

@@ -1,0 +1,1446 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Muse Recommendation API",
+  "version": "0.2.0"
+ },
+ "paths": {
+  "/healthz": {
+   "get": {
+    "summary": "Healthz",
+    "operationId": "healthz_healthz_get",
+    "parameters": [
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         },
+         "title": "Response Healthz Healthz Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/recommendations/{user_id}": {
+   "get": {
+    "summary": "Recommendations",
+    "operationId": "recommendations_recommendations__user_id__get",
+    "parameters": [
+     {
+      "name": "user_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "item_type",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "description": "one of ['movie', 'series', 'series_episode', 'youtube_video', 'track', 'audiobook', 'ebook']",
+       "title": "Item Type"
+      },
+      "description": "one of ['movie', 'series', 'series_episode', 'youtube_video', 'track', 'audiobook', 'ebook']"
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "maximum": 100,
+       "minimum": 1,
+       "default": 20,
+       "title": "Limit"
+      }
+     },
+     {
+      "name": "explore_ratio",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "number",
+         "maximum": 1.0,
+         "minimum": 0.0
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "overrides the explore-slot ratio (default: mood, then the person's overlay, else 0.125)",
+       "title": "Explore Ratio"
+      },
+      "description": "overrides the explore-slot ratio (default: mood, then the person's overlay, else 0.125)"
+     },
+     {
+      "name": "source",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "only items from these sources, e.g. source=mono (playable) or source=catalog (discovery)",
+       "title": "Source"
+      },
+      "description": "only items from these sources, e.g. source=mono (playable) or source=catalog (discovery)"
+     },
+     {
+      "name": "taste_from",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "rank with another domain's taste, one of ['movie', 'series', 'series_episode', 'youtube_video', 'track', 'audiobook', 'ebook', '_combined']",
+       "title": "Taste From"
+      },
+      "description": "rank with another domain's taste, one of ['movie', 'series', 'series_episode', 'youtube_video', 'track', 'audiobook', 'ebook', '_combined']"
+     },
+     {
+      "name": "blend",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "number",
+         "maximum": 1.0,
+         "minimum": 0.0
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "share of cross-domain taste mixed in (default: overlay taste_blend)",
+       "title": "Blend"
+      },
+      "description": "share of cross-domain taste mixed in (default: overlay taste_blend)"
+     },
+     {
+      "name": "mood",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "a preset (focus, chill, workout, party, sleep, sad, happy, ...) or free text",
+       "title": "Mood"
+      },
+      "description": "a preset (focus, chill, workout, party, sleep, sad, happy, ...) or free text"
+     },
+     {
+      "name": "tz",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "IANA time zone of the person, for time-of-day context",
+       "title": "Tz"
+      },
+      "description": "IANA time zone of the person, for time-of-day context"
+     },
+     {
+      "name": "device",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "device name, e.g. 'Living room TV' (context)",
+       "title": "Device"
+      },
+      "description": "device name, e.g. 'Living room TV' (context)"
+     },
+     {
+      "name": "device_class",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "phone | desktop | tv | car | speaker | tablet",
+       "title": "Device Class"
+      },
+      "description": "phone | desktop | tv | car | speaker | tablet"
+     },
+     {
+      "name": "room",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "room for room-level context (Home Assistant)",
+       "title": "Room"
+      },
+      "description": "room for room-level context (Home Assistant)"
+     },
+     {
+      "name": "use_context",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "boolean",
+       "description": "apply stored context signals (mood, activity, weather, calendar)",
+       "default": true,
+       "title": "Use Context"
+      },
+      "description": "apply stored context signals (mood, activity, weather, calendar)"
+     },
+     {
+      "name": "surface",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "description": "where this list is shown, for impression logging",
+       "default": "recommendations",
+       "title": "Surface"
+      },
+      "description": "where this list is shown, for impression logging"
+     },
+     {
+      "name": "log",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "boolean",
+       "description": "log impressions (what was shown), which is how Muse learns from lists",
+       "default": true,
+       "title": "Log"
+      },
+      "description": "log impressions (what was shown), which is how Muse learns from lists"
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Recommendations Recommendations  User Id  Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/next/{user_id}": {
+   "get": {
+    "summary": "Next Item",
+    "operationId": "next_item_next__user_id__get",
+    "parameters": [
+     {
+      "name": "user_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "source",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "description": "source of what is playing now",
+       "title": "Source"
+      },
+      "description": "source of what is playing now"
+     },
+     {
+      "name": "source_item_id",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Source Item Id"
+      }
+     },
+     {
+      "name": "item_type",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "track",
+       "title": "Item Type"
+      }
+     },
+     {
+      "name": "n",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "maximum": 50,
+       "minimum": 1,
+       "default": 5,
+       "title": "N"
+      }
+     },
+     {
+      "name": "history",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "'source:id' of the session so far (not repeated)",
+       "title": "History"
+      },
+      "description": "'source:id' of the session so far (not repeated)"
+     },
+     {
+      "name": "arc",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "description": "energy curve: ('steady', 'build', 'wind_down', 'peak')",
+       "default": "steady",
+       "title": "Arc"
+      },
+      "description": "energy curve: ('steady', 'build', 'wind_down', 'peak')"
+     },
+     {
+      "name": "discovery",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "number",
+       "maximum": 1,
+       "minimum": 0,
+       "description": "0 = favourites, 1 = only new to you",
+       "default": 0.3,
+       "title": "Discovery"
+      },
+      "description": "0 = favourites, 1 = only new to you"
+     },
+     {
+      "name": "playable_source",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "restrict to sources the player can play, e.g. mono",
+       "title": "Playable Source"
+      },
+      "description": "restrict to sources the player can play, e.g. mono"
+     },
+     {
+      "name": "mood",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Mood"
+      }
+     },
+     {
+      "name": "tz",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Tz"
+      }
+     },
+     {
+      "name": "device",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Device"
+      }
+     },
+     {
+      "name": "room",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Room"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Next Item Next  User Id  Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/radio/{user_id}": {
+   "get": {
+    "summary": "Radio",
+    "operationId": "radio_radio__user_id__get",
+    "parameters": [
+     {
+      "name": "user_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "seed_source",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "start after this item (else from the person's taste)",
+       "title": "Seed Source"
+      },
+      "description": "start after this item (else from the person's taste)"
+     },
+     {
+      "name": "seed_id",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Seed Id"
+      }
+     },
+     {
+      "name": "item_type",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "track",
+       "title": "Item Type"
+      }
+     },
+     {
+      "name": "length",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "maximum": 100,
+       "minimum": 2,
+       "default": 25,
+       "title": "Length"
+      }
+     },
+     {
+      "name": "arc",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "description": "energy curve: ('steady', 'build', 'wind_down', 'peak')",
+       "default": "steady",
+       "title": "Arc"
+      },
+      "description": "energy curve: ('steady', 'build', 'wind_down', 'peak')"
+     },
+     {
+      "name": "discovery",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "number",
+       "maximum": 1,
+       "minimum": 0,
+       "default": 0.3,
+       "title": "Discovery"
+      }
+     },
+     {
+      "name": "playable_source",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Playable Source"
+      }
+     },
+     {
+      "name": "mood",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Mood"
+      }
+     },
+     {
+      "name": "tz",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Tz"
+      }
+     },
+     {
+      "name": "device",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Device"
+      }
+     },
+     {
+      "name": "room",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Room"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Radio Radio  User Id  Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/group-recommendations": {
+   "get": {
+    "summary": "Group Recommendations",
+    "operationId": "group_recommendations_group_recommendations_get",
+    "parameters": [
+     {
+      "name": "user_id",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "the people watching/listening together",
+       "title": "User Id"
+      },
+      "description": "the people watching/listening together"
+     },
+     {
+      "name": "session",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "or a group session id (members from the session)",
+       "title": "Session"
+      },
+      "description": "or a group session id (members from the session)"
+     },
+     {
+      "name": "item_type",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "movie",
+       "title": "Item Type"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "maximum": 100,
+       "minimum": 1,
+       "default": 20,
+       "title": "Limit"
+      }
+     },
+     {
+      "name": "seen",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "description": "drop items seen by: all (default) | any | none of the members",
+       "default": "all",
+       "title": "Seen"
+      },
+      "description": "drop items seen by: all (default) | any | none of the members"
+     },
+     {
+      "name": "source",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Source"
+      }
+     },
+     {
+      "name": "mood",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Mood"
+      }
+     },
+     {
+      "name": "tz",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Tz"
+      }
+     },
+     {
+      "name": "room",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Room"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Group Recommendations Group Recommendations Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/fit/{source}/{source_item_id}": {
+   "get": {
+    "summary": "Fit",
+    "operationId": "fit_fit__source___source_item_id__get",
+    "parameters": [
+     {
+      "name": "source",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Source"
+      }
+     },
+     {
+      "name": "source_item_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Source Item Id"
+      }
+     },
+     {
+      "name": "user_id",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "item_type",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "movie",
+       "title": "Item Type"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Fit Fit  Source   Source Item Id  Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/explain/{user_id}/{source}/{source_item_id}": {
+   "get": {
+    "summary": "Explain",
+    "description": "Why an item is (not) recommended to someone: blockers, rank, and its score breakdown.",
+    "operationId": "explain_explain__user_id___source___source_item_id__get",
+    "parameters": [
+     {
+      "name": "user_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "source",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Source"
+      }
+     },
+     {
+      "name": "source_item_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Source Item Id"
+      }
+     },
+     {
+      "name": "item_type",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "track",
+       "title": "Item Type"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "default": 20,
+       "title": "Limit"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Explain Explain  User Id   Source   Source Item Id  Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/context/{user_id}": {
+   "get": {
+    "summary": "Context",
+    "description": "The context Muse would apply right now (time, device, mood and where it came from).",
+    "operationId": "context_context__user_id__get",
+    "parameters": [
+     {
+      "name": "user_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "tz",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Tz"
+      }
+     },
+     {
+      "name": "device",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Device"
+      }
+     },
+     {
+      "name": "room",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Room"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Context Context  User Id  Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/soon-gone": {
+   "get": {
+    "summary": "Soon Gone List",
+    "description": "Backs the Jellyfin plugin's \"Soon Gone\" homepage row.",
+    "operationId": "soon_gone_list_soon_gone_get",
+    "parameters": [
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Soon Gone List Soon Gone Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/soon-gone/{source_item_id}/whitelist": {
+   "post": {
+    "summary": "Soon Gone Whitelist",
+    "description": "Called by the Jellyfin plugin's playback-start hook \u2014 opening a \"Soon Gone\" item\nsaves it permanently (see docs/architecture.md). Idempotent: whitelisting an item\nthat isn't pending (already saved, expired, or never marked) is a no-op.",
+    "operationId": "soon_gone_whitelist_soon_gone__source_item_id__whitelist_post",
+    "parameters": [
+     {
+      "name": "source_item_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Source Item Id"
+      }
+     },
+     {
+      "name": "user_id",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "User Id"
+      }
+     },
+     {
+      "name": "x-muse-read-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "X-Muse-Read-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Soon Gone Whitelist Soon Gone  Source Item Id  Whitelist Post"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "HTTPValidationError": {
+    "properties": {
+     "detail": {
+      "items": {
+       "$ref": "#/components/schemas/ValidationError"
+      },
+      "type": "array",
+      "title": "Detail"
+     }
+    },
+    "type": "object",
+    "title": "HTTPValidationError"
+   },
+   "ValidationError": {
+    "properties": {
+     "loc": {
+      "items": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "integer"
+        }
+       ]
+      },
+      "type": "array",
+      "title": "Location"
+     },
+     "msg": {
+      "type": "string",
+      "title": "Message"
+     },
+     "type": {
+      "type": "string",
+      "title": "Error Type"
+     },
+     "input": {
+      "title": "Input"
+     },
+     "ctx": {
+      "type": "object",
+      "title": "Context"
+     }
+    },
+    "type": "object",
+    "required": [
+     "loc",
+     "msg",
+     "type"
+    ],
+    "title": "ValidationError"
+   }
+  }
+ }
+}

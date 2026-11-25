@@ -12,6 +12,10 @@ behind each stage.
   GET  /questions/{user_id}/abandoned   titles stopped early, to ask why
   GET  /soon-gone, POST /soon-gone/{id}/whitelist   curator grace window (unchanged)
 
+Multi-space engine (routes_multispace.py): /next, /radio, /group-recommendations, /fit,
+/explain/{user}/{source}/{id}, /context; /recommendations dispatches to it for music, YouTube and
+books and for requests naming a source, room, device or another domain's taste.
+
 Answers to questions go to the ingestion API (POST /answers): this service never writes
 taste data, only impressions and question bookkeeping.
 """
@@ -24,10 +28,12 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from muse_schema.config import key_list, secret
-from muse_schema.crypto import get_vault
+from muse_schema.crypto import get_vault, item_key
 from qdrant_client import QdrantClient
 
-from . import questions, rows, status_page
+from . import prefetch as prefetch_mod, questions, ratings, rows, status_page
+from . import taste_sequencing as tseq
+from . import routes_multispace as MS
 from . import soon_gone as soon_gone_repo
 from .db import close_pool, get_pool
 from .engine import TARGET_TYPES, Engine, Request as RecoRequest
@@ -90,7 +96,8 @@ async def lifespan(_app: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title="Muse Recommendation API", version="0.2.0", dependencies=[Depends(require_read_key)], lifespan=lifespan)
+app = FastAPI(title="Muse Recommendation API", version="0.3.0", dependencies=[Depends(require_read_key)], lifespan=lifespan)
+app.include_router(MS.router)  # /next, /radio, /group-recommendations, /fit, /explain/{u}/{source}/{id}, /context
 
 
 def _check_type(item_type: str) -> None:
@@ -114,37 +121,225 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# Domains the multi-space engine serves (sound, sessions, sequencing); films and series go to
+# the taste engine unless the request asks for something only the multi-space engine does.
+MULTISPACE_TYPES = {"track", "youtube_video", "audiobook", "ebook"}
+
+
 @app.get("/recommendations/{user_id}")
 async def recommendations(
     user_id: str,
     item_type: str = Query(..., description=f"one of {ITEM_TYPES}"),
     limit: int = Query(20, ge=1, le=100),
     explore_ratio: float | None = Query(None, ge=0.0, le=1.0, description="share of explore slots; default from the user overlay (12.5%)"),
-    mood: str | None = Query(None, max_length=200, description="free text, e.g. 'cosy and funny' (needs the embedder in this service)"),
+    mood: str | None = Query(None, max_length=200, description="a preset (focus, chill, workout, ...) or free text, e.g. 'cosy and funny'"),
     surface: str = Query("home", max_length=40, description="where the list is shown; separate rotation and impression stats per surface"),
     include_unavailable: bool = Query(False, description="also titles not in the library (discovery / curator)"),
     log: bool = Query(True, description="log impressions (turn off for previews)"),
     at: datetime | None = Query(None, description="ISO time to use as 'now' for rhythms (default: now)"),
+    # multi-space engine (music lists, context-aware lists)
+    source: list[str] | None = Query(None, description="only items from these sources, e.g. source=mono (playable) or source=catalog (discovery)"),
+    taste_from: str | None = Query(None, description="rank with another domain's taste"),
+    blend: float | None = Query(None, ge=0.0, le=1.0, description="share of cross-domain taste mixed in"),
+    tz: str | None = Query(None, description="IANA time zone of the person, for time-of-day context"),
+    device: str | None = Query(None, description="device name, e.g. 'Living room TV' (context)"),
+    device_class: str | None = Query(None, description="phone | desktop | tv | car | speaker | tablet"),
+    room: str | None = Query(None, description="room for room-level context (Home Assistant)"),
+    use_context: bool = Query(True, description="apply stored context signals (mood, activity, weather, calendar)"),
+    engine_name: str | None = Query(None, alias="engine", description="taste | multispace (default: chosen by item type and parameters)"),
+    max_age: int | None = Query(None, ge=0, le=21, description="kids profiles: only titles rated for this age or younger"),
+    allow_unrated: bool = Query(False, description="with max_age: also titles without a known rating"),
 ) -> dict:
+    """Ranked, explained recommendations. Films and series come from the taste engine
+    (canonical titles, calibrated lists); music, YouTube and books, and any request that names a
+    source, room, device or another domain's taste, from the multi-space engine. Both answer
+    with `why` (readable reasons) and `explanation` (weighted terms)."""
+    if max_age is None:
+        return await _recommend(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at, source,
+                                taste_from, blend, tz, device, device_class, room, use_context, engine_name)
+    # Over-fetch, then keep what the profile may see (unknown ratings only with allow_unrated).
+    body = await _recommend(user_id, item_type, min(100, limit * 3), explore_ratio, mood, surface, include_unavailable, False, at,
+                            source, taste_from, blend, tz, device, device_class, room, use_context, engine_name)
+    body["recommendations"] = filter_age(body.get("recommendations") or [], max_age, allow_unrated)[:limit]
+    body["max_age"] = max_age
+    return body
+
+
+def filter_age(items: list[dict], max_age: int | None, allow_unrated: bool = False) -> list[dict]:
+    return [r for r in items if ratings.within(r.get("certification") or r.get("official_rating"), max_age, allow_unrated)]
+
+
+async def _recommend(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at, source, taste_from,
+                     blend, tz, device, device_class, room, use_context, engine_name) -> dict:
     _check_type(item_type)
+    if engine_name not in (None, "taste", "multispace"):
+        raise HTTPException(status_code=400, detail="engine must be taste or multispace")
+    wants_multi = engine_name == "multispace" or (
+        engine_name is None and (item_type in MULTISPACE_TYPES or bool(source or taste_from or room or device or device_class or tz)))
+
+    async def multi() -> dict:
+        return await MS.recommendations(user_id, item_type, limit, explore_ratio, source, taste_from, blend, mood, tz, device,
+                                        device_class, room, use_context, surface, log)
+
+    if wants_multi:
+        return {**await multi(), "engine": "multispace"}
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
-        return {"user_id": user_id, "item_type": item_type, "recommendations": [],
-                "note": "Muse is still building its catalog (first start); see ./muse status"}
+        building = {"user_id": user_id, "item_type": item_type, "recommendations": [],
+                    "note": "Muse is still building its catalog (first start); see ./muse status"}
+        if engine_name == "taste":
+            return building
+        try:  # the multi-space engine may already have vectors for this person
+            res = await multi()
+        except Exception:  # noqa: BLE001 - nothing built yet anywhere: same graceful answer
+            return building
+        if not res.get("recommendations"):
+            return {**building, "engine": "multispace"}
+        return {**res, "engine": "multispace", "note": "taste engine catalog not built yet"}
     try:
         res = await eng.recommend(RecoRequest(user_id, item_type, limit, explore_ratio, mood, surface, include_unavailable, log, at))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    recs = []
+    for s in res.items:
+        d = eng.describe(s, res.profile, res.titles)
+        d["why"] = d.get("reasons", [])
+        recs.append(d)
     body = {
         "user_id": user_id,
         "item_type": item_type,
+        "engine": "taste",
         "request_id": res.request_id,
-        "recommendations": [eng.describe(s, res.profile, res.titles) for s in res.items],
+        "recommendations": recs,
     }
     if res.cold_start:
         body["note"] = "cold-start: no taste profile yet, showing well-rated titles; ask /questions/{user_id}/next"
         body["onboarding_suggested"] = True
     return body
+
+
+# --- music on the taste engine (fallback for /next and /radio) -----------------------------
+
+async def _canon_for(eng: Engine, refs: list[str]) -> list[str]:
+    """'source:id' (real ids, as players know them) -> blind canonical keys, in order."""
+    vault = get_vault()
+    keys = []
+    for r in refs:
+        if ":" not in r:
+            continue
+        source, sid = r.split(":", 1)
+        keys.append(item_key(vault, source, sid))
+    if not keys:
+        return []
+    async with eng.pool.acquire() as conn:
+        rows_ = await conn.fetch("SELECT item_key, canon_key FROM item WHERE item_key = ANY($1::text[])", keys)
+    by = {r["item_key"]: r["canon_key"] for r in rows_}
+    return [by[k] for k in keys if k in by]
+
+
+async def _track_pool(eng: Engine, user_id: str, discovery: float, exclude: set[str]) -> tuple[list[tseq.Track], object]:
+    """Unheard songs the engine likes for this person, plus their favourites (a radio plays those too)."""
+    res = await eng.recommend(RecoRequest(user_id, "track", limit=100, explore_ratio=0.0, surface="radio", log=False))
+    pool = [s for s in res.pool[:300] if s.key not in exclude]
+    top = max((s.score for s in pool), default=1.0) or 1.0
+    tracks = [tseq.Track(s.key, s.vector, s.payload, max(0.0, min(1.0, s.score / top)) * (0.7 + 0.3 * discovery), tseq.artist_of(s.payload))
+              for s in pool]
+    prof = res.profile
+    # Songs score lower than films per listen (muse_taste.signals: a few full listens ~ 0.5), so
+    # anything clearly liked counts as a favourite here.
+    loved = [a for a in (prof.anchors if prof else []) if a.preference > 0.35 and a.key not in exclude][:120]
+    if loved and discovery < 1.0:
+        got: dict = {}
+        await asyncio.to_thread(eng._by_keys, [a.key for a in loved], ["track"], False, got)
+        for a in loved:
+            if a.key in got:
+                vec, pl = got[a.key]
+                taste = (0.6 + 0.4 * min(a.preference, 1.0)) * (1.0 - 0.6 * discovery)
+                tracks.append(tseq.Track(a.key, vec, pl, taste, tseq.artist_of(pl)))
+    return tracks, prof
+
+
+async def _seed_track(eng: Engine, ck: str) -> tseq.Track | None:
+    got: dict = {}
+    await asyncio.to_thread(eng._by_keys, [ck], ["track"], True, got)
+    if ck not in got:
+        return None
+    vec, pl = got[ck]
+    return tseq.Track(ck, vec, pl, 0.5, tseq.artist_of(pl))
+
+
+def _track_json(t: tseq.Track, score: float, parts: dict, prev: tseq.Track, playable: list[str] | None) -> dict | None:
+    refs = t.payload.get("library_refs") or []
+    if playable:
+        refs = [r for r in refs if r.get("source") in playable]
+    if not refs:
+        return None
+    return {"source": refs[0]["source"], "source_item_id": refs[0]["source_item_id"], "canon_key": t.key, "title": t.title,
+            "transition": {"score": round(score, 4), **{k: round(v, 3) for k, v in parts.items()}}, "why": tseq.why(prev, parts)}
+
+
+async def taste_next_up(
+    user_id: str,
+    source: str,
+    source_item_id: str,
+    n: int = 5,
+    history: list[str] | None = None,
+    discovery: float = 0.3,
+    playable_source: list[str] | None = None,
+) -> dict:
+    """What should follow this song, from the taste engine: fits the person's taste and flows
+    from it (closeness of item vectors, artist spacing). /next uses it when the multi-space
+    engine has nothing for the song yet (no audio analysis or behaviour vectors)."""
+    eng = await engine()
+    cur_keys = await _canon_for(eng, [f"{source}:{source_item_id}"])
+    if not cur_keys:
+        raise HTTPException(404, "Muse doesn't know that song yet")
+    cur = await _seed_track(eng, cur_keys[0])
+    if cur is None:
+        raise HTTPException(404, "that song isn't in the catalog yet")
+    exclude = set(await _canon_for(eng, history or [])) | {cur.key}
+    tracks, _ = await _track_pool(eng, user_id, discovery, exclude)
+    hist_artists = [cur.artist]
+    picks = tseq.next_tracks(cur, tracks, n * 3, hist_artists)
+    out = [j for t, s, parts in picks if (j := _track_json(t, s, parts, cur, playable_source))][:n]
+    return {"user_id": user_id, "after": {"canon_key": cur.key, "title": cur.title}, "next": out}
+
+
+async def taste_radio(
+    user_id: str,
+    seed_source: str | None = None,
+    seed_id: str | None = None,
+    length: int = 25,
+    discovery: float = 0.3,
+    playable_source: list[str] | None = None,
+) -> dict:
+    """A listening session from the taste engine (beam search, favourites as radio material);
+    /radio uses it when the multi-space engine has nothing to play yet."""
+    eng = await engine()
+    seed = None
+    if seed_source and seed_id:
+        keys = await _canon_for(eng, [f"{seed_source}:{seed_id}"])
+        seed = await _seed_track(eng, keys[0]) if keys else None
+        if seed is None:
+            raise HTTPException(404, "Muse doesn't know that song yet")
+    tracks, _ = await _track_pool(eng, user_id, discovery, {seed.key} if seed else set())
+    if playable_source:
+        tracks = [t for t in tracks if any(r.get("source") in playable_source for r in t.payload.get("library_refs") or [])]
+    if not tracks:
+        return {"user_id": user_id, "tracks": [], "note": "nothing to play yet"}
+    lead = []
+    if seed is None:
+        seed = max(tracks, key=lambda t: t.taste)
+        tracks = [t for t in tracks if t.key != seed.key]
+        lead = [j for j in [_track_json(seed, seed.taste, {"taste": seed.taste}, seed, playable_source)] if j]
+    session = tseq.radio(seed, tracks, length - len(lead))
+    out, prev = list(lead), seed
+    for t, s, parts in session:
+        j = _track_json(t, s, parts, prev, playable_source)
+        if j:
+            out.append(j)
+        prev = t
+    return {"user_id": user_id, "seed": seed.key, "tracks": out}
 
 
 @app.get("/rows/{user_id}")
@@ -155,6 +350,8 @@ async def home_rows(
     max_rows: int = Query(8, ge=1, le=15),
     at: datetime | None = Query(None, description="ISO time to use as 'now' for rhythms"),
     log: bool = Query(True),
+    max_age: int | None = Query(None, ge=0, le=21, description="kids profiles: only titles rated for this age or younger"),
+    allow_unrated: bool = Query(False),
 ) -> dict:
     """A home screen: themed rows whose titles are their explanations (Top picks, Because you
     watched X, More <interest>, For your weekend evenings, Watch again, From your watchlist,
@@ -163,7 +360,46 @@ async def home_rows(
     eng = await engine()
     if not await asyncio.to_thread(eng.catalog_ready):
         return {"user_id": user_id, "item_type": item_type, "rows": [], "note": "Muse is still building its catalog (first start)"}
-    return await rows.build(eng, user_id, item_type, per_row, max_rows, at, log)
+    res = await rows.build(eng, user_id, item_type, per_row, max_rows, at, log and max_age is None)
+    if max_age is not None:
+        for row in res.get("rows") or []:
+            row["items"] = filter_age(row.get("items") or [], max_age, allow_unrated)
+        res["rows"] = [r for r in res.get("rows") or [] if r["items"]]
+        res["max_age"] = max_age
+    return res
+
+
+@app.get("/prefetch/{user_id}")
+async def prefetch(
+    user_id: str,
+    horizon_hours: int = Query(24, ge=1, le=168),
+    tz: str | None = Query(None, description="IANA time zone of the household, e.g. Europe/Amsterdam"),
+    limit: int = Query(10, ge=1, le=50),
+    max_age: int | None = Query(None, ge=0, le=21),
+) -> dict:
+    """What this person will likely start in the next hours (in-progress titles, the series they
+    follow, a few top picks), each with a likelihood: Vesper promotes these to fast storage and
+    to smart downloads on phones."""
+    zone = prefetch_mod.tzinfo(tz)
+    now = prefetch_mod.now_utc()
+    uid, acts, history = await prefetch_mod.load(await get_pool(), user_id)
+    p_active = prefetch_mod.active_probability(prefetch_mod.slot_rates(acts, zone, now), now, horizon_hours, zone)
+    items = prefetch_mod.rank_items(history, now)
+    if len(items) < limit:
+        try:
+            recs = await _recommend(uid, "movie", limit * 3, 0.0, None, "prefetch", False, False, None, None, None, None, tz,
+                                    None, None, None, True, "taste")
+            for r in filter_age(recs.get("recommendations") or [], max_age)[:3]:
+                if r.get("available") is False:
+                    continue
+                items.append({"source": r["source"], "source_item_id": r["source_item_id"], "item_type": r.get("item_type") or "movie",
+                              "title": r.get("title") or "", "reason": "recommended", "base": 0.25 * float(r.get("confidence") or 0.5)})
+        except Exception:  # noqa: BLE001 - prefetch must not fail on a cold profile or an unbuilt catalog
+            pass
+    for it in items:
+        it["likelihood"] = round(it.pop("base") * max(p_active, 0.15), 4)
+    items.sort(key=lambda x: -x["likelihood"])
+    return {"user_id": uid, "horizon_hours": horizon_hours, "active_probability": round(p_active, 4), "items": items[:limit]}
 
 
 @app.get("/profile/{user_id}")
@@ -315,3 +551,19 @@ async def soon_gone_whitelist(source_item_id: str, user_id: str = Query(...)) ->
     pool = await get_pool()
     whitelisted = await soon_gone_repo.whitelist(pool, source_item_id, user_id)
     return {"source_item_id": source_item_id, "whitelisted": whitelisted}
+
+
+# /next and /radio fall back to the taste engine when the multi-space engine has nothing yet.
+async def _next_fallback(**kw):
+    if not await asyncio.to_thread((await engine()).catalog_ready):
+        return None
+    return await taste_next_up(**kw)
+
+
+async def _radio_fallback(**kw):
+    if not await asyncio.to_thread((await engine()).catalog_ready):
+        return None
+    return await taste_radio(**kw)
+
+
+MS.TASTE_FALLBACK.update(next=_next_fallback, radio=_radio_fallback)

@@ -1,6 +1,6 @@
-# NVIDIA GPU for embeddings (and an optional local LLM). Use with the base file:
+# NVIDIA GPU for embeddings, the audio analyzer (and an optional local LLM). Use with the base file:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml build \
-#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124 embedding-worker curator
+#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124 embedding-worker vector-worker curator audio-analyzer
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 # Needs the NVIDIA Container Toolkit on the host. MUSE_EMBED_DEVICE=auto picks the GPU.
 #
@@ -23,6 +23,13 @@ services:
     <<: *gpu
   curator:
     <<: *gpu
+  vector-worker:
+    <<: *gpu
+  audio-analyzer:
+    <<: *gpu
+    environment:
+      MUSE_DEVICE: cuda
+      MUSE_AUDIO_PER_CYCLE: ${MUSE_AUDIO_PER_CYCLE:-200}
 
   ollama:
     <<: *gpu

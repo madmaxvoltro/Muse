@@ -30,6 +30,7 @@ not itself a fuzzy match.
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -123,6 +124,8 @@ def item_metadata(item: dict) -> dict:
         "official_rating": item.get("OfficialRating"),
         "community_rating": item.get("CommunityRating"),
         "runtime_min": round(item["RunTimeTicks"] / 600_000_000) if item.get("RunTimeTicks") else None,
+        # when it entered the library ("New for you" rows); 7 fractional digits trimmed to 6
+        "added_at": re.sub(r"(\.\d{6})\d+", r"\1", item["DateCreated"]) if item.get("DateCreated") else None,
     }
     if item.get("Type") == "Episode":
         md["series_id"] = item.get("SeriesId")

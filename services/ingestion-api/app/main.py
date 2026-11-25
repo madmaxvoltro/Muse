@@ -14,10 +14,11 @@ may post answers and imports; `import` may post imports and events claiming an i
 
 import json
 import logging
-
-import asyncpg
+import time
 from datetime import datetime, timezone
 from typing import Literal
+
+import asyncpg
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from muse_schema import DEFAULT_ACTION_WEIGHTS, IMPORT_SOURCES, RATED_WEIGHTS, Event, Source
@@ -41,6 +42,26 @@ MAX_IMPORT_BYTES = 512 * 1024 * 1024
 @app.on_event("startup")
 async def _startup() -> None:
     get_vault()  # fail fast without a master key (MUSE_ENCRYPTION=off only for development)
+
+
+_incognito: dict[str, tuple[float, bool]] = {}
+
+
+async def incognito(conn, user_id) -> bool:
+    """Is this person (via any linked id) in incognito mode? Cached for 30 s."""
+    key = str(user_id)
+    hit = _incognito.get(key)
+    if hit and time.monotonic() - hit[0] < 30:
+        return hit[1]
+    try:
+        until = await conn.fetchval(
+            "SELECT o.preferences->>'incognito_until' FROM user_overlay o "
+            "WHERE o.user_id = COALESCE((SELECT user_id FROM user_alias WHERE alias_id = $1), $1)", user_id)
+    except Exception:  # database without migration 007
+        until = None
+    on = bool(until) and datetime.fromisoformat(until) > datetime.now(timezone.utc)
+    _incognito[key] = (time.monotonic(), on)
+    return on
 
 
 @app.on_event("shutdown")
@@ -84,19 +105,25 @@ def _stored_args(e: Event, vault) -> tuple[list, str | None]:
 
 
 async def _insert(events: list[Event]) -> int:
+    """Stores events (encrypted, see muse_schema.storage). Events of a person in incognito mode
+    are dropped, except `cataloged` (library facts, not behaviour). Returns how many were stored."""
     vault = get_vault()
     plain, deduped = [], []
-    for e in events:
-        args, dedupe = _stored_args(e, vault)
-        (deduped if dedupe is not None else plain).append(args + ([dedupe] if dedupe is not None else []))
     pool = await get_pool()
     async with pool.acquire() as conn:
+        for e in events:
+            if e.action.value != "cataloged" and await incognito(conn, e.user_id):
+                continue
+            args, dedupe = _stored_args(e, vault)
+            (deduped if dedupe is not None else plain).append(args + ([dedupe] if dedupe is not None else []))
+        if not plain and not deduped:
+            return 0
         async with conn.transaction():
             if plain:
                 await conn.executemany(INSERT_SQL, plain)
             if deduped:
                 await conn.executemany(INSERT_DEDUPED_SQL, deduped)
-    return len(events)
+    return len(plain) + len(deduped)
 
 
 @app.post("/events", status_code=202)
@@ -110,14 +137,21 @@ async def ingest_event(event: Event, source: str = Depends(require_adapter_key))
     """
     _effective_source(event, source)
     check_rate_limit(source)
-    await _insert([event])
+    if not await _insert([event]):
+        return {"status": "dropped", "reason": "incognito"}
     # No user ids, items or actions in logs: logs are files too.
     logger.debug("ingested 1 event from %s", event.source.value)
     return {"status": "accepted"}
 
 
+class EventBatch(BaseModel):
+    events: list[Event]
+
+
 @app.post("/events/batch", status_code=202)
-async def ingest_batch(events: list[Event], source: str = Depends(require_adapter_key)) -> dict:
+async def ingest_batch(body: list[Event] | EventBatch, source: str = Depends(require_adapter_key)) -> dict:
+    """A JSON list of events, or {"events": [...]} (the form Vesper and Mono send)."""
+    events = body if isinstance(body, list) else body.events
     if len(events) > 1000:
         raise HTTPException(status_code=413, detail="at most 1000 events per batch")
     for e in events:

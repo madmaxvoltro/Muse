@@ -18,12 +18,21 @@ class Source(str, Enum):
     OPENWEBUI = "openwebui"
     NAVIDROME = "navidrome"
     AUDIOBOOKSHELF = "audiobookshelf"
-    MUSE = "muse"  # answers to Muse's own questions (onboarding, this-or-that, abandon reasons)
-    # History imports (see muse_taste.importers): written through the ingestion API by a key
-    # whose source is `import`, which may claim exactly these sources and nothing else.
+    MONO = "mono"  # self-hosted music server (github.com/madmaxvoltro/mono), item_type "track"
+    VESPER = "vesper"  # reserved; Vesper sends video events as "jellyfin" so ids join (docs/vesper.md)
+    # Muse itself: answers to its questions (onboarding, this-or-that, abandon reasons) and
+    # things an assistant told it (query API / MCP)
+    MUSE = "muse"
+    CATALOG = "catalog"  # music that exists outside the library (MusicBrainz/ListenBrainz/Deezer, services/catalog)
+    APP = "app"  # third-party apps writing events with an app token (metadata.app names the app)
+    # History imports: not playable here, but real taste. Written through the ingestion API by a
+    # key whose source is `import` (muse_taste.importers), or by the query API's
+    # /v1/users/{u}/imports; either may claim exactly these sources and nothing else.
     YOUTUBE = "youtube"
     SPOTIFY = "spotify"
     SOUNDCLOUD = "soundcloud"
+    GOODREADS = "goodreads"
+    STORYGRAPH = "storygraph"
     LETTERBOXD = "letterboxd"
     IMDB = "imdb"
     NETFLIX = "netflix"
@@ -31,7 +40,8 @@ class Source(str, Enum):
 
 
 IMPORT_SOURCES: frozenset[str] = frozenset(
-    {Source.YOUTUBE, Source.SPOTIFY, Source.SOUNDCLOUD, Source.LETTERBOXD, Source.IMDB, Source.NETFLIX, Source.TRAKT}
+    {Source.YOUTUBE, Source.SPOTIFY, Source.SOUNDCLOUD, Source.GOODREADS, Source.STORYGRAPH, Source.LETTERBOXD,
+     Source.IMDB, Source.NETFLIX, Source.TRAKT}
 )
 
 
@@ -61,8 +71,11 @@ class Action(str, Enum):
     TRAILER_PLAYED = "trailer_played"
     REQUESTED = "requested"  # asked for a title to be added to the library
     RATED = "rated"  # explicit thumbs (Vesper, via the Jellyfin user rating); metadata.value -1/1/2
+    IMPRESSION = "impression"  # shown in a recommendation row; weight 0, read as fatigue (shown often, never picked)
     CATALOGED = "cataloged"  # item exists in a library, no user signal attached — for backfilling
     # content embeddings from a library the adapter didn't watch the user acquire (see jellyfin adapter).
+    UNFAVORITED = "unfavorited"  # took a favourite back; cancels the favourite's pull on the taste vector
+    ADDED_TO_PLAYLIST = "added_to_playlist"  # deliberate curation, stronger than a single play
     # Elicitation answers (source=muse, see services/ingestion-api /answers):
     CHOSE = "chose"  # picked this item in a this-or-that question
     PASSED_OVER = "passed_over"  # the other side of a this-or-that question
@@ -87,11 +100,14 @@ DEFAULT_ACTION_WEIGHTS: dict[Action, float] = {
     Action.TRAILER_PLAYED: 0.15,
     Action.REQUESTED: 0.6,
     Action.RATED: 1.0,  # adapters set the real weight from metadata.value, see RATED_WEIGHTS
+    Action.UNFAVORITED: -1.5,  # exactly undoes FAVORITED in the taste vector's weighted sum
+    Action.ADDED_TO_PLAYLIST: 0.8,
     Action.CHOSE: 0.5,
     Action.PASSED_OVER: -0.1,  # relative, not a dislike: the other option was merely preferred
     Action.ABANDON_REASON: 0.0,  # interpreted by muse_taste.signals from metadata.reason
     Action.INTEREST_FEEDBACK: 0.0,  # interpreted by muse_taste.evolution, never a per-title signal
     Action.REASON_FEEDBACK: 0.0,  # interpreted by muse_taste.signals.feedback_overrides
+    Action.IMPRESSION: 0.0,  # never part of taste; fatigue only
     Action.CATALOGED: 0.0,  # deliberately zero: skipped by the embedding worker's taste-vector
     # calc (see services/embedding-worker/worker.py decay_weight/recompute_taste_vectors), but
     # still lets the item get a content embedding so it's a valid recommendation candidate.

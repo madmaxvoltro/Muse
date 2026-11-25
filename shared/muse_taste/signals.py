@@ -157,6 +157,7 @@ def _aggregate_item(key: str, evs: list[SignalEvent], now: datetime) -> ItemSign
     rating_ts: datetime | None = None
     rejected = False
     favorited = False
+    playlisted = 0
     removed = False
     completions_days: set[str] = set()
     completed_eps: set[str] = set()
@@ -180,6 +181,10 @@ def _aggregate_item(key: str, evs: list[SignalEvent], now: datetime) -> ItemSign
             rejected = True
         elif a == "favorited":
             favorited = True
+        elif a == "unfavorited":  # a later unlike takes the favourite back
+            favorited = False
+        elif a == "added_to_playlist":
+            playlisted += 1
         elif a == "removed":
             removed = True
         elif a == "completed":
@@ -315,6 +320,13 @@ def _aggregate_item(key: str, evs: list[SignalEvent], now: datetime) -> ItemSign
                 sig.in_progress = max_progress < COMPLETE_PROGRESS
                 sig.seen = max_progress >= 50.0
                 sig.evidence.append(f"in progress ({max_progress:.0f}%)")
+
+    if playlisted:
+        # Putting a song (or film) in a playlist is curation: close to a favourite.
+        pref += 0.8 * min(1.0, 0.6 + 0.2 * playlisted)
+        conf += 1.0 + 0.3 * min(playlisted, 4)
+        sig.evidence.append("in your playlists" if playlisted > 1 else "added to a playlist")
+        sig.seen = True
 
     if chose or passed:
         pref += 0.5 * chose - 0.12 * passed

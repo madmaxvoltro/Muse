@@ -39,6 +39,9 @@ def test_answers_imports_and_source_rules(db_dsn, monkeypatch):
             spoof = await c.post("/events", headers={"X-Muse-Api-Key": "jk"}, json={"user_id": USER, "source": "netflix", "item_type": "movie", "action": "played", "source_item_id": "x"})
             bad_import = await c.post("/events", headers={"X-Muse-Api-Key": "ik"}, json={"user_id": USER, "source": "jellyfin", "item_type": "movie", "action": "played", "source_item_id": "x"})
             batch = await c.post("/events/batch", headers={"X-Muse-Api-Key": "ik"}, json=[{"user_id": USER, "source": "spotify", "item_type": "track", "action": "played", "source_item_id": f"t{i}", "metadata": {"title": "s", "artist": "a"}} for i in range(5)])
+            # the {"events": [...]} form Vesper and Mono send
+            wrapped = await c.post("/events/batch", headers={"X-Muse-Api-Key": "jk"}, json={"events": [{"user_id": USER, "source": "jellyfin", "item_type": "movie", "action": "impression", "source_item_id": "v1"}]})
+            assert wrapped.status_code == 202 and wrapped.json()["count"] == 1, wrapped.text
         await main.close_pool()
         conn = await asyncpg.connect(db_dsn)
         rows = await conn.fetch("SELECT source, action, action_weight, metadata FROM event ORDER BY ingested_at")
@@ -62,5 +65,5 @@ def test_answers_imports_and_source_rules(db_dsn, monkeypatch):
     assert all(get_vault().open_json(r["metadata"], P_EVENT_METADATA)["canon_key"].startswith("tmdb:") for r in by_source["muse"])
     assert all("_enc" in json.loads(r["metadata"]) for r in rows)  # metadata sealed at rest
     assert not any("Arrival" in r["metadata"] or "boxd.it" in r["metadata"] for r in rows)
-    assert "netflix" not in by_source and len(by_source["jellyfin"]) == 1  # server-side source wins
+    assert "netflix" not in by_source and len(by_source["jellyfin"]) == 2  # server-side source wins (+ the wrapped batch)
     assert len(by_source["spotify"]) == 5

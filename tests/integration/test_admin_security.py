@@ -16,7 +16,8 @@ from fixtures import USER_A, FakeTMDB, seed
 sys.path.insert(0, str(ROOT / "services" / "admin"))
 sys.path.insert(0, str(ROOT / "services" / "embedding-worker"))
 
-PASSWORDS = {r: f"pw-{r}-{uuid.uuid4().hex[:8]}" for r in ("muse_ingest", "muse_reco", "muse_worker", "muse_curator")}
+PASSWORDS = {r: f"pw-{r}-{uuid.uuid4().hex[:8]}" for r in ("muse_ingest", "muse_reco", "muse_worker", "muse_curator",
+                                                       "muse_vector", "muse_query", "muse_catalog", "muse_audio", "muse_scheduler")}
 
 
 def _role_dsn(dsn: str, role: str) -> str:
@@ -65,7 +66,12 @@ def test_migrate_roles_and_least_privilege(admin_env):
         for role, sql in (("muse_ingest", "SELECT * FROM taste_profile"), ("muse_ingest", "SELECT * FROM item"),
                           ("muse_reco", "DELETE FROM event"), ("muse_reco", "UPDATE taste_profile SET profile = '{}'"),
                           ("muse_curator", "INSERT INTO event (user_id, source, item_type, action) VALUES (gen_random_uuid(), 'x', 'movie', 'played')"),
-                          ("muse_worker", "DROP TABLE event"), ("muse_worker", "CREATE TABLE x (a int)")):
+                          ("muse_worker", "DROP TABLE event"), ("muse_worker", "CREATE TABLE x (a int)"),
+                          # the multi-space services
+                          ("muse_audio", "SELECT * FROM profile_fact"), ("muse_catalog", "DELETE FROM event"),
+                          ("muse_query", "UPDATE taste_profile SET profile = '{}'"),
+                          ("muse_vector", "INSERT INTO event (user_id, source, item_type, action) VALUES (gen_random_uuid(), 'x', 'movie', 'played')"),
+                          ("muse_scheduler", "SELECT * FROM api_token")):
             c = await asyncpg.connect(role_dsn(role))
             try:
                 await c.execute(sql)
@@ -78,7 +84,7 @@ def test_migrate_roles_and_least_privilege(admin_env):
         return out
 
     out = asyncio.run(go())
-    assert "010_operations.sql" in out["res"]["applied"]
+    assert "014_operations.sql" in out["res"]["applied"]
     assert set(out["res"]["roles"]) == set(PASSWORDS)
     assert out["again"]["applied"] == []
     assert out["report"]["profiles"] >= 1  # the whole worker cycle ran with least privilege

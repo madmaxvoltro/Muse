@@ -51,6 +51,7 @@ ROLES: dict[str, list[str]] = {
         "GRANT INSERT ON event TO {r}",
         "GRANT SELECT (user_id, source, metadata) ON event TO {r}",  # idempotent inserts
         "GRANT SELECT, UPDATE ON question_log TO {r}",
+        "GRANT SELECT ON user_overlay, user_alias TO {r}",  # incognito mode, linked identities
     ],
     "muse_reco": [
         "GRANT SELECT ON event, item, canon_item, taste_profile, user_overlay, ranker_model, question_log, soon_gone, embedding_worker_state, schema_migrations TO {r}",
@@ -60,6 +61,10 @@ ROLES: dict[str, list[str]] = {
         "GRANT INSERT, UPDATE ON question_log TO {r}",
         "GRANT UPDATE ON soon_gone TO {r}",
         "GRANT INSERT ON event TO {r}",  # Soon Gone whitelist writes a favourite
+        # multi-space engine (routes_multispace.py): people, facts, context, groups, sound
+        "GRANT SELECT ON user_alias, muse_user, profile_fact, context_signal, room_presence, person_ref, goal, group_session, group_pick, "
+        "item_audio, item_transition, taste_model, taste_facet, engine_ranker_model TO {r}",
+        "GRANT SELECT, INSERT ON engine_impression TO {r}",
     ],
     "muse_worker": [
         "GRANT SELECT ON event, impression, user_overlay TO {r}",
@@ -67,8 +72,41 @@ ROLES: dict[str, list[str]] = {
         "GRANT USAGE ON SEQUENCE ranker_model_id_seq TO {r}",
     ],
     "muse_curator": [
-        "GRANT SELECT ON event, item, taste_profile, user_overlay TO {r}",
+        "GRANT SELECT ON event, item, taste_profile, user_overlay, user_alias TO {r}",
         "GRANT SELECT, INSERT, UPDATE ON curator_managed_item, curator_download_log, soon_gone TO {r}",
+    ],
+    # The multi-space engine's own services.
+    "muse_vector": [  # services/embedding-worker/vector_worker.py: content/taste vectors, deep taste, learned ranker
+        "GRANT SELECT ON event, profile_fact, user_alias, item_audio, user_overlay TO {r}",
+        "GRANT SELECT, UPDATE ON vector_worker_state TO {r}",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON taste_dirty, taste_facet, taste_model, engine_ranker_model TO {r}",
+        "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON item_transition TO {r}",
+        "GRANT SELECT, UPDATE ON engine_impression TO {r}",
+        "GRANT USAGE ON SEQUENCE engine_ranker_model_id_seq TO {r}",
+    ],
+    "muse_query": [  # services/query-api: people, facts, questions, tokens, imports, privacy tools
+        "GRANT SELECT, INSERT, DELETE ON event TO {r}",  # ratings/answers/imports; forget-history
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON access_log, api_token, calendar_feed, context_signal, feature_suggestion, goal, group_pick, "
+        "group_session, import_job, link_code, muse_user, notification_log, person_ref, profile_fact, question, retention_policy, room_presence, "
+        "taste_dirty, user_alias, user_overlay, wanted, webhook, webhook_delivery TO {r}",
+        "GRANT SELECT, DELETE ON engine_impression TO {r}",
+        "GRANT SELECT ON taste_facet, taste_model, catalog_artist, catalog_release, item_audio TO {r}",
+        "GRANT USAGE ON SEQUENCE access_log_id_seq TO {r}",
+    ],
+    "muse_catalog": [  # services/catalog: music beyond the library, new releases, the wanted list
+        "GRANT SELECT, INSERT ON event TO {r}",
+        "GRANT SELECT ON user_alias, webhook TO {r}",
+        "GRANT SELECT, INSERT, UPDATE ON catalog_artist, catalog_name, catalog_release, wanted, item_audio, notification_log, webhook_delivery TO {r}",
+    ],
+    "muse_audio": [  # services/audio-analyzer
+        "GRANT SELECT ON event TO {r}",
+        "GRANT SELECT, INSERT, UPDATE ON item_audio TO {r}",
+    ],
+    "muse_scheduler": [  # services/scheduler: weather, calendars, webhooks, digest, goals, retention
+        "GRANT SELECT, DELETE ON event, engine_impression, access_log TO {r}",
+        "GRANT SELECT ON question, retention_policy, user_alias, wanted TO {r}",
+        "GRANT SELECT, UPDATE ON calendar_feed, goal, webhook TO {r}",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON context_signal, webhook_delivery, notification_log TO {r}",
     ],
 }
 

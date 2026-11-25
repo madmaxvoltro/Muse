@@ -125,3 +125,39 @@ Jellyfin and TMDB, and explains each problem. Common ones:
 * **503 "no read keys configured"**: `secrets/read_keys` is empty. Run `./muse setup` again.
 * **Upgrading from an install before encryption**: `./muse upgrade` encrypts existing rows
   automatically (the admin step) and rebuilds derived data; nothing to do by hand.
+
+## Music, Mono and AI assistants
+
+The query API, the vector worker and the scheduler start with the rest. Two more parts are
+behind the `music` profile (add it to `COMPOSE_PROFILES` in `.env`):
+
+- `catalog` reaches musicbrainz.org, api.listenbrainz.org, labs.api.listenbrainz.org and
+  api.deezer.com for music beyond your library and new releases of loved artists. Leave the
+  profile off to keep taste entirely in the house.
+- `audio-analyzer` listens to music (tempo, key, energy, and an audio model for how it sounds).
+  It downloads its model (~600 MB) on first start. Set `MUSE_MONO_URL` so it can stream Mono's
+  files, and put the value of `secrets/mono_stream_token` in Mono as `MONO_MUSE_STREAM_TOKEN`.
+  CPU by default; with an NVIDIA GPU use `docker-compose.gpu.yml`.
+
+**Mono** talks to Muse directly. In Mono's environment set:
+
+```bash
+MONO_MUSE_INGEST_URL=http://<muse>:8771     # events
+MONO_MUSE_REC_URL=http://<muse>:8770        # recommendations, radio, next-track
+MONO_MUSE_QUERY_URL=http://<muse>:8772      # the Muse screen: questions, facts, linked accounts, tokens
+MONO_MUSE_API_KEY=<the mono: key in secrets/adapter_keys>
+MONO_MUSE_READ_KEY=<the query: key in secrets/read_keys, or a key of its own added there>
+```
+
+**AI assistants** (Claude Desktop, Claude Code, any MCP client): start the MCP server with the
+`mcp` profile, then mint a personal token per person (`POST /v1/tokens` with
+`secrets/admin_token`, or from Mono's Settings, Muse, "Connect an AI assistant"). See
+[`services/mcp-server/README.md`](../services/mcp-server/README.md).
+
+**Vesper** uses the recommendation API with a read key from `secrets/read_keys` (`vesper:`), the
+ingestion API with the `jellyfin:` key, and the query API with that same key plus `X-Muse-User`
+for linking profiles and watching together; see
+[`vesper.md`](vesper.md).
+
+`./muse setup` creates every secret these parts need, also on an install that predates them
+(existing secrets are never replaced; the `mono:` and `query:` keys are added to the key lists).

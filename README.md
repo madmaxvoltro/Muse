@@ -43,8 +43,21 @@ actually drives what gets suggested and, optionally, what gets downloaded.
 - **Autonomous discovery/curator**: optionally lets Muse manage a fixed storage budget
   (add *and* remove content) against Radarr/Sonarr, with a "Soon Gone" 48h grace window and
   whitelist-by-watching so nothing you actually want gets silently deleted.
-- **Multi-user**: auto-imports Jellyfin users as profiles, with privacy-safe identity resolution
-  across your other self-hosted accounts.
+- **Multi-user**: auto-imports Jellyfin users as profiles; one person's accounts on different
+  services (Jellyfin, Mono, ...) are linked explicitly with single-use codes into one profile.
+- **Understands taste, not just tags**: listens to the music itself (tempo, key, energy, and an
+  audio model for how it *sounds*), learns from what is played together, finds the distinct sides
+  of someone's taste, and learns what they pick within a style.
+- **Music beyond the library**: a catalog from MusicBrainz / ListenBrainz / Deezer, new releases
+  of loved artists, and a wanted list for a download tool (API, webhooks, Lidarr-style list).
+- **Flow**: next-track and radio that fit the person *and* the previous song (harmonic mixing,
+  tempo, energy arcs).
+- **The moment and the room**: moods (presets or free text), activity, device and time of day,
+  weather, calendars, Home Assistant presence; group picks for any number of concurrent groups,
+  fair to everyone.
+- **Teachable, and assistant-ready**: a query API (search, profile, recommendations incl.
+  "use my music taste for films") and an MCP server let an AI assistant know your taste, ask the
+  questions Muse has about you, and tell Muse what it learns — which then shapes recommendations.
 
 Full design rationale: [`docs/architecture.md`](docs/architecture.md).
 
@@ -57,7 +70,16 @@ taste engine (`shared/muse_taste`, see `docs/recommender.md`), recommendation AP
 services; a full `up` wasn't completed in the dev sandbox (Docker Hub rate-limited image
 pulls there) — verify on your actual host. The Jellyfin plugin (C#/.NET) is written but not
 yet compiled/tested against a real Jellyfin instance. Still not started: Open WebUI,
-Navidrome, and Audiobookshelf adapters. See `docs/architecture.md` for the full design, and
+Navidrome, and Audiobookshelf adapters.
+
+Added since (see `docs/api/README.md` for everything as API): the catalog, audio analyzer,
+deep taste (facets, sound, behaviour, preference models), the new engine with next/radio/groups,
+context and moods, goals, imports, exports and privacy controls, webhooks and a weekly digest,
+Navidrome and Audiobookshelf adapters, a learned ranker. A data-security audit is in
+`docs/security-audit.md`. Earlier: Mono as a music source (see `docs/adapters/mono.md`), linked identities, facts and
+questions that feed the taste vector, the query API (`services/query-api`) and the MCP server
+(`services/mcp-server`). These are covered by an end-to-end test suite (`tests/`, runs the
+embedding worker, recommendation API, query API and MCP server against a real Postgres). See `docs/architecture.md` for the full design, and
 the `README.md` in each `services/*`/`adapters/*`/`jellyfin-plugin/` directory for
 per-component status and known gaps.
 
@@ -69,13 +91,19 @@ shared/muse_taste/      the taste engine: signals, profiles, retrieval, ranking,
 db/migrations/           Postgres/TimescaleDB schema
 services/ingestion-api/  write-only endpoint all adapters POST events to
 services/recommendation-api/  the 3-stage recommendation funnel
-services/embedding-worker/    content + taste embedding computation
+services/embedding-worker/    the taste engine's worker (catalog, profiles, questions) and the vector worker
+                              (content/taste vectors, deep taste, learned ranker for the multi-space engine)
+services/query-api/           the API for apps and assistants (search, profile, teach, context, groups, data)
+services/mcp-server/          MCP server for AI assistants (query API tools + the taste engine's questions and profile)
+services/catalog/             music beyond the library: public databases, new releases, wanted list
+services/audio-analyzer/      listens to music: features + CLAP embeddings (CPU or GPU)
+services/scheduler/           weather, calendars, webhooks, digest, goals, retention
 services/curator/             autonomous storage-budget manager
-services/mcp-server/          optional MCP server: questions, answers, recommendations, profile, evolution
 adapters/                one subdirectory per source, each a small standalone service (+ importer CLI)
 tests/                   engine unit tests + integration tests (Postgres, in-memory Qdrant)
 jellyfin-plugin/          C#/.NET plugin, IHomeScreenSection-scoped
-docs/                     architecture.md + recommender.md + installation.md + one guide per adapter
+docs/                     architecture.md, recommender.md, installation.md, vesper.md (clients), api/ (API guide +
+                          OpenAPI), security-audit.md, one guide per adapter
 services/admin/           migrations, database roles, status, backups, forget/export, key rotation
 muse                      the setup and operations tool (./muse setup, status, doctor, backup...)
 SECURITY.md               what is encrypted, how access is limited, and what isn't covered

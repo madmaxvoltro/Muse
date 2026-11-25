@@ -4,14 +4,16 @@ Protects against a misbehaving/compromised adapter flooding the event store. His
 are bulk by nature and get a much larger budget (they're user-initiated uploads).
 """
 
+import os
 import time
 from collections import defaultdict
 
 from fastapi import HTTPException
 
 _WINDOW_SECONDS = 60
-_MAX_EVENTS_PER_WINDOW = 300
-_LIMITS = {"import": 200_000, "muse": 2_000}
+_MAX_EVENTS_PER_WINDOW = int(os.environ.get("MUSE_RATE_LIMIT_PER_MINUTE", "300"))
+# Vesper reports progress, impressions and co-viewing through the jellyfin source in batches.
+_LIMITS = {"import": 200_000, "muse": 2_000, "jellyfin": max(_MAX_EVENTS_PER_WINDOW, 1_200)}
 
 _hits: dict[str, list[tuple[float, int]]] = defaultdict(list)
 

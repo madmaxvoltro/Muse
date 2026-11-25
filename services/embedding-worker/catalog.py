@@ -27,7 +27,9 @@ logger = logging.getLogger("muse.worker.catalog")
 
 # Keys that describe one event, not the item: never merged into item metadata.
 EVENT_ONLY_KEYS = {"dedupe_key", "value", "via", "reason", "question_id", "imported", "query_id", "canon_key", "response", "members", "subkind"}
-LIBRARY_SOURCES = {"jellyfin"}
+# Sources whose items are playable in the household's own libraries (Jellyfin for video,
+# Mono and Navidrome for music, Audiobookshelf for books).
+LIBRARY_SOURCES = {"jellyfin", "mono", "navidrome", "audiobookshelf"}
 
 
 def _clean(md: dict | None) -> dict:
@@ -224,6 +226,7 @@ async def rebuild_canon(conn: asyncpg.Connection, model_name: str, limit: int = 
             "vote_average": _f((enrichment or {}).get("vote_average") or md.get("vote_average") or md.get("community_rating")),
             "vote_count": _f((enrichment or {}).get("vote_count") or md.get("vote_count")),
             "popularity": _f((enrichment or {}).get("popularity") or md.get("popularity")),
+            "certification": f.get("certification"),  # kids profiles (max_age) filter on it
             "library_refs": [{"source": r["source"], "source_item_id": r["metadata"].get("_sid")} for r in avail if r["metadata"].get("_sid")],
             "document": doc,
         }

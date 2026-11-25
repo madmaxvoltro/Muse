@@ -51,6 +51,10 @@ SECRET_FILES = [
     "qdrant_api_key", "qdrant_read_key", "adapter_keys", "adapter_key_jellyfin", "adapter_key_arr", "adapter_key_searxng",
     "read_keys", "status_token", "mcp_read_key", "mcp_answer_key", "tmdb_api_key", "jellyfin_api_key",
     "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key",
+    # multi-space engine services: query API, vector worker, catalog, audio analyzer, scheduler
+    "db_muse_query", "db_muse_vector", "db_muse_catalog", "db_muse_audio", "db_muse_scheduler",
+    "admin_token", "adapter_key_mono", "query_read_key", "mono_stream_token",
+    "adapter_key_navidrome", "adapter_key_audiobookshelf", "navidrome_password", "navidrome_users", "audiobookshelf_token",
 ]
 
 
@@ -138,6 +142,17 @@ def first_key(name: str, client: str) -> str:
     return ""
 
 
+def ensure_key(name: str, client: str) -> str:
+    """Add a `client:<token>` line to a key list (adapter_keys, read_keys) if it has none, so
+    installs from before a client existed (e.g. Mono) pick it up without a fresh setup."""
+    have = first_key(name, client)
+    if have or not (SECRETS / name).exists():
+        return have
+    tok = _token()
+    _write_secret(name, read_secret(name) + f"\n{client}:{tok}\n", overwrite=True)
+    return tok
+
+
 # ---- secrets ------------------------------------------------------------------------------
 
 def _token() -> str:
@@ -185,26 +200,55 @@ def ensure_secrets(provided: dict[str, str]) -> list[str]:
         "adapter_key_jellyfin": _token(),
         "adapter_key_arr": _token(),
         "adapter_key_searxng": _token(),
+        "adapter_key_navidrome": _token(),
+        "adapter_key_audiobookshelf": _token(),
         "status_token": _token(),
         "mcp_read_key": _token(),
         "mcp_answer_key": _token(),
+        "db_muse_query": _token(),
+        "db_muse_vector": _token(),
+        "db_muse_catalog": _token(),
+        "db_muse_audio": _token(),
+        "db_muse_scheduler": _token(),
+        "admin_token": _token(),  # household admin for the query API (and household MCP tokens)
+        "adapter_key_mono": _token(),  # Mono's key: events to the ingestion API, its user's calls to the query API
+        "query_read_key": _token(),  # the query API, catalog and scheduler reading recommendations
+        "mono_stream_token": _token(),  # same value as MONO_MUSE_STREAM_TOKEN in Mono: lets the audio analyzer listen
     }
     for name, value in gen.items():
         if _write_secret(name, value):
             created.append(name)
-    for name in ("tmdb_api_key", "jellyfin_api_key", "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key"):
+    for name in ("tmdb_api_key", "jellyfin_api_key", "radarr_api_key", "sonarr_api_key", "embed_api_key", "llm_api_key",
+                 "navidrome_password", "navidrome_users", "audiobookshelf_token"):
         if name in provided:
             _write_secret(name, provided[name], overwrite=True)
         elif not (SECRETS / name).exists():
             _write_secret(name, "")
     if not (SECRETS / "adapter_keys").exists():
         keys = (f"jellyfin:{read_secret('adapter_key_jellyfin')}\narr:{read_secret('adapter_key_arr')}\n"
-                f"searxng:{read_secret('adapter_key_searxng')}\nmuse:{_token()}\nmuse:{read_secret('mcp_answer_key')}\nimport:{_token()}\n")
+                f"searxng:{read_secret('adapter_key_searxng')}\nmuse:{_token()}\nmuse:{read_secret('mcp_answer_key')}\nimport:{_token()}\n"
+                f"mono:{read_secret('adapter_key_mono')}\nnavidrome:{read_secret('adapter_key_navidrome')}\n"
+                f"audiobookshelf:{read_secret('adapter_key_audiobookshelf')}\n")
         _write_secret("adapter_keys", keys)
         created.append("adapter_keys")
+    else:
+        # Installs from before Mono / Navidrome / Audiobookshelf: add their lines once.
+        for src, val in (("mono", read_secret("adapter_key_mono")), ("navidrome", read_secret("adapter_key_navidrome")),
+                         ("audiobookshelf", read_secret("adapter_key_audiobookshelf"))):
+            if not first_key("adapter_keys", src):
+                _write_secret("adapter_keys", read_secret("adapter_keys") + f"\n{src}:{val or _token()}\n", overwrite=True)
+    if (SECRETS / "read_keys").exists():
+        ensure_key("read_keys", "mono")
     if not (SECRETS / "read_keys").exists():
-        _write_secret("read_keys", f"vesper:{_token()}\njellyfin-plugin:{_token()}\nmcp:{read_secret('mcp_read_key')}\n")
+        _write_secret("read_keys", f"vesper:{_token()}\njellyfin-plugin:{_token()}\nmcp:{read_secret('mcp_read_key')}\nmono:{_token()}\n")
         created.append("read_keys")
+    # Installs from before the multi-space services: add their entries to the existing key lists.
+    for name, prefix, line in (("adapter_keys", "mono:", f"mono:{read_secret('adapter_key_mono')}"),
+                               ("read_keys", "query:", f"query:{read_secret('query_read_key')}")):
+        text = (SECRETS / name).read_text()
+        if not any(l.startswith(prefix) for l in text.splitlines()):
+            _write_secret(name, text.rstrip("\n") + f"\n{line}\n", overwrite=True)
+            created.append(f"{name} ({prefix.rstrip(':')})")
     if not (SECRETS / "qdrant.yaml").exists():
         _write_secret("qdrant.yaml", (
             "service:\n"
@@ -518,6 +562,7 @@ def summary(mode: str, tls_host: str) -> None:
     print(f"    Vesper               read key: {first_key('read_keys', 'vesper')}")
     print(f"                         answer key: {first_key('adapter_keys', 'muse')}")
     print(f"    Jellyfin plugin      read key: {first_key('read_keys', 'jellyfin-plugin')}")
+    print(f"    Mono                 MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"    Status page          {reco}/status?token={read_secret('status_token')}")
     if mode in ("lan", "tailscale"):
         print("    TLS                  clients must trust Muse's certificate: ./muse ca > muse-ca.crt")
@@ -535,6 +580,7 @@ def need_setup() -> None:
 
 def cmd_up(a) -> None:
     need_setup()
+    ensure_secrets({})  # secrets added by newer versions (idempotent)
     compose("up", "-d", "--build")
     wait_healthy()
 
@@ -610,7 +656,7 @@ def cmd_doctor(a) -> None:
     if r.returncode == 0:
         st = json.loads(r.stdout.decode())
         mig = st.get("migrations") or []
-        (ok if "010_operations.sql" in mig else bad)(f"{len(mig)} migrations applied")
+        (ok if "014_operations.sql" in mig else bad)(f"{len(mig)} migrations applied")
         last = st["worker"].get("last_cycle_at")
         (ok if last else warn)(f"worker last cycle: {last or 'not yet (first cycles download the model; give it a few minutes)'}")
         cat = st["catalog"]
@@ -638,6 +684,7 @@ def cmd_upgrade(a) -> None:
     need_setup()
     if (ROOT / ".git").exists():
         subprocess.run(["git", "pull", "--ff-only"], cwd=ROOT, check=True)
+    ensure_secrets({})
     compose("build", "--pull")
     compose("up", "-d")
     wait_healthy()
@@ -649,6 +696,7 @@ def cmd_keys(a) -> None:
     print(f"Vesper answer key        {first_key('adapter_keys', 'muse')}")
     print(f"Jellyfin plugin read key {first_key('read_keys', 'jellyfin-plugin')}")
     print(f"History import key       {first_key('adapter_keys', 'import')}")
+    print(f"Mono                     MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"MCP server               read: {read_secret('mcp_read_key')}  answer: {read_secret('mcp_answer_key')}")
     print(f"Status token             {read_secret('status_token')}")
 

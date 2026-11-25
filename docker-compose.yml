@@ -99,9 +99,15 @@ services:
       MUSE_DB_PASSWORD_MUSE_RECO_FILE: /run/secrets/db_muse_reco
       MUSE_DB_PASSWORD_MUSE_WORKER_FILE: /run/secrets/db_muse_worker
       MUSE_DB_PASSWORD_MUSE_CURATOR_FILE: /run/secrets/db_muse_curator
+      MUSE_DB_PASSWORD_MUSE_QUERY_FILE: /run/secrets/db_muse_query
+      MUSE_DB_PASSWORD_MUSE_VECTOR_FILE: /run/secrets/db_muse_vector
+      MUSE_DB_PASSWORD_MUSE_CATALOG_FILE: /run/secrets/db_muse_catalog
+      MUSE_DB_PASSWORD_MUSE_AUDIO_FILE: /run/secrets/db_muse_audio
+      MUSE_DB_PASSWORD_MUSE_SCHEDULER_FILE: /run/secrets/db_muse_scheduler
       MUSE_QDRANT_URL: http://qdrant:6333
       MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
-    secrets: [muse_master_key, postgres_password, db_muse_ingest, db_muse_reco, db_muse_worker, db_muse_curator, qdrant_api_key]
+    secrets: [muse_master_key, postgres_password, db_muse_ingest, db_muse_reco, db_muse_worker, db_muse_curator,
+              db_muse_query, db_muse_vector, db_muse_catalog, db_muse_audio, db_muse_scheduler, qdrant_api_key]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [data]
@@ -135,6 +141,7 @@ services:
       MUSE_STATUS_TOKEN_FILE: /run/secrets/status_token
       MUSE_QDRANT_URL: http://qdrant:6333
       MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_read_key  # read-only
+      MUSE_EMBED_URL: http://vector-worker:8003  # same model as content_items, for search by meaning and moods
     secrets: [muse_master_key, db_muse_reco, read_keys, status_token, qdrant_read_key, embed_api_key]
     ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_RECO_PORT:-8770}:8001"]
     healthcheck:
@@ -162,6 +169,108 @@ services:
     depends_on:
       admin: {condition: service_completed_successfully}
     networks: [data, egress]
+
+  # The multi-space engine's worker: content, taste and context vectors (all-MiniLM, 384 dims),
+  # deep taste (facets, sound and behaviour), the learned ranker. Feeds music lists, radio,
+  # next-track, group picks, search and the Vesper rows.
+  vector-worker:
+    <<: *hardening
+    build: {context: ., dockerfile: services/embedding-worker/Dockerfile}
+    command: ["python", "vector_worker.py"]
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse_vector
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_vector
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      MUSE_EMBED_PORT: "8003"  # /embed for the recommendation API's search by meaning and moods
+    secrets: [muse_master_key, db_muse_vector, qdrant_api_key]
+    volumes: [hf_cache:/cache/hf]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, egress]
+
+  # Query API: people, linked accounts, facts, questions, tokens (AI assistants via MCP),
+  # history imports, privacy tools, search. Mono's Muse screen talks to it.
+  query-api:
+    <<: *hardening
+    build: {context: ., dockerfile: services/query-api/Dockerfile}
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse_query
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_query
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_read_key
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY_FILE: /run/secrets/query_read_key
+      MUSE_ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      MUSE_ADAPTER_KEYS_FILE: /run/secrets/adapter_keys
+      MUSE_AUDIO_URL: http://audio-analyzer:8004
+      MUSE_OUTBOUND_ALLOW_PRIVATE: ${MUSE_OUTBOUND_ALLOW_PRIVATE:-}
+    secrets: [muse_master_key, db_muse_query, qdrant_read_key, query_read_key, admin_token, adapter_keys]
+    volumes: [hf_cache:/cache/hf]
+    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_QUERY_PORT:-8772}:8002"]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, public, egress]
+
+  # Music beyond the library: MusicBrainz / ListenBrainz / Deezer, new releases, wanted list.
+  catalog:
+    <<: *hardening
+    build: {context: ., dockerfile: services/catalog/Dockerfile}
+    profiles: [music]
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse_catalog
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_catalog
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY_FILE: /run/secrets/query_read_key
+    secrets: [muse_master_key, db_muse_catalog, query_read_key]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, public, egress]
+
+  # Listens to music: tempo, key, energy... and CLAP embeddings (what it sounds like).
+  audio-analyzer:
+    <<: *hardening
+    build: {context: ., dockerfile: services/audio-analyzer/Dockerfile}
+    profiles: [music]
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse_audio
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_audio
+      MUSE_QDRANT_URL: http://qdrant:6333
+      MUSE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      MUSE_MONO_URL: ${MUSE_MONO_URL:-}
+      MUSE_MONO_STREAM_TOKEN_FILE: /run/secrets/mono_stream_token
+      MUSE_NAVIDROME_URL: ${NAVIDROME_URL:-}
+      MUSE_NAVIDROME_USER: ${NAVIDROME_USER:-}
+      MUSE_NAVIDROME_PASSWORD_FILE: /run/secrets/navidrome_password
+      MUSE_DEVICE: ${MUSE_DEVICE:-cpu}
+      MUSE_AUDIO_PER_CYCLE: ${MUSE_AUDIO_PER_CYCLE:-20}
+      MUSE_AUDIO_THREADS: ${MUSE_AUDIO_THREADS:-0}
+    secrets: [muse_master_key, db_muse_audio, qdrant_api_key, mono_stream_token, navidrome_password]
+    volumes: [hf_cache:/cache/hf]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, egress]
+
+  # Weather (Open-Meteo), calendars (ICS), webhook delivery, weekly digest, goals, retention.
+  scheduler:
+    <<: *hardening
+    build: {context: ., dockerfile: services/scheduler/Dockerfile}
+    environment:
+      <<: *db
+      MUSE_DB_USER: muse_scheduler
+      MUSE_DB_PASSWORD_FILE: /run/secrets/db_muse_scheduler
+      MUSE_REC_URL: http://recommendation-api:8001
+      MUSE_REC_READ_KEY_FILE: /run/secrets/query_read_key
+      MUSE_WEATHER_LAT: ${MUSE_WEATHER_LAT:-}
+      MUSE_WEATHER_LON: ${MUSE_WEATHER_LON:-}
+    secrets: [muse_master_key, db_muse_scheduler, query_read_key]
+    depends_on:
+      admin: {condition: service_completed_successfully}
+    networks: [data, public, egress]
 
   curator:
     <<: *hardening
@@ -205,6 +314,37 @@ services:
       ingestion-api: {condition: service_healthy}
     networks: [edge, egress]
 
+  # Optional music/book sources: ./muse up --profile navidrome / --profile audiobookshelf
+  navidrome-adapter:
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/navidrome/Dockerfile}
+    profiles: [navidrome]
+    environment:
+      NAVIDROME_URL: ${NAVIDROME_URL:-}
+      NAVIDROME_USER: ${NAVIDROME_USER:-}
+      NAVIDROME_PASSWORD_FILE: /run/secrets/navidrome_password
+      NAVIDROME_USERS_FILE: /run/secrets/navidrome_users
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_navidrome
+    secrets: [navidrome_password, navidrome_users, adapter_key_navidrome]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
+  audiobookshelf-adapter:
+    <<: *hardening
+    build: {context: ., dockerfile: adapters/audiobookshelf/Dockerfile}
+    profiles: [audiobookshelf]
+    environment:
+      AUDIOBOOKSHELF_URL: ${AUDIOBOOKSHELF_URL:-}
+      AUDIOBOOKSHELF_TOKEN_FILE: /run/secrets/audiobookshelf_token
+      MUSE_INGESTION_URL: http://ingestion-api:8000
+      MUSE_ADAPTER_KEY_FILE: /run/secrets/adapter_key_audiobookshelf
+    secrets: [audiobookshelf_token, adapter_key_audiobookshelf]
+    depends_on:
+      ingestion-api: {condition: service_healthy}
+    networks: [edge, egress]
+
   arr-adapter:
     <<: *hardening
     build: {context: ., dockerfile: adapters/arr/Dockerfile}
@@ -236,20 +376,21 @@ services:
       ingestion-api: {condition: service_healthy}
     networks: [edge, egress]
 
-  # Optional: MCP server (questions, answers, recommendations for an assistant). --profile mcp
+  # MCP server: lets an AI assistant know, search and teach a person's taste (services/mcp-server).
+  # Each client sends its own token (Mono: Settings, Muse, "Connect an AI assistant"). --profile mcp
   mcp-server:
     <<: *hardening
     build: {context: ., dockerfile: services/mcp-server/Dockerfile}
     profiles: [mcp]
     environment:
+      MUSE_QUERY_URL: http://query-api:8002
       MUSE_RECO_URL: http://recommendation-api:8001
       MUSE_INGEST_URL: http://ingestion-api:8000
       MUSE_READ_KEY_FILE: /run/secrets/mcp_read_key
       MUSE_ANSWER_KEY_FILE: /run/secrets/mcp_answer_key
-      MUSE_MCP_USER_ID: ${MUSE_MCP_USER_ID:-}
     secrets: [mcp_read_key, mcp_answer_key]
-    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_MCP_PORT:-8002}:8002"]
-    depends_on: [recommendation-api, ingestion-api]
+    ports: ["${MUSE_BIND:-127.0.0.1}:${MUSE_MCP_PORT:-8773}:8003"]
+    depends_on: [query-api, recommendation-api, ingestion-api]
     networks: [public]
 
   # Optional: HTTPS for other machines (LAN or Tailscale). --profile tls. Serves the two APIs
@@ -299,6 +440,11 @@ secrets:
   adapter_key_jellyfin: {file: ./secrets/adapter_key_jellyfin}
   adapter_key_arr: {file: ./secrets/adapter_key_arr}
   adapter_key_searxng: {file: ./secrets/adapter_key_searxng}
+  adapter_key_navidrome: {file: ./secrets/adapter_key_navidrome}
+  adapter_key_audiobookshelf: {file: ./secrets/adapter_key_audiobookshelf}
+  navidrome_password: {file: ./secrets/navidrome_password}
+  navidrome_users: {file: ./secrets/navidrome_users}
+  audiobookshelf_token: {file: ./secrets/audiobookshelf_token}
   read_keys: {file: ./secrets/read_keys}
   status_token: {file: ./secrets/status_token}
   mcp_read_key: {file: ./secrets/mcp_read_key}
@@ -309,3 +455,11 @@ secrets:
   sonarr_api_key: {file: ./secrets/sonarr_api_key}
   embed_api_key: {file: ./secrets/embed_api_key}
   llm_api_key: {file: ./secrets/llm_api_key}
+  db_muse_query: {file: ./secrets/db_muse_query}
+  db_muse_vector: {file: ./secrets/db_muse_vector}
+  db_muse_catalog: {file: ./secrets/db_muse_catalog}
+  db_muse_audio: {file: ./secrets/db_muse_audio}
+  db_muse_scheduler: {file: ./secrets/db_muse_scheduler}
+  admin_token: {file: ./secrets/admin_token}
+  query_read_key: {file: ./secrets/query_read_key}
+  mono_stream_token: {file: ./secrets/mono_stream_token}
