@@ -34,7 +34,8 @@ async def build(engine: Engine, user_id: str, item_type: str, per_row: int = 12,
     rows: list[dict] = []
     logged: list[tuple[str, list]] = []
 
-    def add(row_id: str, title: str, items: list, reason: dict | None = None, describe=None, min_items: int = MIN_ROW) -> None:
+    def add(row_id: str, title: str, items: list, reason: dict | None = None, describe=None, min_items: int = MIN_ROW,
+            seed: dict | None = None) -> None:
         if len(rows) >= max_rows:
             return
         fresh = [s for s in items if (s.key if hasattr(s, "key") else s["canon_key"]) not in used][:per_row]
@@ -42,7 +43,7 @@ async def build(engine: Engine, user_id: str, item_type: str, per_row: int = 12,
             return
         for s in fresh:
             used.add(s.key if hasattr(s, "key") else s["canon_key"])
-        rows.append({"id": row_id, "title": title, "reason": reason,
+        rows.append({"id": row_id, "title": title, "reason": reason, **({"seed": seed} if seed else {}),
                      "items": [describe(s) if describe else engine.describe(s, prof, titles) for s in fresh]})
         if describe is None:
             logged.append((row_id, fresh))
@@ -60,7 +61,8 @@ async def build(engine: Engine, user_id: str, item_type: str, per_row: int = 12,
         title = titles.get(a.key) or (await engine.titles_for([a.key])).get(a.key)
         if title and len(near) >= MIN_ROW:
             add(f"because:{a.key}", f"Because you watched {title}", near,
-                {"id": f"anchor:{a.key}", "type": "anchor", "responses": ["not_relevant", "more"]})
+                {"id": f"anchor:{a.key}", "type": "anchor", "responses": ["not_relevant", "more"]},
+                seed=await _seed(engine, a.key, title, item_type))
             n_because += 1
         if n_because >= 2:
             break
@@ -93,6 +95,19 @@ async def build(engine: Engine, user_id: str, item_type: str, per_row: int = 12,
     return await _finish(engine, user_id, item_type, rows, logged, log)
 
 
+async def _seed(engine: Engine, key: str, title: str, item_type: str) -> dict:
+    """The title a "Because you watched" row is about, with its library id so a client can show
+    its own artwork and link to it."""
+    got: dict = {}
+    types = sorted({t for ts in TARGET_TYPES.values() for t in ts})  # you can watch a film because of a series
+    await asyncio.to_thread(engine._by_keys, [key], types, True, got)
+    refs = (got.get(key, (None, {}))[1] or {}).get("library_refs") or []
+    seed = {"canon_key": key, "title": title}
+    if refs:
+        seed.update(source=refs[0]["source"], source_item_id=refs[0]["source_item_id"])
+    return seed
+
+
 def _in_interest(pool: list, k: int) -> list:
     return sorted((s for s in pool if s.interest_id == k), key=lambda s: -s.score)
 
@@ -118,7 +133,8 @@ async def _reconsume_items(engine: Engine, prof, item_type: str) -> list[dict]:
             "source": refs[0]["source"], "source_item_id": refs[0]["source_item_id"], "canon_key": k,
             "title": pl.get("title"), "year": pl.get("year"), "item_type": pl.get("item_type"), "available": True,
             "reasons": [why[k][0].upper() + why[k][1:]],
-            "reason_details": [{"text": why[k][0].upper() + why[k][1:], "type": "reconsume", "id": "reconsume", "responses": []}],
+            "reason_details": [{"text": why[k][0].upper() + why[k][1:], "type": "reconsume", "id": "reconsume", "code": "watch_again",
+                                "args": {}, "responses": []}],
         })
     return out
 

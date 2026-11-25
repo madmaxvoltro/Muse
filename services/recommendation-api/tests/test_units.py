@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import prefetch, ratings  # noqa: E402
+from app import prefetch, wrapped  # noqa: E402
+from muse_schema import ratings  # noqa: E402
 
 UTC = timezone.utc
 
@@ -50,3 +51,26 @@ def test_prefetch_activity_and_ranking():
     ranked = prefetch.rank_items(rows, now)
     assert {r["reason"] for r in ranked} == {"in_progress", "series_next"}
     assert next(r for r in ranked if r["reason"] == "series_next")["title"] == "Severance"
+
+
+def test_wrapped_aggregate():
+    tz = ZoneInfo("UTC")
+    d = lambda day, h=21: datetime(2026, 3, day, h, tzinfo=UTC)  # noqa: E731
+    md = {"title": "Arrival", "runtime_min": 116, "genres": ["Science Fiction"]}
+    ep = lambda n: {"title": f"E{n}", "runtime_minutes": 50, "series_id": "s1", "series_name": "Severance", "genres": ["Drama"]}  # noqa: E731
+    rows = [
+        {"source": "jellyfin", "source_item_id": "m", "item_type": "movie", "action": "completed", "progress_pct": 100, "timestamp": d(1), "metadata": md},
+        {"source": "jellyfin", "source_item_id": "m", "item_type": "movie", "action": "completed", "progress_pct": 100, "timestamp": d(1, 22), "metadata": md},
+        {"source": "jellyfin", "source_item_id": "m", "item_type": "movie", "action": "rated", "progress_pct": None, "timestamp": d(1), "metadata": {**md, "value": 2}},
+        *[{"source": "jellyfin", "source_item_id": f"e{n}", "item_type": "series_episode", "action": "completed", "progress_pct": 100,
+           "timestamp": d(2, 20 + n % 4), "metadata": ep(n)} for n in range(3)],
+        {"source": "jellyfin", "source_item_id": "e9", "item_type": "series_episode", "action": "completed", "progress_pct": 100, "timestamp": d(3), "metadata": ep(9)},
+    ]
+    w = wrapped.aggregate(rows, tz)
+    assert w["minutes"] == 116 + 4 * 50  # same film twice in one day counts once
+    assert w["films"] == 1 and w["episodes"] == 4 and w["series"] == 1
+    assert w["top_films"][0]["title"] == "Arrival" and w["top_films"][0]["rating"] == 2
+    assert w["top_series"][0]["best_day_episodes"] == 3
+    assert w["longest_streak_days"] == 3 and w["busiest_month"] == 3
+    kids = wrapped.aggregate(rows, tz, kids=True)
+    assert "minutes" not in kids and kids["films"] == 1
