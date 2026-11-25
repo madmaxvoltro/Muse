@@ -288,13 +288,16 @@ async def do_search(
     user: str | None = Query("me", description="whose taste/history to apply; admin tokens may pass none"),
     personalize: bool = True,
     include_seen: bool = True,
+    max_age: int | None = Query(None, ge=0, le=21, description="kids profiles: only titles rated for this age or younger"),
+    allow_unrated: bool = False,
     p: Principal = Depends(current_principal),
 ) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         uid = None if (p.admin and user in (None, "", "me")) else await resolve_user(conn, p, user)
         return await search.search(conn, qdrant(), await get_embedder(), q, item_types=_types(item_type), sources=source,
-                                   limit=limit, user_id=uid, personalize=personalize, include_seen=include_seen)
+                                   limit=limit, user_id=uid, personalize=personalize, include_seen=include_seen,
+                                   max_age=max_age, allow_unrated=allow_unrated)
 
 
 @app.get("/v1/items/{source}/{source_item_id}")

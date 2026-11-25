@@ -7,7 +7,7 @@ import math
 import uuid
 from typing import Any
 
-from muse_schema import content_point_id, identity_group, taste_point_id
+from muse_schema import content_point_id, identity_group, ratings, taste_point_id
 from qdrant_client.http.models import FieldCondition, Filter, MatchAny
 
 from .items import interactions, item_details, summarize_metadata
@@ -87,6 +87,7 @@ async def _keyword(conn, qdrant, q: str, item_types, sources, limit: int) -> dic
 async def search(
     conn, qdrant, embedder, q: str, *, item_types: list[str] | None = None, sources: list[str] | None = None,
     limit: int = 20, user_id: uuid.UUID | None = None, personalize: bool = True, include_seen: bool = True,
+    max_age: int | None = None, allow_unrated: bool = False,
 ) -> dict[str, Any]:
     q = q.strip()
     scores: dict[tuple[str, str], dict[str, float]] = {}
@@ -136,6 +137,8 @@ async def search(
         mine = seen.get(k)
         if mine and not include_seen:
             continue
+        if max_age is not None and not ratings.within((d["metadata"] or {}).get("official_rating"), max_age, allow_unrated):
+            continue  # kids profiles: only titles rated for their age
         results.append({
             "source": k[0], "source_item_id": k[1], "item_type": d["item_type"],
             **summarize_metadata(d["item_type"], d["metadata"]),

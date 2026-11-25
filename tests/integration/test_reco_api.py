@@ -82,11 +82,20 @@ def test_http_routes(db_dsn):
             kids = await c.get(f"/recommendations/{USER_A}", params={"item_type": "movie", "limit": 5, "max_age": 6})
             kids_unrated = await c.get(f"/recommendations/{USER_A}", params={"item_type": "movie", "limit": 5, "max_age": 6, "allow_unrated": True})
             pre = await c.get(f"/prefetch/{USER_A}", params={"tz": "Europe/Amsterdam"})
+            top = r.json()["recommendations"][0]
+            why = await c.get(f"/why/{USER_A}/{top['source']}/{top['source_item_id']}", params={"item_type": "movie"})
+            wrap = await c.get(f"/wrapped/{USER_A}", params={"tz": "Europe/Amsterdam"})
+            home = await c.get(f"/rows/{USER_A}", params={"item_type": "movie", "log": False})
         main._engine = None
         await pool.close()
-        return r, p, q, bad, kids, kids_unrated, pre
+        return r, p, q, bad, kids, kids_unrated, pre, why, wrap, home
 
-    r, p, q, bad, kids, kids_unrated, pre = asyncio.run(go())
+    r, p, q, bad, kids, kids_unrated, pre, why, wrap, home = asyncio.run(go())
+    assert why.status_code == 200 and why.json()["reasons"] == r.json()["recommendations"][0]["reasons"], why.text
+    assert wrap.status_code == 200 and "top_films" in wrap.json(), wrap.text
+    for row in home.json()["rows"]:
+        if row["id"].startswith("because:"):
+            assert row["seed"]["title"] and "source_item_id" in row["seed"], row["seed"]
     assert kids.status_code == 200 and kids.json()["max_age"] == 6
     assert all(x.get("certification") for x in kids.json()["recommendations"])
     assert kids_unrated.json()["recommendations"]

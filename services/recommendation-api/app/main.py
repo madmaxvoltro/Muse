@@ -31,7 +31,9 @@ from muse_schema.config import key_list, secret
 from muse_schema.crypto import get_vault, item_key
 from qdrant_client import QdrantClient
 
-from . import prefetch as prefetch_mod, questions, ratings, rows, status_page
+from muse_schema import ratings
+
+from . import prefetch as prefetch_mod, questions, rows, status_page, wrapped as wrapped_mod
 from . import taste_sequencing as tseq
 from . import routes_multispace as MS
 from . import soon_gone as soon_gone_repo
@@ -367,6 +369,36 @@ async def home_rows(
         res["rows"] = [r for r in res.get("rows") or [] if r["items"]]
         res["max_age"] = max_age
     return res
+
+
+@app.get("/wrapped/{user_id}")
+async def wrapped(user_id: str, year: int | None = Query(None, ge=2000, le=2100), tz: str | None = None, kids: bool = False) -> dict:
+    """A person's year in films and series (Vesper Wrapped): minutes, films, binge days, top
+    titles, genres, when they watch. kids=true leaves out the time statistics."""
+    from datetime import timezone as _tz
+
+    y = year or datetime.now(_tz.utc).year
+    zone = prefetch_mod.tzinfo(tz)
+    uid, events = await wrapped_mod.load(await get_pool(), user_id, y, zone)
+    return {"user_id": uid, "year": y, **wrapped_mod.aggregate(events, zone, kids)}
+
+
+@app.get("/why/{user_id}/{source}/{source_item_id}")
+async def why(user_id: str, source: str, source_item_id: str, item_type: str = Query("movie")) -> dict:
+    """Why this title for this person, from the taste engine (the same reasons a list would
+    give): for a title screen, whether or not it is in a list right now."""
+    _check_type(item_type)
+    eng = await engine()
+    empty = {"user_id": user_id, "source": source, "source_item_id": source_item_id, "reasons": [], "reason_details": []}
+    if not await asyncio.to_thread(eng.catalog_ready):
+        return empty
+    res = await eng.recommend(RecoRequest(user_id, item_type, limit=100, explore_ratio=0.0, surface="detail", log=False))
+    for s in res.pool:
+        refs = s.payload.get("library_refs") or []
+        if any(r.get("source") == source and r.get("source_item_id") == source_item_id for r in refs):
+            d = eng.describe(s, res.profile, res.titles)
+            return {"user_id": user_id, **d, "source": source, "source_item_id": source_item_id, "seen": False}
+    return {**empty, "seen": None}
 
 
 @app.get("/prefetch/{user_id}")
