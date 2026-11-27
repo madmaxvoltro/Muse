@@ -25,7 +25,7 @@ from muse_schema.vectors import SealedQdrant, qdrant_client
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
-from . import groups, guards, identity, knowledge, mine, music, profile, questions, recclient, search, situation
+from . import admin_feed, groups, guards, identity, knowledge, mine, music, profile, questions, recclient, search, situation
 from .auth import Principal, admin_only, current_principal, resolve_user, writer
 from .db import close_pool, get_pool
 from .embedder import get_embedder
@@ -38,6 +38,7 @@ app.include_router(music.router)
 app.include_router(situation.router)
 app.include_router(groups.router)
 app.include_router(mine.router)
+app.include_router(admin_feed.router)
 
 
 @app.middleware("http")

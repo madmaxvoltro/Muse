@@ -295,6 +295,9 @@ P_IMPRESSION_ITEM = "impression.item"
 P_OVERLAY = "user_overlay.pinned_topics"
 P_DOWNLOAD_ITEM = "curator_download_log.item"
 P_IDENTITY = "identity_mapping.username"
+P_CURATOR = "curator.data"
+P_ADMIN_NOTE = "admin_notification.data"
+P_PAIRING = "pairing_code.payload"
 
 
 def event_item_bid(vault: Vault | NullVault, source: str, source_item_id: str | None) -> str | None:
