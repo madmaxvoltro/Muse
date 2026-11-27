@@ -177,21 +177,25 @@ From the terminal:
 
 ## Connecting clients
 
-The easy way: **scan a QR code**. It carries the addresses, the keys and the certificate's
-fingerprint, works once and expires.
+Vesper and Mono talk to Muse through their own server. Connect that server with a one-time code
+instead of copying keys:
 
 ```bash
-./muse pair            # Vesper on your phone (add --admin for the curator's notices and controls)
-./muse pair admin      # the same as --admin
-./muse pair mono       # Mono: paste the code in Mono's Muse settings, or scan it
-./muse invite          # Vesper for someone in the family (valid a day)
+./muse pair vesper     # then in Vesper's admin console: Server, Muse, Connect
+./muse pair mono       # then in Mono: Admin, Muse, Connect
 ```
+
+Scan the QR with your phone (in the Vesper or Mono app) or type the code. The server receives
+the addresses, its keys, an admin token (for the curator's notices and controls) and Muse's
+certificate, checked against the fingerprint in the code. The code works once and expires after
+15 minutes (`--ttl`). The end of the web setup shows the same codes.
 
 ![Pairing at the end of the web setup](img/setup-pair.png)
 
-The QR holds `muse://pair?u=<query API>&c=<code>&fp=<certificate SHA-256>`. The app checks the
-certificate against `fp`, redeems the code once at `POST <u>/v1/pair` and receives its
-configuration (details in [vesper.md](vesper.md#pairing-and-the-admin-feed)).
+The QR holds `muse://pair?u=<query API>&c=<code>&fp=<certificate SHA-256>`; the server redeems
+it at `POST <u>/v1/pair` (details in [vesper.md](vesper.md#pairing-and-the-admin-feed)).
+`./muse invite --user <id>` makes a code with a personal token instead, for one person's own app
+or assistant.
 
 By hand:
 

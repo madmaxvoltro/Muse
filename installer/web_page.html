@@ -180,7 +180,7 @@ const STEPS = [
   { id: "models", name: "Language model" },
   { id: "review", name: "Review" },
   { id: "install", name: "Installing" },
-  { id: "pair", name: "Your phone" },
+  { id: "pair", name: "Vesper and Mono" },
 ];
 let at = 0;
 
@@ -336,13 +336,12 @@ const views = {
   },
 
   pair() {
-    return `<h1>Connect your phone</h1>
-      <p class="lede">Scan this in Vesper, under Settings, Muse. It carries the address, the keys and the certificate, so there's nothing to type.
-      The code works once.</p>
+    return `<h1>Connect Vesper and Mono</h1>
+      <p class="lede">Open the admin screen and choose Muse, Connect. Scan this with your phone or type the code.
+      It carries the address, the keys and the certificate, so there's nothing to copy. The code works once.</p>
       <div class="apps" role="group" aria-label="Which app">
-        <button class="line" type="button" data-app="admin" aria-pressed="true">Vesper, as admin</button>
+        <button class="line" type="button" data-app="vesper" aria-pressed="true">Vesper</button>
         <button class="line" type="button" data-app="mono" aria-pressed="false">Mono</button>
-        <button class="line" type="button" data-app="vesper" aria-pressed="false">Vesper for family</button>
       </div>
       <div class="pass" id="pass"><div class="qr" id="qr"><span class="small">Making a code</span></div>
         <div class="stub" id="stub"></div></div>
@@ -461,7 +460,7 @@ const binders = {
         $("#install_nav").innerHTML = nav(true, "Try again");
       } else {
         $("#install_lede").textContent = "Muse is running. The first hours it reads your library; recommendations get better from there.";
-        $("#install_nav").innerHTML = nav(false, A.mode === "local" ? "Finish" : "Connect your phone");
+        $("#install_nav").innerHTML = nav(false, "Connect Vesper and Mono");
       }
     };
     poll();
@@ -471,13 +470,13 @@ const binders = {
       document.querySelectorAll("[data-app]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.app === app)));
       $("#qr").innerHTML = '<span class="small">Making a code</span>';
       $("#stub").innerHTML = "";
-      const r = await api("/api/pair", { app, admin: app === "admin", ttl: app === "vesper" ? 1440 : 15 });
+      const r = await api("/api/pair", { app, admin: true, ttl: 30 });
       if (r.error) { $("#qr").innerHTML = `<span class="small">${esc(r.error)}</span>`; return; }
       $("#qr").innerHTML = r.svg;
-      const who = { admin: "Vesper, with the admin feed and the curator", mono: "Mono", vesper: "Vesper for someone in the family" }[app];
+      const who = { vesper: "Vesper: Admin console, Server, Muse, Connect", mono: "Mono: Admin, Muse, Connect" }[app];
       $("#stub").innerHTML = `<p class="small">${esc(who)}. Or type this code:</p><p class="code">${esc(r.code)}</p>
         <p class="small">${esc(r.server)}</p>${r.fingerprint ? `<p class="small">Certificate ${esc(r.fingerprint.slice(0, 16))}, your phone shows the same.</p>` : ""}
-        <p class="small">Works once, for ${app === "vesper" ? "a day" : "15 minutes"}.</p>`;
+        <p class="small">Works once, for 30 minutes.</p>`;
     };
     document.querySelectorAll("[data-app]").forEach((b) => b.addEventListener("click", () => show(b.dataset.app)));
     $("#finish").addEventListener("click", () => {
@@ -485,7 +484,7 @@ const binders = {
         <code>./muse pair</code> makes a new code any time.</p>`;
       at = STEPS.length - 1; thread();
     });
-    show("admin");
+    show("vesper");
   },
 };
 
@@ -509,7 +508,6 @@ document.addEventListener("click", (e) => {
   if (!b || b.disabled) return;
   const d = +b.dataset.go;
   if (d > 0 && !validate()) return;
-  if (STEPS[at].id === "install" && d > 0 && A.mode === "local") { at = STEPS.length - 1; finishLocal(); return; }
   if (STEPS[at].id === "install" && d > 0 && A.install_failed) { A.install_failed = false; render(); return; }
   at = Math.max(0, Math.min(STEPS.length - 1, at + d));
   window.scrollTo({ top: 0 });
@@ -520,13 +518,6 @@ document.addEventListener("keydown", (e) => {
     const b = $("[data-go='1']"); if (b && !b.disabled) b.click();
   }
 });
-
-function finishLocal() {
-  thread();
-  $("#view").innerHTML = `<h1>All set.</h1><p class="lede">Muse runs on this machine only, so phones can't connect.
-    Run <code>./muse setup</code> again and choose devices at home or Tailscale to change that.</p>
-    <div class="note"><p><b>Back up the master key.</b></p><p>Copy <code>secrets/muse_master_key</code> to a password manager or a USB stick.</p></div>`;
-}
 
 (async () => {
   S = await api("/api/state");

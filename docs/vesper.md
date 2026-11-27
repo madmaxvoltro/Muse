@@ -100,15 +100,17 @@ fast storage and offers them as smart downloads on phones.
 
 ### Pairing (QR)
 
-`./muse pair` (or the end of the web setup) shows a QR code holding
+`./muse pair vesper` / `./muse pair mono` (or the end of the web setup) shows a one-time code and a QR
+code for the *server* of Vesper or Mono (they talk to Muse, their apps talk to them). The QR holds
 
 ```
 muse://pair?u=<query API base URL>&c=<one-time code>&fp=<SHA-256 of Muse's root certificate, hex>
 ```
 
-The app:
+The admin screen (the app scans the QR and hands it to its server, or the admin types the code
+and Muse's address):
 
-1. reads `u`, `c` and `fp` (the code can also be typed: then ask for the server address);
+1. reads `u`, `c` and `fp`;
 2. connects to `u` over HTTPS and accepts the server only if the SHA-256 of the root
    certificate in its chain equals `fp` (Muse uses its own CA; pinning it is what makes the
    connection trusted without installing anything);
@@ -122,8 +124,10 @@ The answer is the configuration to store (in the platform's secure storage):
 | `purpose` | `vesper`, `mono` or `admin` |
 | `server` | a display name |
 | `reco_url`, `ingest_url`, `query_url` | the three APIs |
-| `read_key`, `answer_key` | Vesper: recommendation API reads, ingestion writes (answers) |
-| `admin_token` | only when paired as admin: `Authorization: Bearer` for `/v1/admin/*` on the query API |
+| `read_key` | Vesper: recommendation API reads (`VESPER_MUSE_READ_KEY`) |
+| `ingest_key` | Vesper: Muse's `jellyfin` adapter key, for events and per-profile query API calls (`VESPER_MUSE_INGEST_KEY`) |
+| `answer_key` | an app that sends answers itself (not needed by vesper-server) |
+| `admin_token` | `Authorization: Bearer` for `/v1/admin/*` on the query API (absent for `./muse invite`) |
 | `user_token`, `user_id` | only for an invite bound to one person |
 | `mono_api_key`, `mono_read_key`, `mono_stream_token` | Mono's settings (`MONO_MUSE_API_KEY`, `MONO_MUSE_READ_KEY`, `MONO_MUSE_STREAM_TOKEN`) |
 | `ca_pem`, `ca_sha256` | Muse's root certificate, to trust for all three URLs |

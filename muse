@@ -7,8 +7,8 @@
   ./muse doctor           find and explain problems
   ./muse upgrade          pull, rebuild, restart (migrations run automatically)
   ./muse setup --web      the same in your browser (or on your phone: it shows a QR code)
-  ./muse pair [vesper|mono|admin]   QR code: connect a phone or Mono without typing keys
-  ./muse invite [--user ID]         QR code for a family member's Vesper
+  ./muse pair [vesper|mono]  QR code / one-time code: connect Vesper's or Mono's server, no keys to copy
+  ./muse invite [--user ID]  a one-time code with a personal token (one person's app or assistant)
   ./muse curator [status|pause|resume|run|budget GB|keep|unkeep|remove TYPE TMDB_ID]
   ./muse keys             show the keys clients need (Vesper, Jellyfin plugin, MCP)
   ./muse ca               print the TLS root certificate (lan/tailscale mode)
@@ -564,7 +564,7 @@ def cmd_setup(a: argparse.Namespace) -> None:
     apply_setup(ans, provided, start=not a.no_start)
     summary(mode, tls_host)
     if mode in ("lan", "tailscale") and not a.no_start and sys.stdin.isatty() and not a.yes:
-        if yes("show a QR code to connect Vesper on your phone now (as admin)?", default=True):
+        if yes("connect Vesper now (a code for its admin console)?", default=True):
             pair_and_show("vesper", admin_token=True)
 
 
@@ -709,7 +709,7 @@ def summary(mode: str, tls_host: str) -> None:
     print(f"    Query API            {client_urls()['query_url']}  (admin feed, curator, pairing)")
     if mode in ("lan", "tailscale"):
         print("    TLS                  clients must trust Muse's certificate: ./muse ca > muse-ca.crt")
-        print("    Phones               ./muse pair (QR, no typing), ./muse pair mono, ./muse invite for family")
+        print("    Vesper / Mono        ./muse pair vesper, ./muse pair mono (a code for their admin screen, no keys to copy)")
     if "curator" in env.get("COMPOSE_PROFILES", ""):
         print("    Curator              ./muse curator (status, keep, pause); notices show in Vesper for the admin")
     print("\n    Next: import history (./muse import letterboxd export.zip --user <id>), watch ./muse status.")
@@ -902,7 +902,10 @@ def pairing_payload(purpose: str) -> dict:
     env = env_values()
     payload: dict = {"server": env.get("MUSE_TLS_HOST") or socket.gethostname(), **client_urls()}
     if purpose in ("vesper", "admin"):
-        payload.update(read_key=first_key("read_keys", "vesper"), answer_key=first_key("adapter_keys", "muse"))
+        # vesper-server: reads with the vesper read key; writes events and acts per profile on the
+        # query API with Muse's `jellyfin` adapter key (its events join the Jellyfin catalog).
+        payload.update(read_key=first_key("read_keys", "vesper"), ingest_key=first_key("adapter_keys", "jellyfin"),
+                       answer_key=first_key("adapter_keys", "muse"))
     if purpose in ("mono", "admin"):
         payload.update(mono_api_key=ensure_key("adapter_keys", "mono"), mono_read_key=ensure_key("read_keys", "mono"),
                        mono_stream_token=read_secret("mono_stream_token"))
@@ -937,10 +940,11 @@ def show_qr(text: str) -> None:
 
 def pair_and_show(purpose: str, admin_token: bool = False, user: str | None = None, ttl: int = 15) -> None:
     if not base_url():
-        warn("Muse runs in local mode: phones and other machines can't reach it. Run ./muse setup and pick lan or tailscale.")
+        warn("Muse runs in local mode: only a Vesper or Mono on this same machine can connect (./muse setup: lan or tailscale for others).")
     code, link, payload = make_pairing(purpose, admin_token, user, ttl)
     app = {"vesper": "Vesper", "mono": "Mono", "admin": "Vesper"}[purpose]
-    step(f"Scan this in {app} (Settings > Muse > Scan QR){' as admin' if admin_token else ''}")
+    where = {"Vesper": "the admin console: Server, Muse, Connect", "Mono": "Admin, Muse, Connect"}[app]
+    step(f"Connect {app}: in {where}, scan this or type the code")
     show_qr(link)
     print(f"    or type this code in {app}: {_c('1', code)}")
     print(f"    server: {payload['query_url']}")
@@ -950,8 +954,10 @@ def pair_and_show(purpose: str, admin_token: bool = False, user: str | None = No
 
 
 def cmd_pair(a) -> None:
+    """Vesper and Mono pair their *server* with Muse (as the admin: the curator's notices and
+    controls come with it). A personal token for one person's app or assistant: --user."""
     need_setup()
-    pair_and_show(a.app, admin_token=(a.app == "admin" or a.admin), user=a.user, ttl=a.ttl)
+    pair_and_show(a.app, admin_token=not a.user, user=a.user, ttl=a.ttl)
 
 
 def cmd_invite(a) -> None:
@@ -1202,8 +1208,8 @@ def main() -> None:
     s.set_defaults(fn=cmd_setup)
     p = sub.add_parser("pair", help="QR code to connect Vesper or Mono")
     p.add_argument("app", nargs="?", default="vesper", choices=["vesper", "mono", "admin"])
-    p.add_argument("--admin", action="store_true", help="include an admin token (the curator's notices and controls)")
-    p.add_argument("--user", help="bind a personal token to this user id (./muse users)")
+    p.add_argument("--admin", action="store_true", help=argparse.SUPPRESS)  # always on for a server pairing
+    p.add_argument("--user", help="instead of the admin: a personal token for this user id (./muse users)")
     p.add_argument("--ttl", type=int, default=15, help="minutes the code stays valid")
     p.set_defaults(fn=cmd_pair)
     p = sub.add_parser("invite", help="QR code for a family member's phone")
