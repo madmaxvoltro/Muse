@@ -40,9 +40,11 @@ actually drives what gets suggested and, optionally, what gets downloaded.
   diversity/calibration for every stage, so changes are judged by numbers.
 - **User control overlay**: sliders, pins, an explore-dial, and per-recommendation explainability
   — sits on top of the automatic profile, never mutates it, always reversible.
-- **Autonomous discovery/curator**: optionally lets Muse manage a fixed storage budget
-  (add *and* remove content) against Radarr/Sonarr, with a "Soon Gone" 48h grace window and
-  whitelist-by-watching so nothing you actually want gets silently deleted.
+- **Autonomous discovery/curator**: optionally lets Muse manage a storage budget (add *and*
+  remove content) through Radarr/Sonarr. Never removes what someone watched recently, has on a
+  list, asked for, loves or what you keep; a 48h "Soon Gone" window first; series start with
+  season 1; real sizes and free-space checks; every action in the admin's Vesper feed with
+  Keep and Remove now.
 - **Multi-user**: auto-imports Jellyfin users as profiles; one person's accounts on different
   services (Jellyfin, Mono, ...) are linked explicitly with single-use codes into one profile.
 - **Understands taste, not just tags**: listens to the music itself (tempo, key, energy, and an
@@ -112,10 +114,13 @@ SECURITY.md               what is encrypted, how access is limited, and what isn
 ## Getting started
 
 ```bash
-git clone <this repository> muse && cd muse
-./muse setup      # checks, Jellyfin, hardware, secrets, start, verify
-./muse status
+curl -fsSL https://raw.githubusercontent.com/madmaxvoltro/Muse/main/install.sh | bash
 ```
+
+That installs what's missing, then opens the setup in your browser (a QR code takes it to your
+phone). At the end, scan the code in Vesper and you're connected. On Proxmox there are scripts
+that make the container or VM for you. By hand: `git clone`, then `./muse setup` (terminal) or
+`./muse setup --web`.
 
 Everything else (modes for local / LAN / Tailscale, importing history, backups, optional parts):
 [`docs/installation.md`](docs/installation.md).

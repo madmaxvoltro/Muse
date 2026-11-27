@@ -1,30 +1,43 @@
 # Curator
 
-Status: implemented, including real Radarr/Sonarr add/remove payloads in `arr_client.py`
-(lookup-by-tmdb/tvdb-id -> merge quality profile + root folder -> add; delete-by-arr-id ->
-remove). Untested against a live Radarr/Sonarr instance — see Known v1 gaps.
+Status: implemented and tested against a fake Radarr/Sonarr that speaks the v3 API
+(`tests/test_curator_arr.py`) and against Postgres (`tests/integration/test_curator.py`). Not yet
+run against a live Radarr/Sonarr: check the first cycle with `./muse curator` and
+`./muse logs curator`, and pause with `./muse curator pause` if anything looks off.
 
-Autonomous storage-budget manager. See `docs/architecture.md` (Discovery/acquisition
-pipeline) for the full design; this directory implements it:
+Autonomous storage-budget manager. What it does for people is in
+[`docs/installation.md`](../../docs/installation.md#the-curator-muse-looks-after-your-storage);
+this is how:
 
-- `discovery.py` — TMDB + Trakt candidate fetching (outbound-only, separate trust boundary
-  from the inbound adapters)
+- `main.py` — two loops. Frequent (30 min): re-checks Soon Gone against the protection rules,
+  saves what now qualifies, removes what expired. Slow (daily, or when the admin asks): sync
+  real sizes and adopt tagged titles, next seasons, add, and (only over budget) Soon Gone.
+- `budget.py` — the budget (env default, overridden from the admin), real-size accounting,
+  per-person daily cap, the grace window and `protection()` / `protection_reason()`: the rules
+  that keep a title, one place, unit-tested.
 - `scoring.py` — averaged-across-profiles similarity for ADD decisions, max-across-profiles
-  for REMOVE decisions (an item is only removal-eligible if *every* active profile scores it low)
-- `budget.py` — the 300GB ceiling, the dynamic per-user daily cap (up to 10/day, scaled down
-  by 14-day activity), the always-protected set (favorited + partially-watched), and the
-  "Soon Gone" 48h grace mechanism
-- `arr_client.py` — the only code path that can actually cause a file add/remove; everything
-  else only ever calls through here
-- `main.py` — two loops: frequent Soon-Gone expiry checks, and a slow daily add/remove cycle
+  for REMOVE decisions (an item is only removal-eligible if *every* active profile scores it low).
+- `discovery.py` — TMDB + Trakt candidates; size estimates until the sync has real ones.
+- `arr_client.py` — the only code path that can add or remove a file: tags, quality profile,
+  root folder, season-1 adds, next-season monitoring, sizes, free space.
 
-## Known v1 gaps
+Everything it does goes to `curator_activity` (shown by `GET /v1/admin/curator`) and to the
+admin's feed (`muse_schema.notify.admin`, `GET /v1/admin/notifications?domain=video`).
 
-- `arr_client.py` is implemented but untested against a live Radarr/Sonarr instance — the
-  exact response shape from the lookup/add endpoints should be verified against a real
-  install before relying on this in production. See `docs/adapters/arr.md`.
-- Item byte sizes are estimated (`discovery.ESTIMATED_BYTES`), not queried from the arr-stack
-  post-download — good enough for budget math, not exact.
-- The Jellyfin plugin's playback-start whitelist hook (which pulls a "Soon Gone" item out of
-  the grace window when someone watches it) isn't built yet — this curator can mark items
-  soon-gone and expire them, but nothing can whitelist one yet. See `jellyfin-plugin/README.md`.
+## Settings (`.env`)
+
+| | default | |
+|---|---|---|
+| `MUSE_CURATOR_BUDGET_GB` | 300 | the admin can change it from Vesper or `./muse curator budget` |
+| `MUSE_CURATOR_MIN_FREE_GB` | 50 | never fill the disk past this |
+| `MUSE_CURATOR_GRACE_HOURS` | 48 | Soon Gone |
+| `MUSE_CURATOR_RECENT_DAYS` | 30 | watched within = never removed |
+| `MUSE_CURATOR_DAILY_CAP` | 10 | adds per person per day, scaled down for quiet profiles |
+| `MUSE_CURATOR_TAG` | muse | tag in Radarr/Sonarr |
+| `MUSE_CURATOR_SERIES_START` | first_season | or `all` |
+| `MUSE_CURATOR_ADD_SCORE` / `_REMOVE_SCORE` | 0.55 / 0.10 | thresholds |
+
+## Known gaps
+
+- Sizes are estimated until the first sync after a download (6 GB a film, 12 GB a season).
+- Series adopted from Sonarr v3 without a TMDB id can't be adopted (Sonarr v4 has the id).
