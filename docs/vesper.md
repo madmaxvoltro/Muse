@@ -111,9 +111,10 @@ The admin screen (the app scans the QR and hands it to its server, or the admin 
 and Muse's address):
 
 1. reads `u`, `c` and `fp`;
-2. connects to `u` over HTTPS and accepts the server only if the SHA-256 of the root
-   certificate in its chain equals `fp` (Muse uses its own CA; pinning it is what makes the
-   connection trusted without installing anything);
+2. with `fp`: downloads Muse's root certificate from `https://<host>:<port>/muse-ca.crt` (public;
+   Caddy doesn't send its root in the TLS chain), checks that its SHA-256 equals `fp`, and from
+   then on trusts exactly that root for Muse's URLs. Only then does it send the code. Without
+   `fp` (local mode, plain http on the same machine) normal rules apply;
 3. `POST {u}/v1/pair` with `{"code": c, "device": "<device name>"}`. No authentication: the code
    is the secret. It works once and expires (15 minutes, a day for `./muse invite`).
 
