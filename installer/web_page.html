@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Set up Muse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,600&display=swap">
+<style>
+:root {
+  --night: #F1EDF3;      /* page */
+  --surface: #FBF9FC;    /* fields */
+  --ink: #261F2E;
+  --muted: #6A6075;
+  --line: #D9D1DF;
+  --amber: #B07812;      /* the thread, focus, primary */
+  --amber-ink: #FFFFFF;
+  --sage: #4F7562;       /* checks that passed */
+  --rose: #A2423C;       /* checks that failed */
+  --glow: rgba(176, 120, 18, .16);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --night: #1A1521; --surface: #241D2D; --ink: #EEE7F3; --muted: #A89DB4; --line: #3A3145;
+    --amber: #E9AE45; --amber-ink: #1A1521; --sage: #8FC2A6; --rose: #E9897F; --glow: rgba(233, 174, 69, .14);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --night: #1A1521; --surface: #241D2D; --ink: #EEE7F3; --muted: #A89DB4; --line: #3A3145;
+  --amber: #E9AE45; --amber-ink: #1A1521; --sage: #8FC2A6; --rose: #E9897F; --glow: rgba(233, 174, 69, .14);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-height: 100vh; background: var(--night); color: var(--ink);
+  font: 1rem/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background-image: radial-gradient(60rem 30rem at 85% -10%, var(--glow), transparent 70%);
+  background-attachment: fixed;
+}
+.wrap { max-width: 34rem; margin: 0 auto; padding: 2.5rem 1rem 5rem; }
+
+/* the thread: a real sequence of steps */
+.thread { display: flex; align-items: center; gap: 0; margin: 0 0 3rem; list-style: none; padding: 0; }
+.thread li { flex: 1; height: 2px; background: var(--line); position: relative; transition: background .4s; }
+.thread li:last-child { flex: 0 0 auto; }
+.thread li::before {
+  content: ""; position: absolute; left: 0; top: 50%; width: .6rem; height: .6rem; border-radius: 50%;
+  transform: translate(-50%, -50%); background: var(--night); border: 2px solid var(--line); transition: all .4s;
+}
+.thread li.done { background: var(--amber); }
+.thread li.done::before { background: var(--amber); border-color: var(--amber); }
+.thread li.here::before { border-color: var(--amber); box-shadow: 0 0 0 .35rem var(--glow); }
+.where { color: var(--muted); font-size: .875rem; margin: -2.25rem 0 2.25rem; }
+
+h1 {
+  font-family: Literata, "Iowan Old Style", Georgia, serif; font-weight: 400; font-size: clamp(1.9rem, 6vw, 2.5rem);
+  line-height: 1.15; letter-spacing: -.01em; margin: 0 0 .75rem; text-wrap: balance;
+}
+.lede { color: var(--muted); margin: 0 0 2rem; max-width: 30rem; }
+h2 { font-family: Literata, Georgia, serif; font-weight: 600; font-size: 1.15rem; margin: 2rem 0 .5rem; }
+
+label { display: block; font-weight: 600; font-size: .9375rem; margin: 1.25rem 0 .375rem; }
+.hint { display: block; font-weight: 400; color: var(--muted); font-size: .875rem; margin-top: .125rem; }
+input[type=text], input[type=password], input[type=url], input[type=number], select {
+  width: 100%; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+  border-radius: .5rem; padding: .7rem .8rem; min-height: 2.9rem;
+}
+input:focus-visible, select:focus-visible, button:focus-visible, .choice:focus-within {
+  outline: 2px solid var(--amber); outline-offset: 2px;
+}
+.check { display: flex; gap: .5rem; align-items: flex-start; margin-top: .5rem; font-size: .9rem; min-height: 1.4rem; color: var(--muted); }
+.check[data-s="ok"] { color: var(--sage); }
+.check[data-s="bad"] { color: var(--rose); }
+.check svg { flex: 0 0 auto; margin-top: .15rem; }
+.check[data-s="ok"] path { stroke-dasharray: 20; stroke-dashoffset: 20; animation: draw .45s ease-out forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+
+/* choices: rows, not cards */
+.choices { display: grid; gap: 0; border-top: 1px solid var(--line); margin-top: .5rem; }
+.choice { display: grid; grid-template-columns: 1.4rem 1fr; gap: .75rem; padding: 1rem .25rem; border-bottom: 1px solid var(--line); cursor: pointer; }
+.choice input { margin: .3rem 0 0; accent-color: var(--amber); width: 1.05rem; height: 1.05rem; }
+.choice b { display: block; font-weight: 600; }
+.choice span { color: var(--muted); font-size: .9rem; }
+
+.toggle { display: flex; gap: .75rem; align-items: center; margin: 1rem 0; font-weight: 600; cursor: pointer; }
+.toggle input { accent-color: var(--amber); width: 1.1rem; height: 1.1rem; }
+
+.range { display: flex; gap: 1rem; align-items: center; }
+.range input[type=range] { flex: 1; accent-color: var(--amber); }
+.range output { font-variant-numeric: tabular-nums; min-width: 5.5rem; text-align: right; font-weight: 600; }
+
+.nav { display: flex; justify-content: space-between; align-items: center; margin-top: 2.75rem; gap: 1rem; }
+button {
+  font: inherit; font-weight: 600; border-radius: 999px; padding: .75rem 1.4rem; cursor: pointer; min-height: 2.9rem;
+  border: 1px solid transparent; background: var(--amber); color: var(--amber-ink);
+}
+button[disabled] { opacity: .5; cursor: default; }
+button.quiet { background: transparent; color: var(--muted); border-color: transparent; padding-left: 0; }
+button.line { background: transparent; color: var(--ink); border-color: var(--line); }
+
+.machine { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--line); }
+.machine li { display: flex; justify-content: space-between; gap: 1rem; padding: .7rem .25rem; border-bottom: 1px solid var(--line); }
+.machine li span:last-child { color: var(--muted); text-align: right; }
+.machine li.bad span:last-child { color: var(--rose); }
+
+.review { margin: 0; border-top: 1px solid var(--line); }
+.review div { display: grid; grid-template-columns: 9rem 1fr; gap: 1rem; padding: .7rem .25rem; border-bottom: 1px solid var(--line); }
+.review dt { color: var(--muted); }
+.review dd { margin: 0; overflow-wrap: anywhere; }
+
+.log { list-style: none; padding: 0; margin: 0; font-size: .9375rem; }
+.log li { padding: .35rem 0 .35rem 1.6rem; position: relative; }
+.log li::before { content: ""; position: absolute; left: .2rem; top: .85rem; width: .5rem; height: .5rem; border-radius: 50%; background: var(--sage); }
+.log li.warn::before { background: var(--amber); }
+.log li.fail::before { background: var(--rose); }
+.log li.step { font-family: Literata, Georgia, serif; font-weight: 600; padding-left: 0; margin-top: .75rem; }
+.log li.step::before { display: none; }
+.pulse { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: var(--amber); margin-right: .5rem; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+
+/* the one loud thing: the pass you hand to a phone */
+.pass {
+  margin: 1.5rem 0 0; background: var(--surface); border: 1px solid var(--line); border-radius: 1.25rem;
+  display: grid; grid-template-columns: 1fr; overflow: hidden;
+}
+.pass .qr { padding: 1.75rem; display: grid; place-items: center; color: #1A1521; background: #FFFFFF; }
+.pass .qr svg { width: min(100%, 17rem); height: auto; display: block; }
+.pass .stub { padding: 1.25rem 1.5rem 1.5rem; border-top: 2px dashed var(--line); position: relative; }
+.pass .stub::before, .pass .stub::after {
+  content: ""; position: absolute; top: -.8rem; width: 1.5rem; height: 1.5rem; border-radius: 50%; background: var(--night);
+}
+.pass .stub::before { left: -.8rem; } .pass .stub::after { right: -.8rem; }
+.code { font-family: Literata, Georgia, serif; font-size: 1.35rem; letter-spacing: .02em; overflow-wrap: anywhere; margin: .25rem 0 .5rem; }
+.small { color: var(--muted); font-size: .875rem; margin: .25rem 0; }
+.apps { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.25rem; }
+.apps button[aria-pressed="true"] { background: var(--ink); color: var(--night); border-color: var(--ink); }
+.note { border-left: 3px solid var(--amber); padding: .25rem 0 .25rem 1rem; margin: 2rem 0 0; color: var(--ink); }
+.note p { margin: .25rem 0; }
+
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <ol class="thread" id="thread" aria-hidden="true"></ol>
+  <p class="where" id="where" aria-live="polite"></p>
+  <section id="view" aria-live="polite"></section>
+</main>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+};
+const tick = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const cross = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+let S = null;               // what this machine looks like
+const A = { mode: "local", tls_host: "", tls_bind: "", jellyfin_url: "", llm_provider: "none", llm_base: "", llm_model: "", llm_external: false,
+            arr_on: false, curator: true, radarr: { url: "", profile: "", root: "" }, sonarr: { url: "", profile: "", root: "" }, budget: 300, recent: 30 };
+const K = { jellyfin_api_key: "", tmdb_api_key: "", radarr_api_key: "", sonarr_api_key: "", llm_api_key: "" };
+const checks = { jellyfin: null, tmdb: null, radarr: null, sonarr: null };
+
+const STEPS = [
+  { id: "welcome", name: "This machine" },
+  { id: "reach", name: "Who connects" },
+  { id: "jellyfin", name: "Jellyfin" },
+  { id: "tmdb", name: "Film details" },
+  { id: "arr", name: "Radarr and Sonarr" },
+  { id: "models", name: "Language model" },
+  { id: "review", name: "Review" },
+  { id: "install", name: "Installing" },
+  { id: "pair", name: "Vesper and Mono" },
+];
+let at = 0;
+
+function thread() {
+  $("#thread").innerHTML = STEPS.map((s, i) => `<li class="${i < at ? "done" : ""} ${i === at ? "here" : ""}"></li>`).join("");
+  $("#where").textContent = `Step ${at + 1} of ${STEPS.length}: ${STEPS[at].name}`;
+}
+
+function nav(back = true, next = "Continue", disabled = false) {
+  return `<div class="nav">${back ? '<button class="quiet" data-go="-1" type="button">Back</button>' : "<span></span>"}
+          ${next ? `<button data-go="1" type="button" ${disabled ? "disabled" : ""}>${esc(next)}</button>` : ""}</div>`;
+}
+
+function status(id, c) {
+  const el = $("#" + id);
+  if (!el) return;
+  if (c === "busy") { el.dataset.s = ""; el.innerHTML = '<span class="pulse"></span>Checking'; return; }
+  if (!c) { el.dataset.s = ""; el.innerHTML = ""; return; }
+  el.dataset.s = c.ok ? "ok" : "bad";
+  el.innerHTML = (c.ok ? tick : cross) + `<span>${esc(c.msg)}</span>`;
+}
+
+function debounce(fn, ms = 600) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+const views = {
+  welcome() {
+    const rows = [
+      ["Docker Compose", S.docker ? "ready" : "missing: install Docker first", !S.docker],
+      ["Memory", `${S.ram_gb} GB${S.ram_gb < 8 ? ", 8 GB or more works better" : ""}`, S.ram_gb < 8],
+      ["Free disk", `${S.disk_gb} GB${S.disk_gb < 15 ? ", 15 GB or more needed" : ""}`, S.disk_gb < 15],
+      ["Graphics card", S.gpu ? "NVIDIA, Muse will use it" : "none, Muse runs on the CPU", false],
+    ];
+    return `<h1>${S.installed ? "Let's go over your Muse setup." : "Let's set up Muse."}</h1>
+      <p class="lede">Muse learns what your household likes from Jellyfin and the rest, and keeps it on this machine.
+      A few questions, one at a time. ${S.installed ? "Your keys and data stay as they are." : "It takes about five minutes, then Muse starts on its own."}</p>
+      <ul class="machine">${rows.map(([a, b, bad]) => `<li class="${bad ? "bad" : ""}"><span>${a}</span><span>${esc(b)}</span></li>`).join("")}</ul>
+      ${nav(false, "Start", !S.docker)}`;
+  },
+
+  reach() {
+    const opt = (v, t, d) => `<label class="choice"><input type="radio" name="mode" value="${v}" ${A.mode === v ? "checked" : ""}><div><b>${t}</b><span>${d}</span></div></label>`;
+    return `<h1>Who should be able to reach Muse?</h1>
+      <p class="lede">Phones and other computers need a network address. Muse uses its own certificate for those connections.</p>
+      <div class="choices" role="radiogroup">
+        ${opt("lan", "Devices at home", "Phones, TVs and computers on your home network.")}
+        ${opt("tailscale", "My devices, anywhere", S.tailscale ? `Over Tailscale, as ${esc(S.tailscale.name)}.` : "Over Tailscale. It isn't running on this machine yet.")}
+        ${opt("local", "Only this machine", "The most private. Phones can't connect.")}
+      </div>
+      <div id="hostbox" ${A.mode === "local" ? "hidden" : ""}>
+        <label for="tls_host">Address devices use<span class="hint">An IP address or a name like muse.home</span></label>
+        <input id="tls_host" type="text" autocomplete="off" spellcheck="false" value="${esc(A.tls_host)}">
+      </div>
+      ${nav()}`;
+  },
+
+  jellyfin() {
+    return `<h1>Where is your Jellyfin?</h1>
+      <p class="lede">Muse reads what everyone watches. Make a key for it in Jellyfin under Dashboard, API Keys.</p>
+      <label for="jf_url">Jellyfin address</label>
+      <input id="jf_url" type="url" inputmode="url" autocomplete="off" spellcheck="false" value="${esc(A.jellyfin_url)}">
+      <label for="jf_key">API key${S.have.jellyfin_api_key ? '<span class="hint">Saved already. Leave empty to keep it.</span>' : ""}</label>
+      <input id="jf_key" type="password" autocomplete="off" value="${esc(K.jellyfin_api_key)}">
+      <div class="check" id="jf_check" role="status"></div>
+      ${nav(true, "Continue", !(checks.jellyfin && checks.jellyfin.ok))}`;
+  },
+
+  tmdb() {
+    return `<h1>Add film details from TMDB?</h1>
+      <p class="lede">Keywords, cast and "fans also liked" make suggestions much better. TMDB sees which titles Muse looks up,
+      never who watched them. A free key comes from themoviedb.org, under Settings, API.</p>
+      <label for="tmdb_key">TMDB key or read token${S.have.tmdb_api_key ? '<span class="hint">Saved already. Leave empty to keep it.</span>' : ""}</label>
+      <input id="tmdb_key" type="password" autocomplete="off" value="${esc(K.tmdb_api_key)}">
+      <div class="check" id="tmdb_check" role="status"></div>
+      ${nav(true, K.tmdb_api_key || S.have.tmdb_api_key ? "Continue" : "Skip for now")}`;
+  },
+
+  arr() {
+    const app = (id, name, port, kind) => {
+      const c = checks[id], cfg = A[id];
+      return `<h2>${name}</h2>
+        <label for="${id}_url">${name} address<span class="hint">Leave empty if you don't use ${name} for ${kind}.</span></label>
+        <input id="${id}_url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://${esc(S.lan_ip)}:${port}" value="${esc(cfg.url)}">
+        <label for="${id}_key">API key<span class="hint">${name}, Settings, General${S.have[id + "_api_key"] ? ". Saved already." : ""}</span></label>
+        <input id="${id}_key" type="password" autocomplete="off" value="${esc(K[id + "_api_key"])}">
+        <div class="check" id="${id}_check" role="status"></div>
+        ${c && c.ok && c.profiles.length ? `<label for="${id}_profile">Quality</label>
+          <select id="${id}_profile">${c.profiles.map((p) => `<option ${cfg.profile === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>` : ""}
+        ${c && c.ok && c.folders.length ? `<label for="${id}_root">Folder</label>
+          <select id="${id}_root">${c.folders.map((f) => `<option value="${esc(f.path)}" ${cfg.root === f.path ? "selected" : ""}>${esc(f.path)}, ${f.free_gb} GB free</option>`).join("")}</select>` : ""}`;
+    };
+    const free = [checks.radarr, checks.sonarr].filter((c) => c && c.ok).flatMap((c) => c.folders.map((f) => f.free_gb));
+    return `<h1>Should Muse look after your storage?</h1>
+      <p class="lede">With Radarr and Sonarr, Muse adds what your household would like and makes room when the budget is full.
+      It never removes what someone watched in the last ${A.recent} days, has on a list, asked for, loves, or what you keep.
+      Every change shows up in Vesper with Keep and Remove now.</p>
+      <label class="toggle"><input type="checkbox" id="arr_on" ${A.arr_on ? "checked" : ""}> Connect Radarr and Sonarr</label>
+      <div id="arrbox" ${A.arr_on ? "" : "hidden"}>
+        ${app("radarr", "Radarr", 7878, "films")}
+        ${app("sonarr", "Sonarr", 8989, "series")}
+        <h2>The curator</h2>
+        <label class="toggle"><input type="checkbox" id="curator" ${A.curator ? "checked" : ""}> Let Muse add and remove titles</label>
+        <div id="curbox" ${A.curator ? "" : "hidden"}>
+          <label for="budget">Space Muse may use${free.length ? `<span class="hint">${Math.min(...free)} GB free. Muse always leaves 50 GB untouched.</span>` : ""}</label>
+          <div class="range"><input id="budget" type="range" min="50" max="${Math.max(1000, Math.min(...(free.length ? free : [1000])))}" step="50" value="${A.budget}"><output id="budget_out">${A.budget} GB</output></div>
+          <label for="recent">Keep anything watched within</label>
+          <div class="range"><input id="recent" type="range" min="7" max="180" step="1" value="${A.recent}"><output id="recent_out">${A.recent} days</output></div>
+          <p class="small">Series start with season 1. The next season follows when someone is nearly through it.</p>
+        </div>
+      </div>
+      ${nav(true, A.arr_on ? "Continue" : "Skip")}`;
+  },
+
+  models() {
+    const p = A.llm_provider;
+    const external = p === "anthropic" || p === "openrouter";
+    return `<h1>Use a language model?</h1>
+      <p class="lede">Muse understands titles with ${esc(S.model.model)}, ${esc(S.model.note)}. A language model is optional:
+      it names your interests and writes short taste summaries.</p>
+      <div class="choices" role="radiogroup">
+        ${[["none", "No, keep it simple", "Everything works without one."],
+           ["ollama", "Ollama on my network", "Private. Runs on a machine you own."],
+           ["openai", "Another server with an OpenAI-style API", "vLLM, LM Studio or similar."],
+           ["anthropic", "Claude", "Titles, and your taste unless you turn that off, leave your network."]]
+          .map(([v, t, d]) => `<label class="choice"><input type="radio" name="llm" value="${v}" ${p === v ? "checked" : ""}><div><b>${t}</b><span>${d}</span></div></label>`).join("")}
+      </div>
+      <div ${p === "none" ? "hidden" : ""}>
+        ${p !== "anthropic" ? `<label for="llm_base">Server address</label><input id="llm_base" type="url" spellcheck="false" value="${esc(A.llm_base || (p === "ollama" ? "http://ollama:11434/v1" : ""))}">` : ""}
+        <label for="llm_model">Model</label><input id="llm_model" type="text" spellcheck="false" value="${esc(A.llm_model || (p === "ollama" ? "qwen3:8b" : p === "anthropic" ? "claude-opus-5-5" : ""))}">
+        ${p !== "ollama" ? `<label for="llm_key">API key</label><input id="llm_key" type="password" autocomplete="off" value="${esc(K.llm_api_key)}">` : ""}
+        ${external ? `<label class="toggle"><input type="checkbox" id="llm_external" ${A.llm_external ? "checked" : ""}> I understand data leaves my network</label>` : ""}
+      </div>
+      ${nav(true, "Continue", external && !A.llm_external)}`;
+  },
+
+  review() {
+    const where = { local: "Only this machine", lan: `Devices at home, as ${A.tls_host}`, tailscale: `Tailscale, as ${A.tls_host}` }[A.mode];
+    const arr = !A.arr_on ? "Not connected" : [A.radarr.url && "Radarr", A.sonarr.url && "Sonarr"].filter(Boolean).join(" and ") +
+      (A.curator ? `, curator on with ${A.budget} GB` : ", signals only");
+    const rows = [["Reached by", where], ["Jellyfin", checks.jellyfin ? checks.jellyfin.msg : A.jellyfin_url],
+      ["Film details", K.tmdb_api_key || S.have.tmdb_api_key ? "TMDB" : "Library only"], ["Storage", arr],
+      ["Language model", A.llm_provider === "none" ? "None" : `${A.llm_provider}, ${A.llm_model}`]];
+    return `<h1>Ready to start Muse?</h1>
+      <p class="lede">Muse writes its keys to the secrets folder, downloads what it needs and starts. The first time takes a while.</p>
+      <dl class="review">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+      ${nav(true, "Start Muse")}`;
+  },
+
+  install() {
+    return `<h1>Starting Muse</h1>
+      <p class="lede" id="install_lede"><span class="pulse"></span>This page updates as it goes. You can leave it open.</p>
+      <ul class="log" id="log"></ul>
+      <div id="install_nav"></div>`;
+  },
+
+  pair() {
+    return `<h1>Connect Vesper and Mono</h1>
+      <p class="lede">Open the admin screen and choose Muse, Connect. Scan this with your phone or type the code.
+      It carries the address, the keys and the certificate, so there's nothing to copy. The code works once.</p>
+      <div class="apps" role="group" aria-label="Which app">
+        <button class="line" type="button" data-app="vesper" aria-pressed="true">Vesper</button>
+        <button class="line" type="button" data-app="mono" aria-pressed="false">Mono</button>
+      </div>
+      <div class="pass" id="pass"><div class="qr" id="qr"><span class="small">Making a code</span></div>
+        <div class="stub" id="stub"></div></div>
+      <div class="note"><p><b>One more thing: back up the master key.</b></p>
+        <p>Copy <code>secrets/muse_master_key</code> to a password manager or a USB stick. Without it nobody can read Muse's data, you included.</p></div>
+      <div class="nav"><span></span><button class="quiet" type="button" id="finish">Close setup</button></div>`;
+  },
+};
+
+const binders = {
+  reach() {
+    document.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", () => {
+      A.mode = r.value;
+      if (!A.tls_host || A.tls_host === S.lan_ip || (S.tailscale && A.tls_host === S.tailscale.name))
+        A.tls_host = A.mode === "tailscale" && S.tailscale ? S.tailscale.name : S.lan_ip;
+      render();
+    }));
+    const h = $("#tls_host");
+    if (h) h.addEventListener("input", () => { A.tls_host = h.value.trim(); });
+  },
+  jellyfin() {
+    const run = debounce(async () => {
+      if (!A.jellyfin_url) return;
+      status("jf_check", "busy");
+      checks.jellyfin = await api("/api/check/jellyfin", { url: A.jellyfin_url, key: K.jellyfin_api_key });
+      status("jf_check", checks.jellyfin);
+      $("[data-go='1']").disabled = !checks.jellyfin.ok;
+    });
+    $("#jf_url").addEventListener("input", (e) => { A.jellyfin_url = e.target.value.trim(); run(); });
+    $("#jf_key").addEventListener("input", (e) => { K.jellyfin_api_key = e.target.value.trim(); run(); });
+    if (checks.jellyfin) status("jf_check", checks.jellyfin); else run();
+  },
+  tmdb() {
+    const run = debounce(async () => {
+      if (!K.tmdb_api_key && !S.have.tmdb_api_key) return status("tmdb_check", null);
+      status("tmdb_check", "busy");
+      checks.tmdb = await api("/api/check/tmdb", { key: K.tmdb_api_key });
+      status("tmdb_check", checks.tmdb.ok ? checks.tmdb : { ok: false, msg: "TMDB didn't accept this key" });
+    });
+    $("#tmdb_key").addEventListener("input", (e) => {
+      K.tmdb_api_key = e.target.value.trim();
+      $("[data-go='1']").textContent = K.tmdb_api_key || S.have.tmdb_api_key ? "Continue" : "Skip for now";
+      run();
+    });
+    run();
+  },
+  arr() {
+    $("#arr_on").addEventListener("change", (e) => { A.arr_on = e.target.checked; render(); });
+    const cur = $("#curator");
+    if (cur) cur.addEventListener("change", (e) => { A.curator = e.target.checked; $("#curbox").hidden = !A.curator; });
+    for (const id of ["radarr", "sonarr"]) {
+      const u = $(`#${id}_url`), k = $(`#${id}_key`);
+      if (!u) continue;
+      const run = debounce(async () => {
+        if (!A[id].url) { checks[id] = null; return status(`${id}_check`, null); }
+        status(`${id}_check`, "busy");
+        const c = await api("/api/check/arr", { app: id, url: A[id].url, key: K[id + "_api_key"] });
+        const before = checks[id] && checks[id].ok;
+        checks[id] = c;
+        if (c.ok) {
+          A[id].profile = A[id].profile || c.profiles[0] || "";
+          A[id].root = A[id].root || (c.folders[0] && c.folders[0].path) || "";
+          if (!A.budget_touched) A.budget = c.suggested_budget;
+        }
+        if (c.ok !== before) render(); else status(`${id}_check`, c);
+      }, 700);
+      u.addEventListener("input", () => { A[id].url = u.value.trim(); run(); });
+      k.addEventListener("input", () => { K[id + "_api_key"] = k.value.trim(); run(); });
+      if (checks[id]) status(`${id}_check`, checks[id]);
+      const p = $(`#${id}_profile`), r = $(`#${id}_root`);
+      if (p) p.addEventListener("change", () => { A[id].profile = p.value; });
+      if (r) r.addEventListener("change", () => { A[id].root = r.value; });
+    }
+    const b = $("#budget"), rc = $("#recent");
+    if (b) b.addEventListener("input", () => { A.budget = +b.value; A.budget_touched = true; $("#budget_out").textContent = `${A.budget} GB`; });
+    if (rc) rc.addEventListener("input", () => { A.recent = +rc.value; $("#recent_out").textContent = `${A.recent} days`; });
+  },
+  models() {
+    document.querySelectorAll("input[name=llm]").forEach((r) => r.addEventListener("change", () => { A.llm_provider = r.value; A.llm_base = ""; A.llm_model = ""; render(); }));
+    for (const [id, key] of [["llm_base", "llm_base"], ["llm_model", "llm_model"]]) {
+      const el = $("#" + id);
+      if (el) { A[key] = el.value.trim(); el.addEventListener("input", () => { A[key] = el.value.trim(); }); }
+    }
+    const k = $("#llm_key");
+    if (k) k.addEventListener("input", () => { K.llm_api_key = k.value.trim(); });
+    const x = $("#llm_external");
+    if (x) x.addEventListener("change", () => { A.llm_external = x.checked; $("[data-go='1']").disabled = !x.checked; });
+  },
+  async install() {
+    const arr = {};
+    if (A.arr_on) {
+      for (const id of ["radarr", "sonarr"]) {
+        if (!A[id].url) continue;
+        const U = id.toUpperCase();
+        arr[`${U}_URL`] = A[id].url;
+        if (A[id].profile) arr[`${U}_QUALITY_PROFILE_NAME`] = A[id].profile;
+        if (A[id].root) arr[`${U}_ROOT_FOLDER`] = A[id].root;
+      }
+      if (Object.keys(arr).length) {
+        arr.MUSE_CURATOR = A.curator ? "on" : "off";
+        arr.MUSE_CURATOR_BUDGET_GB = String(A.budget);
+        arr.MUSE_CURATOR_RECENT_DAYS = String(A.recent);
+      }
+    }
+    const answers = { mode: A.mode, tls_host: A.mode === "local" ? "" : A.tls_host,
+      tls_bind: A.mode === "tailscale" && S.tailscale ? S.tailscale.ip : A.mode === "lan" ? A.tls_host : "",
+      jellyfin_url: A.jellyfin_url, llm_provider: A.llm_provider, llm_base: A.llm_base, llm_model: A.llm_model, llm_external: A.llm_external, arr };
+    await api("/api/apply", { answers, secrets: K });
+    const poll = async () => {
+      const p = await api("/api/progress");
+      $("#log").innerHTML = p.log.map((l) => `<li class="${l.kind}">${esc(l.msg)}</li>`).join("");
+      if (p.running) return setTimeout(poll, 1500);
+      if (p.failed) {
+        A.install_failed = true;
+        $("#install_lede").textContent = "Setup stopped. The last line says why; the terminal has the details.";
+        $("#install_nav").innerHTML = nav(true, "Try again");
+      } else {
+        $("#install_lede").textContent = "Muse is running. The first hours it reads your library; recommendations get better from there.";
+        $("#install_nav").innerHTML = nav(false, "Connect Vesper and Mono");
+      }
+    };
+    poll();
+  },
+  pair() {
+    const show = async (app) => {
+      document.querySelectorAll("[data-app]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.app === app)));
+      $("#qr").innerHTML = '<span class="small">Making a code</span>';
+      $("#stub").innerHTML = "";
+      const r = await api("/api/pair", { app, admin: true, ttl: 30 });
+      if (r.error) { $("#qr").innerHTML = `<span class="small">${esc(r.error)}</span>`; return; }
+      $("#qr").innerHTML = r.svg;
+      const who = { vesper: "Vesper: Admin console, Server, Muse, Connect", mono: "Mono: Admin, Muse, Connect" }[app];
+      $("#stub").innerHTML = `<p class="small">${esc(who)}. Or type this code:</p><p class="code">${esc(r.code)}</p>
+        <p class="small">${esc(r.server)}</p>${r.fingerprint ? `<p class="small">Certificate ${esc(r.fingerprint.slice(0, 16))}, your phone shows the same.</p>` : ""}
+        <p class="small">Works once, for 30 minutes.</p>`;
+    };
+    document.querySelectorAll("[data-app]").forEach((b) => b.addEventListener("click", () => show(b.dataset.app)));
+    $("#finish").addEventListener("click", () => {
+      $("#view").innerHTML = `<h1>All set.</h1><p class="lede">You can close this page. <code>./muse status</code> shows how Muse is doing,
+        <code>./muse pair</code> makes a new code any time.</p>`;
+      at = STEPS.length - 1; thread();
+    });
+    show("vesper");
+  },
+};
+
+function validate() {
+  const id = STEPS[at].id;
+  if (id === "reach" && A.mode !== "local" && !A.tls_host) { $("#tls_host").focus(); return false; }
+  return true;
+}
+
+function render() {
+  thread();
+  const id = STEPS[at].id;
+  $("#view").innerHTML = views[id]();
+  if (binders[id]) binders[id]();
+  const first = $("#view input:not([type=radio]):not([type=checkbox]), #view button[data-go='1']");
+  if (first && id !== "install" && id !== "pair") first.focus({ preventScroll: true });
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-go]");
+  if (!b || b.disabled) return;
+  const d = +b.dataset.go;
+  if (d > 0 && !validate()) return;
+  if (STEPS[at].id === "install" && d > 0 && A.install_failed) { A.install_failed = false; render(); return; }
+  at = Math.max(0, Math.min(STEPS.length - 1, at + d));
+  window.scrollTo({ top: 0 });
+  render();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.tagName === "INPUT" && e.target.type !== "checkbox" && e.target.type !== "radio") {
+    const b = $("[data-go='1']"); if (b && !b.disabled) b.click();
+  }
+});
+
+(async () => {
+  S = await api("/api/state");
+  const e = S.env || {};
+  A.mode = e.MUSE_MODE || "lan";
+  A.tls_host = e.MUSE_TLS_HOST || (A.mode === "tailscale" && S.tailscale ? S.tailscale.name : S.lan_ip);
+  A.jellyfin_url = e.JELLYFIN_URL || `http://${S.lan_ip}:8096`;
+  A.radarr.url = e.RADARR_URL || ""; A.sonarr.url = e.SONARR_URL || "";
+  A.radarr.profile = e.RADARR_QUALITY_PROFILE_NAME || ""; A.radarr.root = e.RADARR_ROOT_FOLDER || "";
+  A.sonarr.profile = e.SONARR_QUALITY_PROFILE_NAME || ""; A.sonarr.root = e.SONARR_ROOT_FOLDER || "";
+  A.arr_on = !!(A.radarr.url || A.sonarr.url);
+  A.curator = !e.COMPOSE_PROFILES || e.COMPOSE_PROFILES.includes("curator") || !A.arr_on;
+  A.budget = +(e.MUSE_CURATOR_BUDGET_GB || 300); A.recent = +(e.MUSE_CURATOR_RECENT_DAYS || 30);
+  A.llm_provider = ["none", "ollama", "openai", "anthropic"].includes(e.MUSE_LLM_PROVIDER) ? e.MUSE_LLM_PROVIDER : "none";
+  A.llm_base = e.MUSE_LLM_BASE_URL || ""; A.llm_model = e.MUSE_LLM_MODEL || "";
+  render();
+})();
+</script>
+</body>
+</html>

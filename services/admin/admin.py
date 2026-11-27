@@ -26,12 +26,15 @@ from pathlib import Path
 import asyncpg
 from muse_schema.config import database_url, secret
 from muse_schema.crypto import (
+    P_ADMIN_NOTE,
     P_ANSWER,
     P_CANON_DATA,
+    P_CURATOR,
     P_DEDUPE,
     P_EVENT_METADATA,
     P_ITEM_DATA,
     P_OVERLAY,
+    P_PAIRING,
     P_PAYLOAD,
     P_PROFILE,
     P_QUESTION,
@@ -73,7 +76,9 @@ ROLES: dict[str, list[str]] = {
     ],
     "muse_curator": [
         "GRANT SELECT ON event, item, taste_profile, user_overlay, user_alias TO {r}",
-        "GRANT SELECT, INSERT, UPDATE ON curator_managed_item, curator_download_log, soon_gone TO {r}",
+        "GRANT SELECT, INSERT, UPDATE ON curator_managed_item, curator_download_log, soon_gone, curator_setting, curator_activity, "
+        "admin_notification, notification_log, webhook_delivery TO {r}",
+        "GRANT SELECT ON webhook TO {r}",
     ],
     # The multi-space engine's own services.
     "muse_vector": [  # services/embedding-worker/vector_worker.py: content/taste vectors, deep taste, learned ranker
@@ -88,7 +93,10 @@ ROLES: dict[str, list[str]] = {
         "GRANT SELECT, INSERT, DELETE ON event TO {r}",  # ratings/answers/imports; forget-history
         "GRANT SELECT, INSERT, UPDATE, DELETE ON access_log, api_token, calendar_feed, context_signal, feature_suggestion, goal, group_pick, "
         "group_session, import_job, link_code, muse_user, notification_log, person_ref, profile_fact, question, retention_policy, room_presence, "
-        "taste_dirty, user_alias, user_overlay, wanted, webhook, webhook_delivery TO {r}",
+        "taste_dirty, user_alias, user_overlay, wanted, webhook, webhook_delivery, admin_notification, pairing_code TO {r}",
+        # admin curator controls from Vesper/Mono: keep, remove now, pause, budget
+        "GRANT SELECT, UPDATE ON curator_managed_item, curator_setting, soon_gone TO {r}",
+        "GRANT SELECT, INSERT ON curator_activity TO {r}",
         "GRANT SELECT, DELETE ON engine_impression TO {r}",
         "GRANT SELECT ON taste_facet, taste_model, catalog_artist, catalog_release, item_audio TO {r}",
         "GRANT USAGE ON SEQUENCE access_log_id_seq TO {r}",
@@ -96,7 +104,7 @@ ROLES: dict[str, list[str]] = {
     "muse_catalog": [  # services/catalog: music beyond the library, new releases, the wanted list
         "GRANT SELECT, INSERT ON event TO {r}",
         "GRANT SELECT ON user_alias, webhook TO {r}",
-        "GRANT SELECT, INSERT, UPDATE ON catalog_artist, catalog_name, catalog_release, wanted, item_audio, notification_log, webhook_delivery TO {r}",
+        "GRANT SELECT, INSERT, UPDATE ON catalog_artist, catalog_name, catalog_release, wanted, item_audio, notification_log, webhook_delivery, admin_notification TO {r}",
     ],
     "muse_audio": [  # services/audio-analyzer
         "GRANT SELECT ON event TO {r}",
@@ -284,6 +292,10 @@ SEALED_COLUMNS = [
     ("question_log", ["payload"], P_QUESTION, ("id",)),
     ("question_log", ["answer"], P_ANSWER, ("id",)),
     ("user_overlay", ["pinned_topics"], P_OVERLAY, ("user_id",)),
+    ("curator_managed_item", ["data"], P_CURATOR, ("id",)),
+    ("curator_activity", ["data"], P_CURATOR, ("id",)),
+    ("admin_notification", ["data"], P_ADMIN_NOTE, ("id",)),
+    ("pairing_code", ["payload"], P_PAIRING, ("code_hash",)),
 ]
 
 

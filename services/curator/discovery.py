@@ -31,9 +31,10 @@ TRAKT_BASE = "https://api.trakt.tv"
 # real file sizes post-download. Deliberately conservative (slightly high) so the curator
 # errs toward staying under budget rather than over.
 ESTIMATED_BYTES = {
-    "movie": 4 * 1024**3,  # 4GB
-    "series_episode": 1 * 1024**3,  # 1GB (per series add: Sonarr monitors; size grows as episodes arrive)
+    "movie": 6 * 1024**3,  # 6GB, a 1080p film
+    "series_episode": 12 * 1024**3,  # 12GB, one season (series start with season 1; real sizes replace this after the sync)
 }
+SEASON_ESTIMATED_BYTES = ESTIMATED_BYTES["series_episode"]
 
 
 def catalog_candidates(qdrant: QdrantClient, arr_item_type: str, limit: int = 3000) -> list[CandidateInput]:

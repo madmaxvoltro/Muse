@@ -27,6 +27,21 @@ https://{$MUSE_TLS_HOST}:8443 {
 		}
 		reverse_proxy ingestion-api:8000
 	}
+	# Muse's root certificate (public): a server pairing with a code fetches it, checks it
+	# against the fingerprint in the code, and then trusts exactly this root.
+	handle /muse-ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type application/x-pem-file
+		file_server
+	}
+	# Query API: the admin feed and curator controls (Vesper, Mono), QR pairing (/query/v1/pair).
+	handle_path /query/* {
+		request_body {
+			max_size 64MB
+		}
+		reverse_proxy query-api:8002
+	}
 	handle /mcp* {
 		reverse_proxy mcp-server:8002
 	}

@@ -6,6 +6,10 @@
   ./muse status [--json] [--url]
   ./muse doctor           find and explain problems
   ./muse upgrade          pull, rebuild, restart (migrations run automatically)
+  ./muse setup --web      the same in your browser (or on your phone: it shows a QR code)
+  ./muse pair [vesper|mono]  QR code / one-time code: connect Vesper's or Mono's server, no keys to copy
+  ./muse invite [--user ID]  a one-time code with a personal token (one person's app or assistant)
+  ./muse curator [status|pause|resume|run|budget GB|keep|unkeep|remove TYPE TMDB_ID]
   ./muse keys             show the keys clients need (Vesper, Jellyfin plugin, MCP)
   ./muse ca               print the TLS root certificate (lan/tailscale mode)
   ./muse import KIND FILE --user ID [--profile NAME]
@@ -383,16 +387,94 @@ def preflight() -> None:
         ok("NVIDIA GPU found")
 
 
+def check_arr(url: str, key: str) -> dict:
+    """Radarr/Sonarr reachable with this key? Returns {ok, msg, profiles, folders} (folders with free GB)."""
+    base = url.rstrip("/")
+    code, info = http_json(f"{base}/api/v3/system/status", {"X-Api-Key": key})
+    if code in (401, 403):
+        return {"ok": False, "msg": "the API key was rejected (Settings > General > API Key)", "profiles": [], "folders": []}
+    if code != 200 or not isinstance(info, dict):
+        return {"ok": False, "msg": f"can't reach {url} from this machine", "profiles": [], "folders": []}
+    _, profiles = http_json(f"{base}/api/v3/qualityprofile", {"X-Api-Key": key})
+    _, folders = http_json(f"{base}/api/v3/rootfolder", {"X-Api-Key": key})
+    folders = [{"path": f.get("path"), "free_gb": round((f.get("freeSpace") or 0) / 1024**3)} for f in (folders or []) if isinstance(f, dict)]
+    return {"ok": True, "msg": f"{info.get('appName', 'arr')} {info.get('version', '')}".strip(),
+            "profiles": [p.get("name") for p in (profiles or []) if isinstance(p, dict)], "folders": folders}
+
+
+def suggest_budget(free_gb: int | None) -> int:
+    """A budget that leaves room: a third of the free space, between 100 and 1000 GB."""
+    if not free_gb:
+        return 300
+    return max(100, min(1000, int(free_gb / 3 / 50) * 50 or 100))
+
+
+def ask_arr(env: dict, provided: dict) -> dict:
+    """The optional Radarr/Sonarr step: the arr adapter (signal) and the curator (adds and removes)."""
+    out: dict = {}
+    have = bool(env.get("RADARR_URL") or env.get("SONARR_URL"))
+    print("    Muse can manage a storage budget through Radarr and Sonarr: it adds what your household would like")
+    print("    and, when over budget, removes what nobody will miss. Never removed: anything watched in the last")
+    print("    30 days, anything on someone's list, asked for, a favourite, or kept by you. You get a notice in")
+    print("    Vesper for everything it does, with 'keep' and 'remove now'.")
+    if not yes("connect Radarr/Sonarr?", default=have):
+        return out
+    free = []
+    for app, port, kind in (("radarr", 7878, "films"), ("sonarr", 8989, "series")):
+        url = ask(f"{app.capitalize()} URL (Enter to skip {kind})", env.get(f"{app.upper()}_URL") or f"http://127.0.0.1:{port}")
+        if not url or url.lower() in ("skip", "-"):
+            continue
+        key = read_secret(f"{app}_api_key") or ask(f"{app.capitalize()} API key (Settings > General)", secret=True)
+        res = check_arr(url, key)
+        (ok if res["ok"] else warn)(f"{app}: {res['msg']}")
+        if not res["ok"]:
+            if yes(f"try {app} again?", default=True):
+                key = ask(f"{app.capitalize()} API key", secret=True)
+                res = check_arr(url, key)
+                (ok if res["ok"] else warn)(f"{app}: {res['msg']}")
+            if not res["ok"] and not yes(f"keep {app} anyway?", default=False):
+                continue
+        out[f"{app.upper()}_URL"] = url
+        provided[f"{app}_api_key"] = key
+        if res["profiles"]:
+            dflt = env.get(f"{app.upper()}_QUALITY_PROFILE_NAME") or res["profiles"][0]
+            out[f"{app.upper()}_QUALITY_PROFILE_NAME"] = ask(f"quality profile ({', '.join(res['profiles'])})", dflt, choices=res["profiles"])
+        if res["folders"]:
+            paths = [f["path"] for f in res["folders"]]
+            for f in res["folders"]:
+                print(f"      {f['path']}  ({f['free_gb']} GB free)")
+            chosen = ask("root folder", env.get(f"{app.upper()}_ROOT_FOLDER") or paths[0], choices=paths)
+            out[f"{app.upper()}_ROOT_FOLDER"] = chosen
+            free.append(next(f["free_gb"] for f in res["folders"] if f["path"] == chosen))
+    if not out:
+        return out
+    out["MUSE_CURATOR"] = "on" if yes("let Muse add and remove titles (the curator)?", default=True) else "off"
+    if out["MUSE_CURATOR"] == "on":
+        hint = suggest_budget(min(free) if free else None)
+        if free:
+            print(f"      {min(free)} GB free; Muse always leaves at least 50 GB untouched.")
+        out["MUSE_CURATOR_BUDGET_GB"] = ask("storage budget for Muse in GB", env.get("MUSE_CURATOR_BUDGET_GB") or str(hint))
+        out["MUSE_CURATOR_RECENT_DAYS"] = ask("never remove what was watched within (days)", env.get("MUSE_CURATOR_RECENT_DAYS") or "30")
+    return out
+
+
 def cmd_setup(a: argparse.Namespace) -> None:
+    if getattr(a, "web", False):
+        sys.path.insert(0, str(ROOT / "installer"))
+        import web  # installer/web.py
+
+        web.serve(a)
+        return
     print(_c("1", "Muse setup") + "  (Enter accepts the default; you can re-run this any time, existing keys are kept)")
     preflight()
     env = env_values()
     provided: dict[str, str] = {}
+    ans: dict = {}
 
-    step("2/7  How will Muse be reached?")
+    step("2/8  How will Muse be reached?")
     print("    local      Jellyfin/Vesper run on this same machine (most private: nothing on the network can reach Muse)")
-    print("    lan        other machines on your network connect (HTTPS with Muse's own certificate)")
-    print("    tailscale  other machines connect over Tailscale (HTTPS on your tailnet address)")
+    print("    lan        other machines and phones on your network connect (HTTPS with Muse's own certificate)")
+    print("    tailscale  other machines and phones connect over Tailscale (HTTPS on your tailnet address)")
     mode = a.mode or ask("mode", env.get("MUSE_MODE", "local"), choices=["local", "lan", "tailscale"])
     tls_host = tls_bind = ""
     if mode == "lan":
@@ -405,8 +487,9 @@ def cmd_setup(a: argparse.Namespace) -> None:
         tls_bind = ask("Tailscale IP to listen on", env.get("MUSE_TLS_BIND") or ip)
         tls_host = ask("name clients use", env.get("MUSE_TLS_HOST") or name or ip)
     ok(f"mode: {mode}")
+    ans.update(mode=mode, tls_host=tls_host, tls_bind=tls_bind)
 
-    step("3/7  Jellyfin")
+    step("3/8  Jellyfin")
     jf_url = a.jellyfin_url or ask("Jellyfin URL", env.get("JELLYFIN_URL", "http://127.0.0.1:8096"))
     jf_key = a.jellyfin_key or read_secret("jellyfin_api_key") or ask("Jellyfin API key (Dashboard > API Keys > +)", secret=True)
     good, msg = check_jellyfin(jf_url, jf_key)
@@ -414,9 +497,9 @@ def cmd_setup(a: argparse.Namespace) -> None:
     if not good and sys.stdin.isatty() and not yes("continue anyway?", default=False):
         die("fix the Jellyfin URL/key and run ./muse setup again")
     provided["jellyfin_api_key"] = jf_key
-    jf_local = urllib.parse.urlparse(jf_url).hostname in ("127.0.0.1", "localhost", "::1")
+    ans["jellyfin_url"] = jf_url
 
-    step("4/7  Content understanding (TMDB, optional but recommended)")
+    step("4/8  Content understanding (TMDB, optional but recommended)")
     print("    A free TMDB key adds keywords, cast and 'fans also liked' to every title. TMDB only sees which")
     print("    titles are looked up, never who watched what. https://www.themoviedb.org/settings/api")
     tmdb = a.tmdb_key if a.tmdb_key is not None else (read_secret("tmdb_api_key") or ask("TMDB API key or read token (Enter to skip)", "", secret=True))
@@ -427,9 +510,30 @@ def cmd_setup(a: argparse.Namespace) -> None:
         warn("no TMDB key: recommendations use library metadata only")
     provided["tmdb_api_key"] = tmdb
 
-    step("5/7  Models")
+    step("5/8  Radarr & Sonarr (optional)")
+    if a.radarr_url or a.sonarr_url:
+        arr = {}
+        for app, url, key in (("radarr", a.radarr_url, a.radarr_key), ("sonarr", a.sonarr_url, a.sonarr_key)):
+            if url:
+                arr[f"{app.upper()}_URL"] = url
+                provided[f"{app}_api_key"] = key or read_secret(f"{app}_api_key")
+                res = check_arr(url, provided[f"{app}_api_key"])
+                (ok if res["ok"] else warn)(f"{app}: {res['msg']}")
+        arr["MUSE_CURATOR"] = "on" if a.curator else "off"
+        if a.budget_gb:
+            arr["MUSE_CURATOR_BUDGET_GB"] = str(a.budget_gb)
+    elif sys.stdin.isatty() and not a.yes:
+        arr = ask_arr(env, provided)
+    else:
+        arr = {k: env[k] for k in env if k.startswith(("RADARR_", "SONARR_", "MUSE_CURATOR"))}
+    if arr.get("RADARR_URL") or arr.get("SONARR_URL"):
+        ok("Radarr/Sonarr connected" + (", curator on" if arr.get("MUSE_CURATOR") == "on" else ", signals only"))
+    else:
+        ok("skipped (./muse setup again any time)")
+    ans["arr"] = arr
+
+    step("6/8  Models")
     gpu, gb = has_nvidia(), mem_gb()
-    ollama = env.get("MUSE_EMBED_BASE_URL", "")
     if gpu:
         model, device, note = "Qwen/Qwen3-Embedding-0.6B", "cuda", "GPU"
     elif gb >= 12:
@@ -455,39 +559,62 @@ def cmd_setup(a: argparse.Namespace) -> None:
         key = ask("LLM API key (Enter if none)", "", secret=True) if use_llm != "ollama" else ""
         if key:
             provided["llm_api_key"] = key
-    tz = env.get("MUSE_TIMEZONE") or local_timezone()
-    ok(f"timezone for taste rhythms: {tz}")
+    ans.update(model=model, device=device, gpu=gpu, llm_provider=use_llm, llm_base=llm_base, llm_model=llm_model, llm_external=llm_external)
 
-    step("6/7  Secrets and configuration")
+    apply_setup(ans, provided, start=not a.no_start)
+    summary(mode, tls_host)
+    if mode in ("lan", "tailscale") and not a.no_start and sys.stdin.isatty() and not a.yes:
+        if yes("connect Vesper now (a code for its admin console)?", default=True):
+            pair_and_show("vesper", admin_token=True)
+
+
+def apply_setup(ans: dict, provided: dict, start: bool = True, log=None) -> None:
+    """Steps 7 and 8, shared by the terminal and the web setup: secrets, .env, start, verify."""
+    env = env_values()
+    say = log or (lambda kind, msg: {"ok": ok, "warn": warn, "fail": fail, "step": step}[kind](msg))
+    mode = ans["mode"]
+    jf_local = urllib.parse.urlparse(ans.get("jellyfin_url", "")).hostname in ("127.0.0.1", "localhost", "::1")
+    say("step", "7/8  Secrets and configuration")
     created = ensure_secrets(provided)
-    ok(f"secrets in {SECRETS} ({len(created)} created, existing ones kept)")
+    say("ok", f"secrets in {SECRETS} ({len(created)} created, existing ones kept)")
     compose_files = ["docker-compose.yml"]
+    if (ROOT / "docker-compose.images.yml").exists() and env.get("MUSE_BUILD", "auto") != "local" and not ans.get("gpu"):
+        compose_files.append("docker-compose.images.yml")  # ready-made images from GHCR
     if mode == "local" and jf_local:
         compose_files.append("docker-compose.vesper.yml")
-    if gpu:
+    if ans.get("gpu"):
         compose_files.append("docker-compose.gpu.yml")
-    profiles = ["tls"] if mode in ("lan", "tailscale") else []
+    profiles = [p for p in env.get("COMPOSE_PROFILES", "").split(",") if p and p not in ("tls", "curator", "arr")]
+    if mode in ("lan", "tailscale"):
+        profiles.append("tls")
+    arr = ans.get("arr") or {}
+    if arr.get("RADARR_URL") or arr.get("SONARR_URL"):
+        profiles.append("arr")
+        if arr.get("MUSE_CURATOR", "on") == "on":
+            profiles.append("curator")
     values = {
         "MUSE_MODE": mode,
         "COMPOSE_FILE": ":".join(compose_files),
-        "COMPOSE_PROFILES": ",".join(profiles),
+        "COMPOSE_PROFILES": ",".join(dict.fromkeys(profiles)),
         "MUSE_BIND": "127.0.0.1",
         "MUSE_RECO_PORT": env.get("MUSE_RECO_PORT", "8770"),
         "MUSE_INGEST_PORT": env.get("MUSE_INGEST_PORT", "8771"),
-        "MUSE_TLS_HOST": tls_host,
-        "MUSE_TLS_BIND": tls_bind or "127.0.0.1",
+        "MUSE_QUERY_PORT": env.get("MUSE_QUERY_PORT", "8772"),
+        "MUSE_TLS_HOST": ans.get("tls_host", ""),
+        "MUSE_TLS_BIND": ans.get("tls_bind") or "127.0.0.1",
         "MUSE_TLS_PORT": env.get("MUSE_TLS_PORT", "8443"),
-        "JELLYFIN_URL": jf_url,
-        "MUSE_EMBED_PROVIDER": "openai" if ollama else "local",
-        "MUSE_EMBEDDING_MODEL": env.get("MUSE_EMBEDDING_MODEL", model),
-        "MUSE_EMBED_DEVICE": device,
-        "MUSE_EMBED_BASE_URL": ollama,
-        "MUSE_LLM_PROVIDER": use_llm or "none",
-        "MUSE_LLM_BASE_URL": llm_base,
-        "MUSE_LLM_MODEL": llm_model,
-        "MUSE_LLM_ALLOW_EXTERNAL": llm_external,
-        "MUSE_TIMEZONE": tz,
+        "JELLYFIN_URL": ans.get("jellyfin_url", ""),
+        "MUSE_EMBED_PROVIDER": "openai" if env.get("MUSE_EMBED_BASE_URL") else "local",
+        "MUSE_EMBEDDING_MODEL": env.get("MUSE_EMBEDDING_MODEL", ans.get("model", "Qwen/Qwen3-Embedding-0.6B")),
+        "MUSE_EMBED_DEVICE": ans.get("device", "cpu"),
+        "MUSE_EMBED_BASE_URL": env.get("MUSE_EMBED_BASE_URL", ""),
+        "MUSE_LLM_PROVIDER": ans.get("llm_provider") or "none",
+        "MUSE_LLM_BASE_URL": ans.get("llm_base", ""),
+        "MUSE_LLM_MODEL": ans.get("llm_model", ""),
+        "MUSE_LLM_ALLOW_EXTERNAL": ans.get("llm_external", "false"),
+        "MUSE_TIMEZONE": env.get("MUSE_TIMEZONE") or local_timezone(),
         "MUSE_TMDB_LANGUAGE": env.get("MUSE_TMDB_LANGUAGE", "en-US"),
+        **{k: v for k, v in arr.items() if k != "MUSE_CURATOR"},
     }
     keep = {k: v for k, v in env.items() if k not in values}
     if ENV.exists():
@@ -495,18 +622,33 @@ def cmd_setup(a: argparse.Namespace) -> None:
     ENV.write_text("# Written by ./muse setup (secrets live in ./secrets, not here)\n" +
                    "".join(f"{k}={v}\n" for k, v in {**values, **keep}.items()))
     os.chmod(ENV, 0o600)
-    ok(f"configuration in {ENV}")
+    say("ok", f"configuration in {ENV}")
 
-    step("7/7  Starting Muse")
-    if a.no_start:
-        ok("skipped (--no-start); run ./muse up")
-    else:
-        build_args = ["--build-arg", "TORCH_INDEX=https://download.pytorch.org/whl/cu124"] if gpu else []
-        print("    building images (the first time takes a while: Python packages and PyTorch)...")
+    say("step", "8/8  Starting Muse")
+    if not start:
+        say("ok", "skipped (--no-start); run ./muse up")
+        return
+    if "docker-compose.images.yml" in compose_files:
+        say("ok", "downloading ready-made images (falls back to building here if they aren't available)")
+        if compose("pull", "--quiet", check=False).returncode != 0:
+            say("warn", "image download failed; building locally instead")
+            _drop_images_file()
+    build_args = ["--build-arg", "TORCH_INDEX=https://download.pytorch.org/whl/cu124"] if ans.get("gpu") else []
+    if "docker-compose.images.yml" not in env_values().get("COMPOSE_FILE", ""):
+        say("ok", "building images (the first time takes a while: Python packages and PyTorch)...")
         compose("build", *build_args)
-        compose("up", "-d")
-        wait_healthy()
-    summary(mode, tls_host)
+    compose("up", "-d")
+    wait_healthy()
+
+
+def _drop_images_file() -> None:
+    env = env_values()
+    files = [f for f in env.get("COMPOSE_FILE", "").split(":") if f and f != "docker-compose.images.yml"]
+    text = ENV.read_text()
+    text = re.sub(r"^COMPOSE_FILE=.*$", "COMPOSE_FILE=" + ":".join(files), text, flags=re.M)
+    if "MUSE_BUILD=" not in text:
+        text += "MUSE_BUILD=local\n"
+    ENV.write_text(text)
 
 
 def wait_healthy(timeout: int = 600) -> None:
@@ -564,8 +706,12 @@ def summary(mode: str, tls_host: str) -> None:
     print(f"    Jellyfin plugin      read key: {first_key('read_keys', 'jellyfin-plugin')}")
     print(f"    Mono                 MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"    Status page          {reco}/status?token={read_secret('status_token')}")
+    print(f"    Query API            {client_urls()['query_url']}  (admin feed, curator, pairing)")
     if mode in ("lan", "tailscale"):
         print("    TLS                  clients must trust Muse's certificate: ./muse ca > muse-ca.crt")
+        print("    Vesper / Mono        ./muse pair vesper, ./muse pair mono (a code for their admin screen, no keys to copy)")
+    if "curator" in env.get("COMPOSE_PROFILES", ""):
+        print("    Curator              ./muse curator (status, keep, pause); notices show in Vesper for the admin")
     print("\n    Next: import history (./muse import letterboxd export.zip --user <id>), watch ./muse status.")
     print(_c("33", "    Back up secrets/muse_master_key somewhere safe (password manager, USB stick). Without it,"))
     print(_c("33", "    nobody can read Muse's data, including you."))
@@ -578,10 +724,14 @@ def need_setup() -> None:
         die("Muse isn't set up yet: run ./muse setup")
 
 
+def images_mode() -> bool:
+    return "docker-compose.images.yml" in env_values().get("COMPOSE_FILE", "")
+
+
 def cmd_up(a) -> None:
     need_setup()
     ensure_secrets({})  # secrets added by newer versions (idempotent)
-    compose("up", "-d", "--build")
+    compose("up", "-d") if images_mode() else compose("up", "-d", "--build")
     wait_healthy()
 
 
@@ -685,7 +835,13 @@ def cmd_upgrade(a) -> None:
     if (ROOT / ".git").exists():
         subprocess.run(["git", "pull", "--ff-only"], cwd=ROOT, check=True)
     ensure_secrets({})
-    compose("build", "--pull")
+    if images_mode():
+        if compose("pull", "--quiet", check=False).returncode != 0:
+            warn("image download failed; building locally instead")
+            _drop_images_file()
+            compose("build", "--pull")
+    else:
+        compose("build", "--pull")
     compose("up", "-d")
     wait_healthy()
 
@@ -699,6 +855,177 @@ def cmd_keys(a) -> None:
     print(f"Mono                     MONO_MUSE_API_KEY={ensure_key('adapter_keys', 'mono')}  MONO_MUSE_READ_KEY={ensure_key('read_keys', 'mono')}")
     print(f"MCP server               read: {read_secret('mcp_read_key')}  answer: {read_secret('mcp_answer_key')}")
     print(f"Status token             {read_secret('status_token')}")
+
+
+# ---- pairing (QR) and the curator -------------------------------------------------------------
+
+def query_local() -> str:
+    return f"http://127.0.0.1:{env_values().get('MUSE_QUERY_PORT', '8772')}"
+
+
+def api(method: str, path: str, body: dict | None = None) -> dict:
+    """The query API on this machine, as the household admin."""
+    req = urllib.request.Request(f"{query_local()}{path}", method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {read_secret('admin_token')}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        die(f"{e.code}: {e.read().decode(errors='replace')[:400]}")
+    except (urllib.error.URLError, OSError):
+        die("the query API isn't reachable on this machine: is Muse running? (./muse status)")
+    return {}
+
+
+def client_urls() -> dict:
+    env = env_values()
+    if base_url():
+        b = base_url()
+        return {"reco_url": f"{b}/reco", "ingest_url": f"{b}/ingest", "query_url": f"{b}/query"}
+    return {"reco_url": f"http://127.0.0.1:{env.get('MUSE_RECO_PORT', '8770')}", "ingest_url": f"http://127.0.0.1:{env.get('MUSE_INGEST_PORT', '8771')}",
+            "query_url": query_local()}
+
+
+def ca_pem() -> str:
+    r = compose("exec", "-T", "tls-proxy", "cat", "/data/caddy/pki/authorities/local/root.crt", check=False, capture=True)
+    return r.stdout.decode() if r.returncode == 0 else ""
+
+
+def pem_sha256(pem: str) -> str:
+    import hashlib
+
+    body = "".join(l for l in pem.splitlines() if l and not l.startswith("-----"))
+    return hashlib.sha256(base64.b64decode(body)).hexdigest() if body else ""
+
+
+def pairing_payload(purpose: str) -> dict:
+    env = env_values()
+    payload: dict = {"server": env.get("MUSE_TLS_HOST") or socket.gethostname(), **client_urls()}
+    if purpose in ("vesper", "admin"):
+        # vesper-server: reads with the vesper read key; writes events and acts per profile on the
+        # query API with Muse's `jellyfin` adapter key (its events join the Jellyfin catalog).
+        payload.update(read_key=first_key("read_keys", "vesper"), ingest_key=first_key("adapter_keys", "jellyfin"),
+                       answer_key=first_key("adapter_keys", "muse"))
+    if purpose in ("mono", "admin"):
+        payload.update(mono_api_key=ensure_key("adapter_keys", "mono"), mono_read_key=ensure_key("read_keys", "mono"),
+                       mono_stream_token=read_secret("mono_stream_token"))
+    pem = ca_pem() if base_url() else ""
+    if pem:
+        payload.update(ca_pem=pem, ca_sha256=pem_sha256(pem))
+    return payload
+
+
+def pairing_link(code: str, payload: dict) -> str:
+    q = {"u": payload["query_url"], "c": code}
+    if payload.get("ca_sha256"):
+        q["fp"] = payload["ca_sha256"]
+    return "muse://pair?" + urllib.parse.urlencode(q)
+
+
+def make_pairing(purpose: str, admin_token: bool = False, user: str | None = None, ttl: int = 15) -> tuple[str, str, dict]:
+    payload = pairing_payload("admin" if admin_token else purpose)
+    res = api("POST", "/v1/admin/pairing", {"purpose": purpose, "payload": payload, "ttl_minutes": ttl, "admin_token": admin_token, "user": user})
+    return res["code"], pairing_link(res["code"], payload), payload
+
+
+def show_qr(text: str) -> None:
+    sys.path.insert(0, str(ROOT / "installer"))
+    import qr  # installer/qr.py, standard library only
+
+    print()
+    for line in qr.to_terminal(qr.encode(text, "M")).splitlines():
+        print("    " + line)
+    print()
+
+
+def pair_and_show(purpose: str, admin_token: bool = False, user: str | None = None, ttl: int = 15) -> None:
+    if not base_url():
+        warn("Muse runs in local mode: only a Vesper or Mono on this same machine can connect (./muse setup: lan or tailscale for others).")
+    code, link, payload = make_pairing(purpose, admin_token, user, ttl)
+    app = {"vesper": "Vesper", "mono": "Mono", "admin": "Vesper"}[purpose]
+    where = {"Vesper": "the admin console: Server, Muse, Connect", "Mono": "Admin, Muse, Connect"}[app]
+    step(f"Connect {app}: in {where}, scan this or type the code")
+    show_qr(link)
+    print(f"    or type this code in {app}: {_c('1', code)}")
+    print(f"    server: {payload['query_url']}")
+    if payload.get("ca_sha256"):
+        print(f"    certificate fingerprint (the app shows the same): {payload['ca_sha256'][:16]}...")
+    print(f"    The code works once and expires in {ttl} minutes.")
+
+
+def cmd_pair(a) -> None:
+    """Vesper and Mono pair their *server* with Muse (as the admin: the curator's notices and
+    controls come with it). A personal token for one person's app or assistant: --user."""
+    need_setup()
+    pair_and_show(a.app, admin_token=not a.user, user=a.user, ttl=a.ttl)
+
+
+def cmd_invite(a) -> None:
+    """A family member's phone: Vesper with their own token, not the admin's."""
+    need_setup()
+    pair_and_show("vesper", admin_token=False, user=a.user, ttl=a.ttl)
+
+
+def _gb(b) -> str:
+    return f"{(b or 0) / 1024**3:.0f} GB"
+
+
+def cmd_curator(a) -> None:
+    need_setup()
+    action = a.action
+    if action in ("pause", "resume"):
+        api("PATCH", "/v1/admin/curator", {"paused": action == "pause"})
+        ok("curator paused: nothing is added or removed" if action == "pause" else "curator running")
+        return
+    if action == "budget":
+        if not a.args:
+            die("usage: ./muse curator budget <GB>")
+        st = api("PATCH", "/v1/admin/curator", {"budget_gb": int(a.args[0])})
+        ok(f"budget {_gb(st['budget_bytes'])}")
+        return
+    if action == "run":
+        api("POST", "/v1/admin/curator/run")
+        ok("a full cycle starts within a minute; follow it with ./muse logs curator")
+        return
+    if action in ("keep", "unkeep", "remove"):
+        if len(a.args) != 2:
+            die(f"usage: ./muse curator {action} movie|series <tmdb id>")
+        t, tid = a.args
+        if action == "keep":
+            api("POST", f"/v1/admin/curator/items/{t}/{tid}/keep")
+            ok("kept: the curator will never remove it")
+        elif action == "unkeep":
+            api("DELETE", f"/v1/admin/curator/items/{t}/{tid}/keep")
+            ok("no longer pinned (the other protections still apply)")
+        else:
+            api("POST", f"/v1/admin/curator/items/{t}/{tid}/remove-now")
+            ok("removing within a minute or two")
+        return
+    st = api("GET", "/v1/admin/curator")
+    if a.json:
+        print(json.dumps(st, indent=2))
+        return
+    used, budget = st["usage_bytes"], st["budget_bytes"]
+    width = 30
+    fill = min(width, int(width * used / budget)) if budget else 0
+    step("Curator" + (_c("33", "  (paused)") if st["paused"] else ""))
+    print(f"    [{'#' * fill}{'.' * (width - fill)}] {_gb(used)} of {_gb(budget)}")
+    for t, free in (st.get("free_bytes") or {}).items():
+        if free is not None:
+            print(f"    free on the {'film' if t == 'movie' else 'series'} disk: {_gb(free)}")
+    c = st["counts"]
+    print(f"    {c['managed']} titles managed, {c['pinned']} kept, {c['soon_gone']} on Soon Gone")
+    print(f"    last cycle: {st['last_cycle_at'] or 'not yet'}")
+    for e in st["errors"]:
+        warn(e)
+    if st["soon_gone"]:
+        step("Soon Gone")
+        for it in st["soon_gone"]:
+            print(f"    {it.get('title') or it['tmdb_id']:<40} leaves {it['expires_at'][:16].replace('T', ' ')}  ./muse curator keep {it['type']} {it['tmdb_id']}")
+    if st["activity"]:
+        step("Recently")
+        for e in st["activity"][:12]:
+            print(f"    {e['at'][:16].replace('T', ' ')}  {e['kind']:<16} {e.get('title') or e.get('tmdb_id') or ''}")
 
 
 def cmd_ca(a) -> None:
@@ -870,7 +1197,30 @@ def main() -> None:
     s.add_argument("--tmdb-key")
     s.add_argument("--no-start", action="store_true")
     s.add_argument("--yes", action="store_true", help="accept defaults")
+    s.add_argument("--web", action="store_true", help="set up in the browser (also on your phone, via a QR code)")
+    s.add_argument("--web-port", type=int, default=8790)
+    s.add_argument("--radarr-url")
+    s.add_argument("--radarr-key")
+    s.add_argument("--sonarr-url")
+    s.add_argument("--sonarr-key")
+    s.add_argument("--curator", action="store_true", help="with --radarr-url/--sonarr-url: let Muse add and remove titles")
+    s.add_argument("--budget-gb", type=int)
     s.set_defaults(fn=cmd_setup)
+    p = sub.add_parser("pair", help="QR code to connect Vesper or Mono")
+    p.add_argument("app", nargs="?", default="vesper", choices=["vesper", "mono", "admin"])
+    p.add_argument("--admin", action="store_true", help=argparse.SUPPRESS)  # always on for a server pairing
+    p.add_argument("--user", help="instead of the admin: a personal token for this user id (./muse users)")
+    p.add_argument("--ttl", type=int, default=15, help="minutes the code stays valid")
+    p.set_defaults(fn=cmd_pair)
+    p = sub.add_parser("invite", help="QR code for a family member's phone")
+    p.add_argument("--user", help="their user id (./muse users)")
+    p.add_argument("--ttl", type=int, default=60 * 24)
+    p.set_defaults(fn=cmd_invite)
+    p = sub.add_parser("curator", help="the storage curator: status, pause, resume, run, budget, keep, unkeep, remove")
+    p.add_argument("action", nargs="?", default="status", choices=["status", "pause", "resume", "run", "budget", "keep", "unkeep", "remove"])
+    p.add_argument("args", nargs="*")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_curator)
     for name, fn in (("up", cmd_up), ("down", cmd_down), ("doctor", cmd_doctor), ("upgrade", cmd_upgrade), ("keys", cmd_keys),
                      ("ca", cmd_ca), ("users", cmd_users), ("rotate-keys", cmd_rotate_keys)):
         sub.add_parser(name).set_defaults(fn=fn)

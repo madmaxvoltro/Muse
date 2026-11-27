@@ -1,0 +1,55 @@
+# Ready-made images from GitHub Container Registry, so nothing is built on your machine.
+# ./muse setup adds this file to COMPOSE_FILE when it exists (not with a GPU: the CUDA builds
+# of PyTorch are built locally). If a download fails, ./muse builds locally instead and sets
+# MUSE_BUILD=local. Pin a version with MUSE_IMAGE_TAG (default: latest, which ./muse upgrade pulls).
+# Built by .github/workflows/images.yml for linux/amd64 and linux/arm64.
+
+services:
+  admin:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-admin:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  ingestion-api:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-ingestion-api:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  recommendation-api:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-recommendation-api:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  embedding-worker:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-embedding-worker:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  vector-worker:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-embedding-worker:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  query-api:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-query-api:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  catalog:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-catalog:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  audio-analyzer:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-audio-analyzer:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  scheduler:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-scheduler:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  curator:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-curator:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  jellyfin-adapter:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-jellyfin-adapter:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  navidrome-adapter:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-navidrome-adapter:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  audiobookshelf-adapter:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-audiobookshelf-adapter:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  arr-adapter:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-arr-adapter:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  searxng-adapter:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-searxng-adapter:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing
+  mcp-server:
+    image: ${MUSE_IMAGE_REGISTRY:-ghcr.io/madmaxvoltro}/muse-mcp-server:${MUSE_IMAGE_TAG:-latest}
+    pull_policy: missing

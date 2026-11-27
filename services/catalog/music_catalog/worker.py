@@ -353,6 +353,14 @@ async def check_releases(conn, mb: MusicBrainz, loved: dict[uuid.UUID, dict[str,
                     "artist": r["name"], "artist_mbid": r["mbid"], "title": g["title"], "release_group_mbid": g["mbid"],
                     "type": g["primary_type"], "release_date": str(d) if d else None, "upcoming": upcoming,
                 }, user_id=person, key=f"new_release:{g['mbid']}:{person}")
+            n_fans = len(fans.get(norm(r["name"]), []))
+            if n_fans:  # the admin's feed in Mono: once per release, never who
+                await notify.admin(
+                    conn, "music.new_release", "music", f"{g['title']} by {r['name']}",
+                    f"{'Coming' if upcoming else 'Out'}{f' {d}' if d else ''}. {n_fans} {'person' if n_fans == 1 else 'people'} in the household like {r['name']}.",
+                    extra={"artist": r["name"], "artist_mbid": r["mbid"], "release_group_mbid": g["mbid"], "upcoming": upcoming},
+                    key=f"admin:new_release:{g['mbid']}",
+                )
         await conn.execute("UPDATE catalog_artist SET releases_checked_at = now() WHERE mbid = $1", r["mbid"])
     return new
 
@@ -376,6 +384,12 @@ async def add_wanted(conn, user_id: uuid.UUID | None, *, kind: str, artist_name:
             "id": str(row["id"]), "kind": kind, "mbid": mbid, "artist_mbid": artist_mbid, "artist": artist_name, "title": title,
             "origin": origin, "reason": reason, "score": score,
         }, user_id=user_id, key=f"wanted:{row['id']}")
+        await notify.admin(
+            conn, "music.wanted", "music", f"Wanted: {f'{title} by ' if title else ''}{artist_name}",
+            reason or "On the household's wanted list for your download tool.",
+            extra={"wanted_id": str(row["id"]), "kind": kind, "mbid": mbid, "artist": artist_name, "title": title, "origin": origin},
+            key=f"admin:wanted:{dedupe_key}",
+        )
     return row is not None
 
 

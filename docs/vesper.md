@@ -95,3 +95,85 @@ top films and series, genres, when they watch. `kids=true` leaves out the time s
 start in the next hours: films in progress, the next episode of series they follow, a few top
 picks, each with a likelihood from their own weekday and hour pattern. Vesper moves these to
 fast storage and offers them as smart downloads on phones.
+
+## Pairing and the admin feed
+
+### Pairing (QR)
+
+`./muse pair vesper` / `./muse pair mono` (or the end of the web setup) shows a one-time code and a QR
+code for the *server* of Vesper or Mono (they talk to Muse, their apps talk to them). The QR holds
+
+```
+muse://pair?u=<query API base URL>&c=<one-time code>&fp=<SHA-256 of Muse's root certificate, hex>
+```
+
+The admin screen (the app scans the QR and hands it to its server, or the admin types the code
+and Muse's address):
+
+1. reads `u`, `c` and `fp`;
+2. with `fp`: downloads Muse's root certificate from `https://<host>:<port>/muse-ca.crt` (public;
+   Caddy doesn't send its root in the TLS chain), checks that its SHA-256 equals `fp`, and from
+   then on trusts exactly that root for Muse's URLs. Only then does it send the code. Without
+   `fp` (local mode, plain http on the same machine) normal rules apply;
+3. `POST {u}/v1/pair` with `{"code": c, "device": "<device name>"}`. No authentication: the code
+   is the secret. It works once and expires (15 minutes, a day for `./muse invite`).
+
+The answer is the configuration to store (in the platform's secure storage):
+
+| field | for |
+|---|---|
+| `purpose` | `vesper`, `mono` or `admin` |
+| `server` | a display name |
+| `reco_url`, `ingest_url`, `query_url` | the three APIs |
+| `read_key` | Vesper: recommendation API reads (`VESPER_MUSE_READ_KEY`) |
+| `ingest_key` | Vesper: Muse's `jellyfin` adapter key, for events and per-profile query API calls (`VESPER_MUSE_INGEST_KEY`) |
+| `answer_key` | an app that sends answers itself (not needed by vesper-server) |
+| `admin_token` | `Authorization: Bearer` for `/v1/admin/*` on the query API (absent for `./muse invite`) |
+| `user_token`, `user_id` | only for an invite bound to one person |
+| `mono_api_key`, `mono_read_key`, `mono_stream_token` | Mono's settings (`MONO_MUSE_API_KEY`, `MONO_MUSE_READ_KEY`, `MONO_MUSE_STREAM_TOKEN`) |
+| `ca_pem`, `ca_sha256` | Muse's root certificate, to trust for all three URLs |
+
+A 404 means the code is unknown, used or expired.
+
+### The admin feed
+
+With `admin_token`, the query API serves the admin's notifications. Vesper shows
+`domain=video` (the curator), Mono shows `domain=music` (new releases, the wanted list);
+`system` entries come with both.
+
+| | |
+|---|---|
+| `GET /v1/admin/notifications?domain=video&unread=false&limit=50&before=<iso>` | `{unread, notifications: [...]}` newest first |
+| `POST /v1/admin/notifications/{id}/read` | mark one read |
+| `POST /v1/admin/notifications/read-all?domain=video` | |
+| `POST /v1/admin/notifications/{id}/actions/{keep\|remove_now}` | perform an action the notification offers |
+
+A notification:
+
+```json
+{"id": "…", "created_at": "2026-11-27T09:00:00+00:00", "domain": "video", "kind": "curator.soon_gone",
+ "severity": "action", "title": "The Matrix (1999) leaves in 48 hours",
+ "body": "Over budget and nobody is likely to watch it. Watching it, putting it on a list or keeping it saves it.",
+ "actions": ["keep", "remove_now"], "item": {"type": "movie", "tmdb_id": "603"}, "read": false, "resolved": false}
+```
+
+Kinds: `curator.added`, `curator.soon_gone`, `curator.saved`, `curator.removed`,
+`curator.season_added`, `curator.disk_low`, `curator.arr_error`, `music.new_release`,
+`music.wanted`. `severity` is `info`, `action` (wants a decision) or `warning`. `actions` is
+empty once handled. Use `item.tmdb_id` for artwork.
+
+Poll `GET /v1/admin/notifications?unread=true&limit=1` (the `unread` count) for a badge; a
+household webhook on the `admin` event (`POST /v1/webhooks`) pushes the same JSON to a URL.
+
+### The curator
+
+| | |
+|---|---|
+| `GET /v1/admin/curator` | `paused`, `budget_bytes`, `usage_bytes`, `free_bytes`, `last_cycle_at`, `counts`, `soon_gone` (with `expires_at`), `items`, `activity` |
+| `PATCH /v1/admin/curator` | `{"paused": true}` / `{"budget_gb": 500}` |
+| `POST /v1/admin/curator/run` | a full cycle within a minute |
+| `POST /v1/admin/curator/items/{movie\|series}/{tmdb_id}/keep` | never remove (`DELETE` undoes) |
+| `POST /v1/admin/curator/items/{movie\|series}/{tmdb_id}/remove-now` | remove within a minute or two |
+
+Lists count too: an `added_watchlist` event from Vesper protects a title until that person
+watches it or sends `removed` for it.

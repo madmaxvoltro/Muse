@@ -294,6 +294,13 @@ services:
       SONARR_ROOT_FOLDER: ${SONARR_ROOT_FOLDER:-}
       MUSE_CURATOR_ADD_SCORE: ${MUSE_CURATOR_ADD_SCORE:-0.55}
       MUSE_CURATOR_REMOVE_SCORE: ${MUSE_CURATOR_REMOVE_SCORE:-0.10}
+      MUSE_CURATOR_BUDGET_GB: ${MUSE_CURATOR_BUDGET_GB:-300}
+      MUSE_CURATOR_MIN_FREE_GB: ${MUSE_CURATOR_MIN_FREE_GB:-50}
+      MUSE_CURATOR_DAILY_CAP: ${MUSE_CURATOR_DAILY_CAP:-10}
+      MUSE_CURATOR_GRACE_HOURS: ${MUSE_CURATOR_GRACE_HOURS:-48}
+      MUSE_CURATOR_RECENT_DAYS: ${MUSE_CURATOR_RECENT_DAYS:-30}
+      MUSE_CURATOR_TAG: ${MUSE_CURATOR_TAG:-muse}
+      MUSE_CURATOR_SERIES_START: ${MUSE_CURATOR_SERIES_START:-first_season}
     secrets: [muse_master_key, db_muse_curator, qdrant_read_key, tmdb_api_key, radarr_api_key, sonarr_api_key, embed_api_key]
     volumes: [hf_cache:/cache/hf]
     depends_on:
@@ -409,7 +416,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     ports: ["${MUSE_TLS_BIND:-127.0.0.1}:${MUSE_TLS_PORT:-8443}:8443"]
-    depends_on: [recommendation-api, ingestion-api]
+    depends_on: [recommendation-api, ingestion-api, query-api]
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
     networks: [public]
 

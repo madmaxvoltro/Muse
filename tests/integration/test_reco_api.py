@@ -63,15 +63,19 @@ def test_recommendations_questions_and_feedback(db_dsn):
     assert out["cold"][0] and out["cold"][1]
 
 
-def test_http_routes(db_dsn):
+def test_http_routes(db_dsn, monkeypatch):
     use_service("recommendation-api")
     import httpx
     from app import main
     from app.engine import Engine
 
+    async def _ret(v):
+        return v
+
     async def go():
         pool, qdrant, _ = await run_worker(db_dsn)
         main._engine = Engine(pool, qdrant)
+        monkeypatch.setattr(main, "get_pool", lambda: _ret(pool))  # /prefetch reads through the API's own pool
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.get(f"/recommendations/{USER_A}", params={"item_type": "movie", "limit": 5})
