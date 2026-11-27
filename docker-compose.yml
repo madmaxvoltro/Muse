@@ -416,7 +416,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     ports: ["${MUSE_TLS_BIND:-127.0.0.1}:${MUSE_TLS_PORT:-8443}:8443"]
-    depends_on: [recommendation-api, ingestion-api]
+    depends_on: [recommendation-api, ingestion-api, query-api]
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
     networks: [public]
 

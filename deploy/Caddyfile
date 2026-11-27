@@ -27,6 +27,13 @@ https://{$MUSE_TLS_HOST}:8443 {
 		}
 		reverse_proxy ingestion-api:8000
 	}
+	# Query API: the admin feed and curator controls (Vesper, Mono), QR pairing (/query/v1/pair).
+	handle_path /query/* {
+		request_body {
+			max_size 64MB
+		}
+		reverse_proxy query-api:8002
+	}
 	handle /mcp* {
 		reverse_proxy mcp-server:8002
 	}
