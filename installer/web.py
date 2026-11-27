@@ -220,7 +220,13 @@ def serve(a, tool=None) -> None:
     if tool is None:
         tool = sys.modules.get("__main__")
     state = State(tool)
-    phone = sys.stdin.isatty() and tool.yes("also open it on your phone or another computer (listens on your network while setup runs)?", default=True)
+    import os
+
+    forced = os.environ.get("MUSE_SETUP_PHONE")
+    if forced is not None:
+        phone = forced not in ("0", "false", "no")
+    else:
+        phone = sys.stdin.isatty() and tool.yes("also open it on your phone or another computer (listens on your network while setup runs)?", default=True)
     host = tool.lan_ip() if phone else "127.0.0.1"
     port = getattr(a, "web_port", 8790) or 8790
     httpd = http.server.ThreadingHTTPServer((host, port), make_handler(state))
@@ -235,6 +241,8 @@ def serve(a, tool=None) -> None:
         else:
             tool.warn("openssl isn't installed, so the page is plain HTTP on your network: only use it on a network you trust")
     url = f"{scheme}://{host}:{port}/?t={state.token}"
+    if os.environ.get("MUSE_SETUP_URL_FILE"):  # for the Proxmox VM script and other automation
+        Path(os.environ["MUSE_SETUP_URL_FILE"]).write_text(url + "\n")
     tool.step("Muse setup in your browser")
     print(f"    {url}")
     if phone:
